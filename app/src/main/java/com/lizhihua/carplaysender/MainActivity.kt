@@ -76,12 +76,14 @@ class MainActivity : AppCompatActivity() {
                             log = { line -> log(line) },
                             context = applicationContext,
                         )
-                        // 第一阶段：保持 BT 在位直接配对（协议上正确的形态）
-                        var keys = newClient().runPairing()
+                        // 第一阶段：保持 BT 在位直接配对 + SETUP（协议上正确的形态）
+                        var client = newClient()
+                        var keys = client.runPairing()
                         if (keys == null) {
                             // 第二阶段：复现「BT 控制已结束」状态再试一次
                             bluetoothServer.detachCurrentSession()
-                            keys = newClient().runPairing()
+                            client = newClient()
+                            keys = client.runPairing()
                         }
                         if (keys != null) {
                             log(
@@ -89,6 +91,25 @@ class MainActivity : AppCompatActivity() {
                                     keys.phoneWriteKey.joinToString("") { "%02x".format(it) }.take(16) + "… " +
                                     "readKey=" + keys.phoneReadKey.joinToString("") { "%02x".format(it) }.take(16) + "…",
                             )
+                            val setup = client.runSetup()
+                            if (setup != null) {
+                                client.connectEventChannel(keys.sharedSecret, setup)
+                                val screen = client.runScreenStream(keys.sharedSecret)
+                                if (screen != null) {
+                                    client.record()
+                                    val host = endpoint.ipAddresses.firstOrNull { it.contains('.') }
+                                    if (host != null) {
+                                        com.lizhihua.carplaysender.video.VideoSender(
+                                            host = host,
+                                            dataPort = screen.dataPort,
+                                            streamKey = screen.streamKey,
+                                            width = 1080,
+                                            height = 2320,
+                                            log = { line -> log(line) },
+                                        ).start()
+                                    }
+                                }
+                            }
                         }
                     }, "airplay-pairing").start()
                 }

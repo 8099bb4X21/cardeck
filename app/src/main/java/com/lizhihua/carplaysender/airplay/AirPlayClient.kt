@@ -24,6 +24,10 @@ class AirPlayClient(
     private var socket: Socket? = null
     private var cSeq = 0
 
+    /** pair-verify 之后启用：所有后续 RTSP 报文整体加密封装。 */
+    private var cipher: ControlCipher? = null
+    private var cipherPending = ByteArray(0)
+
     // ---- 对外流程 ----
 
     /**
@@ -54,7 +58,11 @@ class AirPlayClient(
             try {
                 PairSetupClient(identity, transport, log).run()
                 val receiverStaticKey = endpoint.publicKey?.let(::hexToBytes)
-                return PairVerifyClient(identity, transport, log).run(receiverStaticKey)
+                val keys = PairVerifyClient(identity, transport, log).run(receiverStaticKey)
+                // pair-verify 之后双方立即启用加密（接收端在 M4 应答后开启）
+                cipher = ControlCipher(keys.phoneReadKey, keys.phoneWriteKey)
+                log("AIRPLAY: 控制通道加密已启用（后续 RTSP 报文全部加密）")
+                return keys
             } catch (error: IOException) {
                 log("AIRPLAY: 配对第 $attempt 次尝试失败 - ${error.message}")
                 Thread.sleep(500)
@@ -88,6 +96,223 @@ class AirPlayClient(
         runCatching { socket?.close() }
         socket = null
         leftover = ByteArray(0)
+        cipherPending = ByteArray(0)
+    }
+
+    /** SETUP #1：发送会话信息，接收 eventPort/timingPort/enabledFeatures。 */
+    fun runSetup(): SetupInfo? {
+        val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
+        val body = BinaryPlist.encode(
+            linkedMapOf(
+                "deviceID" to "02:00:00:00:00:00",
+                "name" to "iPhone",
+                "model" to "iPhone14,2",
+                "sourceVersion" to (endpoint.sourceVersion ?: "950.7.1"),
+                "timingPort" to 0L,
+                "features" to listOf("videoPlayback"),
+            ),
+        )
+        val (statusLine, responseBody) = try {
+            request(
+                "SETUP",
+                "rtsp://$host:${endpoint.airPlayPort}/",
+                body,
+                contentType = "application/x-apple-binary-plist",
+            )
+        } catch (error: IOException) {
+            log("AIRPLAY: SETUP 失败 - ${error.message}")
+            return null
+        }
+        if (!statusLine.contains("200")) {
+            log("AIRPLAY: SETUP 应答 [$statusLine]")
+            return null
+        }
+        val root = try {
+            BinaryPlist.parse(responseBody)
+        } catch (error: IllegalArgumentException) {
+            log("AIRPLAY: SETUP 应答 plist 解析失败（${responseBody.size} 字节）")
+            null
+        } as? Map<*, *>
+        if (root == null) {
+            log("AIRPLAY: SETUP 应答不是字典")
+            return null
+        }
+        val info = SetupInfo(
+            eventPort = portOf(root["eventPort"]),
+            timingPort = portOf(root["timingPort"]),
+            keepAlivePort = root["keepAlivePort"]?.let(::portOf)?.takeIf { it != 0 },
+            enabledFeatures = (root["enabledFeatures"] as? List<*>)?.map { it.toString() }.orEmpty(),
+        )
+        log(
+            "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
+                "keepAlive=${info.keepAlivePort ?: "无"} features=${info.enabledFeatures}",
+        )
+        return info
+    }
+
+    class SetupInfo(
+        val eventPort: Int,
+        val timingPort: Int,
+        val keepAlivePort: Int?,
+        val enabledFeatures: List<String>,
+    )
+
+    /** 屏幕流协商结果。 */
+    class ScreenStreamInfo(
+        val streamConnectionId: Long,
+        val dataPort: Int,
+        val streamKey: ByteArray,
+    )
+
+    /** plist 端口是 u16 但以 2 字节有符号整数编码（>32767 读出为负），按位掩出真实值。 */
+    private fun portOf(value: Any?): Int = ((value as? Long) ?: 0L).toInt() and 0xFFFF
+
+    private companion object {
+        /** 主屏视频流类型（对照接收端 STREAM_TYPE_MAIN_SCREEN；100 是音频、130 是数据/iAP 隧道）。 */
+        const val SCREEN_STREAM_TYPE = 110L
+    }
+
+    /**
+     * SETUP #2：协商主屏视频流（type 100）。streamConnectionID 由客户端指定，
+     * 两端各自用 HKDF(共享密钥, "DataStream-Salt<id>", "DataStream-Output-Encryption-Key")
+     * 推导同一把流密钥；接收端开 TCP 数据端口并在应答里返回。
+     */
+    fun runScreenStream(sharedSecret: ByteArray): ScreenStreamInfo? {
+        val connectionId = System.currentTimeMillis() % 100_000L + 1L
+        val body = BinaryPlist.encode(
+            linkedMapOf(
+                "streams" to listOf(
+                    linkedMapOf<String, Any?>(
+                        "type" to SCREEN_STREAM_TYPE, // 110 = 主屏（100 是音频，DiPlay 会开 UDP 端口）
+                        "streamConnectionID" to connectionId,
+                        "uuid" to java.util.UUID.randomUUID().toString(),
+                    ),
+                ),
+            ),
+        )
+        val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
+        val (statusLine, responseBody) = try {
+            request(
+                "SETUP",
+                "rtsp://$host:${endpoint.airPlayPort}/",
+                body,
+                contentType = "application/x-apple-binary-plist",
+            )
+        } catch (error: IOException) {
+            log("AIRPLAY: 流协商失败 - ${error.message}")
+            return null
+        }
+        if (!statusLine.contains("200")) {
+            log("AIRPLAY: 流协商应答 [$statusLine]")
+            return null
+        }
+        val root = try {
+            BinaryPlist.parse(responseBody) as? Map<*, *>
+        } catch (error: IllegalArgumentException) {
+            null
+        } ?: run {
+            log("AIRPLAY: 流协商应答解析失败")
+            return null
+        }
+        val streams = root["streams"] as? List<*> ?: run {
+            log("AIRPLAY: 流协商应答缺少 streams")
+            return null
+        }
+        val screen = streams.firstOrNull() as? Map<*, *>
+        val dataPort = portOf(screen?.get("dataPort"))
+        if (screen == null || dataPort == 0) {
+            log("AIRPLAY: 主屏流被拒绝（streams=$streams）")
+            return null
+        }
+        val streamKey = AirPlayCrypto.hkdfSha512(
+            sharedSecret,
+            "DataStream-Salt$connectionId".toByteArray(Charsets.US_ASCII),
+            "DataStream-Output-Encryption-Key".toByteArray(Charsets.US_ASCII),
+        )
+        log(
+            "AIRPLAY: ✓ 主屏流协商成功 dataPort=$dataPort connId=$connectionId " +
+                "streamKey=${streamKey.joinToString("") { "%02x".format(it) }.take(16)}…",
+        )
+        return ScreenStreamInfo(connectionId, dataPort, streamKey)
+    }
+
+    /** RECORD：激活会话（接收端 onSessionActive）。 */
+    fun record(): Boolean = try {
+        val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
+        val (statusLine, _) = request(
+            "RECORD",
+            "rtsp://$host:${endpoint.airPlayPort}/",
+            BinaryPlist.encode(linkedMapOf<String, Any?>()),
+            contentType = "application/x-apple-binary-plist",
+        )
+        val ok = statusLine.contains("200")
+        log(if (ok) "AIRPLAY: ✓ RECORD 完成——会话已激活" else "AIRPLAY: RECORD 应答 [$statusLine]")
+        ok
+    } catch (error: IOException) {
+        log("AIRPLAY: RECORD 失败 - ${error.message}")
+        false
+    }
+
+    /**
+     * 连接事件通道（接收端在 SETUP 应答的 eventPort 上等我们）。事件通道用
+     * Events 密钥加密（注意方向标签与直觉相反：接收端用 Events-Read 读我们的数据）。
+     * 连接后启动读取线程，把收到的解密明文按行打日志（触摸 HID 事件将在此出现）。
+     */
+    fun connectEventChannel(sharedSecret: ByteArray, setup: SetupInfo) {
+        if (setup.eventPort == 0) {
+            log("EVENT: SETUP 未提供 eventPort，跳过")
+            return
+        }
+        val host = ipv4Host() ?: return
+        try {
+            val socket = Socket()
+            socket.connect(InetSocketAddress(host, setup.eventPort), 5_000)
+            socket.tcpNoDelay = true
+            socket.soTimeout = 15_000
+            log("EVENT: ✓ 已连接事件通道 $host:${setup.eventPort}")
+            val phoneWriteKey = AirPlayCrypto.hkdfSha512(
+                sharedSecret,
+                "Events-Salt".toByteArray(),
+                "Events-Read-Encryption-Key".toByteArray(),
+            )
+            val phoneReadKey = AirPlayCrypto.hkdfSha512(
+                sharedSecret,
+                "Events-Salt".toByteArray(),
+                "Events-Write-Encryption-Key".toByteArray(),
+            )
+            val cipher = ControlCipher(phoneReadKey, phoneWriteKey)
+            Thread({
+                val input = socket.getInputStream()
+                var pending = ByteArray(0)
+                val buffer = ByteArray(8192)
+                try {
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) {
+                            log("EVENT: 通道关闭（EOF）")
+                            break
+                        }
+                        pending += buffer.copyOf(count)
+                        val decrypted = cipher.decrypt(pending)
+                        pending = decrypted.rest
+                        if (decrypted.data.isNotEmpty()) {
+                            log(
+                                "EVENT: 收到 ${decrypted.data.size} 字节：" +
+                                    decrypted.data.toString(Charsets.ISO_8859_1)
+                                        .lineSequence().firstOrNull { it.isNotBlank() }.orEmpty(),
+                            )
+                        }
+                    }
+                } catch (error: IOException) {
+                    log("EVENT: 读取结束 - ${error.message}")
+                }
+            }, "event-reader").apply {
+                isDaemon = true
+                start()
+            }
+        } catch (error: IOException) {
+            log("EVENT: 连接失败 - ${error.message}")
+        }
     }
 
     /** 跨请求残留：响应头与下一个请求可能同段到达。 */
@@ -127,48 +352,69 @@ class AirPlayClient(
         path: String,
         body: ByteArray,
         timeoutMillis: Int = 10_000,
+        contentType: String = "application/octet-stream",
     ): Pair<String, ByteArray> {
         val client = socket ?: throw IOException("未连接")
         client.soTimeout = timeoutMillis
-        val output = client.getOutputStream()
         val head = "$method $path RTSP/1.0\r\n" +
             "CSeq: ${++cSeq}\r\n" +
             "User-Agent: AirPlay/${endpoint.sourceVersion ?: "950.7.1"}\r\n" +
-            "Content-Type: application/octet-stream\r\n" +
+            "Content-Type: $contentType\r\n" +
             "Content-Length: ${body.size}\r\n" +
             "\r\n"
-        output.write(head.toByteArray(Charsets.US_ASCII))
-        if (body.isNotEmpty()) output.write(body)
+        val plaintext = head.toByteArray(Charsets.US_ASCII) + body
+        val output = client.getOutputStream()
+        output.write(cipher?.encrypt(plaintext) ?: plaintext)
         output.flush()
 
         val input = client.getInputStream()
-        // 关键：响应头和 body（甚至下一个响应）常在同一次 read 里到达——
-        // 必须先把已缓冲字节算进 Content-Length，只从流里补差额，否则会永远等不到 body
-        var buffer = leftover
+        val encryption = cipher
+        if (encryption == null) {
+            var buffer = leftover
+            leftover = ByteArray(0)
+            while (true) {
+                val message = parseCompleteMessage(buffer)
+                if (message != null) return message
+                val chunk = ByteArray(4096)
+                val count = input.read(chunk)
+                if (count < 0) throw IOException("响应断流（已缓冲 ${buffer.size} 字节）")
+                buffer += chunk.copyOf(count)
+            }
+        }
+        // 加密路径：读密文帧 → 解密 → 明文里找完整 RTSP 报文
+        var pending = cipherPending
+        cipherPending = ByteArray(0)
+        var plaintextAcc = leftover
         leftover = ByteArray(0)
-        val separator = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
-        var separatorIndex = indexOfSeparator(buffer, separator)
-        while (separatorIndex < 0) {
+        while (true) {
+            val message = parseCompleteMessage(plaintextAcc)
+            if (message != null) return message
             val chunk = ByteArray(4096)
             val count = input.read(chunk)
-            if (count < 0) throw IOException("响应在头之前断流（已缓冲 ${buffer.size} 字节）")
-            buffer += chunk.copyOf(count)
-            separatorIndex = indexOfSeparator(buffer, separator)
+            if (count < 0) throw IOException("加密响应断流（pending=${pending.size}）")
+            pending += chunk.copyOf(count)
+            val decrypted = encryption.decrypt(pending)
+            pending = decrypted.rest
+            plaintextAcc += decrypted.data
         }
+    }
+
+    /** 完整 RTSP 报文（头 + Content-Length body）才返回；残留部分写入 leftover。 */
+    private fun parseCompleteMessage(buffer: ByteArray): Pair<String, ByteArray>? {
+        val separator = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
+        val separatorIndex = indexOfSeparator(buffer, separator)
+        if (separatorIndex < 0) return null
         val headText = String(buffer, 0, separatorIndex, Charsets.ISO_8859_1)
-        val statusLine = headText.lineSequence().firstOrNull() ?: "(空)"
         val contentLength = Regex("Content-Length:\\s*(\\d+)", RegexOption.IGNORE_CASE)
             .find(headText)?.groupValues?.get(1)?.toIntOrNull() ?: 0
         val bodyStart = separatorIndex + separator.size
-        while (buffer.size - bodyStart < contentLength) {
-            val chunk = ByteArray(4096)
-            val count = input.read(chunk)
-            if (count < 0) throw IOException("body 在 ${buffer.size - bodyStart}/$contentLength 处断流")
-            buffer += chunk.copyOf(count)
-        }
+        if (buffer.size - bodyStart < contentLength) return null
+        val statusLine = headText.lineSequence().firstOrNull() ?: "(空)"
         val responseBody = buffer.copyOfRange(bodyStart, bodyStart + contentLength)
-        if (buffer.size > bodyStart + contentLength) {
-            leftover = buffer.copyOfRange(bodyStart + contentLength, buffer.size)
+        leftover = if (buffer.size > bodyStart + contentLength) {
+            buffer.copyOfRange(bodyStart + contentLength, buffer.size)
+        } else {
+            ByteArray(0)
         }
         return statusLine to responseBody
     }

@@ -19,7 +19,7 @@
 |---|---|---|---|
 | Phase 0 | 测试台 + 网络层 demo（本仓库） | 两台手机 mDNS 互发现 | ✅ 已验收（DiPlay 测试台） |
 | Phase 1 | iAP2 发送端会话（链路状态机 + 0x1D00/0x5702/0x4300） | 接收端日志显示「iPhone 接入」 | ✅ 已验收：完整走通至 0x4301，拿到热点凭据与 AirPlay 端点 |
-| Phase 2 | AirPlay 主会话（PairVerify + H.264 编码 + HID 回传） | 备用机显示本机画面并可触摸 | 🔶 配对/加密通道已通，SETUP/推流进行中 |
+| Phase 2 | AirPlay 主会话（PairVerify + H.264 编码 + HID 回传） | 备用机显示本机画面并可触摸 | ✅ 已验收（2026-10-08 23:17）：30fps 推流+渲染、触摸事件回传打通 |
 | Phase 3 | 真车（奥迪 MIB3）验证 | 车机点亮 | ⏳ 风险区 |
 | 兜底 | 买 Tbox 安卓盒子，把同一套自绘 UI 装进盒子 | — | 失败时启用 |
 
@@ -38,6 +38,12 @@ DiPlay 侧 logcat 确认：5 个 POST 全部处理，随即 `airplay control enc
 最终真凶是**客户端读缓冲 bug**——响应头和 body 在同一次 read 到达，`readExactly` 却去
 流里等已消费的字节。**在下结论「对端不理我」之前，先用对端日志/抓包验证字节是否到达、
 自己的读取路径是否正确。**
+
+**Phase 2 全链路验收（2026-10-08 23:17）**：控制面（蓝牙 iAP2 → pair-setup/verify →
+加密 RTSP → SETUP → 事件通道 → 流协商 → RECORD）+ 数据面（MediaCodec H.264 →
+128 字节头+ChaCha20 帧封装 → TCP 推流）。接收端实测 rx=shown=29.6fps、decode p50=6ms、
+touch2frame 18ms、recoveries=0。剩余：触摸事件消费（hidSendReport 解析→UI 命中）、
+正式车机桌面 UI 替换测试卡、音频流、真车（Phase 3）。
 
 ## 测试台搭建（Phase 0 使用说明）
 

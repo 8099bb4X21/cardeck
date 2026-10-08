@@ -1,11 +1,142 @@
 package com.lizhihua.carplaysender.airplay
 
+import java.io.ByteArrayOutputStream
+
 /**
  * Apple 二进制 plist（bplist00）最小解析器：覆盖 /info 能力清单用到的类型
  * （null/bool/int/real/data/ASCII/UTF-16 字符串/UID/数组/字典）。
  * 返回值映射：Map<String,Any?> / List<Any?> / String / Long / Double / Boolean / ByteArray / null。
  */
 object BinaryPlist {
+
+    // ---- 编码：Map<String,Any?>/List/String/Long/Int/Boolean/Double/ByteArray ----
+
+    fun encode(value: Any?): ByteArray {
+        val objects = ArrayList<ByteArray>()
+        val totalObjects = countObjects(value)
+        val rootRef = encodeObject(value, objects, totalObjects)
+        var offset = 8
+        val offsets = IntArray(objects.size)
+        objects.forEachIndexed { index, bytes ->
+            offsets[index] = offset
+            offset += bytes.size
+        }
+        val offsetIntSize = intBytes(offset)
+        val refSize = intBytes(totalObjects)
+        val tableSize = objects.size * offsetIntSize
+        val tableOffset = offset
+
+        val out = ByteArrayOutputStream(offset + tableSize + 32)
+        out.write("bplist00".toByteArray(Charsets.US_ASCII))
+        objects.forEach(out::write)
+        offsets.forEach { writeUint(out, it.toLong(), offsetIntSize) }
+        // trailer: unused(6) offsetIntSize(1) refSize(1) numObjects(8) topObject(8) offsetTableOffset(8)
+        out.write(ByteArray(6))
+        out.write(offsetIntSize)
+        out.write(refSize)
+        writeUint(out, objects.size.toLong(), 8)
+        writeUint(out, rootRef.toLong(), 8)
+        writeUint(out, tableOffset.toLong(), 8)
+        return out.toByteArray()
+    }
+
+    /** 预遍历：引用宽度必须按最终对象总数（含容器自身）确定。 */
+    private fun countObjects(value: Any?): Int = when (value) {
+        is List<*> -> 1 + value.sumOf { countObjects(it) }
+        is Map<*, *> -> 1 + value.keys.sumOf { countObjects(it) } + value.values.sumOf { countObjects(it) }
+        else -> 1
+    }
+
+    private fun encodeObject(value: Any?, objects: ArrayList<ByteArray>, total: Int): Int {
+        val bytes = when (value) {
+            null -> byteArrayOf(0x00)
+            is Boolean -> byteArrayOf(if (value) 0x09 else 0x08)
+            is Int -> encodeInt(value.toLong())
+            is Long -> encodeInt(value)
+            is Double -> byteArrayOf(0x23) + value.toRawBits().toBytes(8)
+            is ByteArray -> withLength(0x40, value)
+            is String -> encodeString(value)
+            is List<*> -> {
+                val refs = value.map { encodeObject(it, objects, total) }
+                withLength(0xA0, refsToBytes(refs, total), refs.size)
+            }
+
+            is Map<*, *> -> {
+                @Suppress("UNCHECKED_CAST")
+                val map = value as Map<String, Any?>
+                val keyRefs = map.keys.map { encodeObject(it, objects, total) }
+                val valueRefs = map.values.map { encodeObject(it, objects, total) }
+                withLength(0xD0, refsToBytes(keyRefs + valueRefs, total), map.size)
+            }
+
+            else -> throw IllegalArgumentException("不支持的 plist 类型 ${value.javaClass.simpleName}")
+        }
+        objects += bytes
+        return objects.size - 1
+    }
+
+    private fun encodeString(value: String): ByteArray {
+        val ascii = value.toByteArray(Charsets.US_ASCII)
+        return if (value.all { it.code < 0x80 } && ascii.decodeToString() == value) {
+            withLength(0x50, ascii)
+        } else {
+            withLength(0x60, value.toByteArray(Charsets.UTF_16BE), value.length)
+        }
+    }
+
+    private fun encodeInt(value: Long): ByteArray {
+        val size = when {
+            value >= 0 && value <= 0xFF -> 1
+            value >= 0 && value <= 0xFFFF -> 2
+            value >= 0 && value <= 0xFFFFFFFFL -> 4
+            else -> 8
+        }
+        return byteArrayOf((0x10 or (log2(size))).toByte()) + value.toBytes(size)
+    }
+
+    private fun withLength(marker: Int, payload: ByteArray, count: Int = payload.size): ByteArray {
+        if (count < 15) return byteArrayOf((marker or count).toByte()) + payload
+        val lengthBytes = encodeInt(count.toLong())
+        return byteArrayOf((marker or 0x0F).toByte()) + lengthBytes + payload
+    }
+
+    private fun refsToBytes(refs: List<Int>, objectCount: Int): ByteArray {
+        val width = intBytes(objectCount)
+        val out = ByteArray(refs.size * width)
+        refs.forEachIndexed { index, ref ->
+            val value = ref.toLong()
+            for (byte in 0 until width) {
+                out[index * width + byte] = (value ushr (8 * (width - 1 - byte))).toByte()
+            }
+        }
+        return out
+    }
+
+    private fun Long.toBytes(size: Int): ByteArray = writeBytes(this, size)
+
+    private fun writeBytes(value: Long, size: Int): ByteArray = ByteArray(size) { index ->
+        (value ushr (8 * (size - 1 - index))).toByte()
+    }
+
+    private fun writeUint(out: ByteArrayOutputStream, value: Long, size: Int) {
+        out.write(writeBytes(value, size))
+    }
+
+    private fun intBytes(value: Int): Int = when {
+        value < 0x100 -> 1
+        value < 0x10000 -> 2
+        value < 0x100000000 -> 4
+        else -> 8
+    }
+
+    private fun log2(size: Int): Int = when (size) {
+        1 -> 0
+        2 -> 1
+        4 -> 2
+        else -> 3
+    }
+
+    // ---- 解析 ----
 
     fun parse(bytes: ByteArray): Any? {
         require(bytes.size >= 40) { "plist 太短（${bytes.size} 字节）" }

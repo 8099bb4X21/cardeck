@@ -75,18 +75,18 @@ object AirPlayCrypto {
         return output
     }
 
-    fun chachaSeal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray): ByteArray {
+    fun chachaSeal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray = ByteArray(0)): ByteArray {
         val cipher = ChaCha20Poly1305()
-        cipher.init(true, AEADParameters(KeyParameter(key), MAC_BITS, nonce))
+        cipher.init(true, AEADParameters(KeyParameter(key), MAC_BITS, nonce, aad))
         val output = ByteArray(cipher.getOutputSize(plaintext.size))
         val length = cipher.processBytes(plaintext, 0, plaintext.size, output, 0)
         cipher.doFinal(output, length)
         return output
     }
 
-    fun chachaOpen(key: ByteArray, nonce: ByteArray, ciphertextAndTag: ByteArray): ByteArray {
+    fun chachaOpen(key: ByteArray, nonce: ByteArray, ciphertextAndTag: ByteArray, aad: ByteArray = ByteArray(0)): ByteArray {
         val cipher = ChaCha20Poly1305()
-        cipher.init(false, AEADParameters(KeyParameter(key), MAC_BITS, nonce))
+        cipher.init(false, AEADParameters(KeyParameter(key), MAC_BITS, nonce, aad))
         val output = ByteArray(cipher.getOutputSize(ciphertextAndTag.size))
         val processed = cipher.processBytes(ciphertextAndTag, 0, ciphertextAndTag.size, output, 0)
         val finalized = cipher.doFinal(output, processed)

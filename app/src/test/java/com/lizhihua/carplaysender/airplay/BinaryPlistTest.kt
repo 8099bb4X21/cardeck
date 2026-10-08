@@ -3,6 +3,7 @@ package com.lizhihua.carplaysender.airplay
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Base64
@@ -52,6 +53,35 @@ class BinaryPlistTest {
     @Test(expected = IllegalArgumentException::class)
     fun rejectsNonPlistInput() {
         BinaryPlist.parse("not a plist at all".toByteArray())
+    }
+
+    @Test
+    fun encodeDecodeRoundTrip() {
+        val original = linkedMapOf<String, Any?>(
+            "deviceID" to "02:00:00:00:00:00",
+            "timingPort" to 0L,
+            "features" to listOf("videoPlayback", "iAPChannel"),
+            "flag" to true,
+            "missing" to null,
+            "blob" to byteArrayOf(1, 2, 3),
+            "ratio" to 3.5,
+        )
+        val decoded = BinaryPlist.parse(BinaryPlist.encode(original)) as Map<*, *>
+        assertEquals("02:00:00:00:00:00", decoded["deviceID"])
+        assertEquals(0L, decoded["timingPort"])
+        assertEquals(listOf("videoPlayback", "iAPChannel"), decoded["features"])
+        assertEquals(true, decoded["flag"])
+        assertNull(decoded["missing"])
+        assertArrayEquals(byteArrayOf(1, 2, 3), decoded["blob"] as ByteArray)
+        assertEquals(3.5, decoded["ratio"])
+    }
+
+    @Test
+    fun encodeLongAndUnicodeStrings() {
+        val longAscii = "x".repeat(300)
+        assertEquals(longAscii, BinaryPlist.parse(BinaryPlist.encode(longAscii)))
+        val unicode = "奥迪车机 CarPlay 123"
+        assertEquals(unicode, BinaryPlist.parse(BinaryPlist.encode(unicode)))
     }
 
     @Test
