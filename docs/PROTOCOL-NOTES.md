@@ -33,24 +33,29 @@ DiPlay 从 Carlinkit 固件提取的证书对发送端无用（那是接收端�
 └────────────────────────────────────────────────────────┘
 ```
 
-## 3. 链路层（✅ carplay-wifi-extractor `example/iap2/link_layer.py`）
+## 3. 链路层（✅ 已按 xcertplay Iap2LinkEngine.kt 精读修正，2026-10-08）
 
-数据帧头（大端，`Struct(">HHBBBB")` + 校验和字节）：
+数据帧头（大端，9 字节 + 载荷 + 载荷校验和）：
 
 ```
 FF 5A | u16 总长 | u8 控制 | u8 seq | u8 ack | u8 会话ID | u8 头校验和 | 载荷 | u8 载荷校验和
 ```
 
-- 控制位：SYN=0x80, ACK=0x40, EAK=0x20, RST=0x10
-- 同步包以 `FF 55` 开头（SYN 交换: `ff 55 02 00 ee 10`）
-- 校验和 = 所有字节和的补码（含校验和在内的全字节和 mod 256 == 0）
-- 会话ID：0=控制/认证，1=数据，2+=EA 流
-- 参数协商载荷 `Struct(">BBHHHBB")`: version=1, maxOutgoing, maxLen, retransTimeout,
-  ackTimeout, maxRetrans, maxAck
-- CSM 大帧会被链路层按协商的 maxLen 分片（接收端重组）
+**Phase 1 实测修正（与早期笔记的差异）**：
+- 握手不是「FF55 控制帧」：双方互发 marker `FF 55 02 00 EE 10`，然后发同步包
+  （FF5A 帧，control=0x80，载荷 = 参数协商结构 `>BBHHHBB` + 会话描述符×3）
+- **无线模式下手机是同步发起方**：配件（openWireless, initiateNegotiation=false）
+  只发 marker 等手机先发同步包；双方收到同步包即回 ACK，协商态收到 ACK 进 NORMAL
+- **会话 ID 是 10（控制）/11（EA）/12（文件传输）**，不是 Oligo 笔记里的 0/1/2
+  （那可能是蓝牙承载变体；以能互通 DiPlay 的 10/11/12 为准）
+- 序号 u8 回绕，初始 99；数据帧 control=0x40（捎带 ACK）
+- 控制位：SYNC=0x80, ACK=0x40, EAK=0x20, RST=0x10
+- 校验和 = 字节和的补码（含校验和在内 mod 256 == 0），头/载荷各一个
+- 无线参数参考（DiPlay/xcertplay WIRELESS_LINK_CONFIG）：maxOutgoing=4,
+  controlSessionVersion=2, 保留 ACK（有线用 zero-ack 模式）
+- CSM 大帧按对端协商的 maxLength 分片，接收端经 CSM 解析器重组
 
-**本项目代码**: `app/src/main/java/.../iap2/Iap2LinkPacket.kt`（无状态编解码部分已实现）
-**Phase 1 待办**: SYN/ACK 状态机、重传、分片重组。
+**本项目代码**: `app/src/main/java/.../iap2/Iap2LinkEngine.kt`（完整状态机，已回环测试）
 
 ## 4. CSM 分帧与 TLV（✅ xcertplay `iap2/wire/Iap2CsmFramer.kt`）
 

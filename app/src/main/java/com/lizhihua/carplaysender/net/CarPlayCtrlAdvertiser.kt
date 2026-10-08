@@ -3,17 +3,21 @@ package com.lizhihua.carplaysender.net
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
-import com.lizhihua.carplaysender.util.HexDumpObserver
+import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.ServerSocket
+import java.net.Socket
 
 /**
- * 广播手机侧（iPhone 角色）的 _carplay-ctrl._tcp 控制服务。
+ * 广播手机侧（iPhone 角色）的 _carplay-ctrl._tcp 控制服务并应答接收端探测。
  *
- * 真实无线 CarPlay 中，加入同一网络后 iPhone 广播该服务、车机反连此端口
- * 建立控制通道（对照 xcertplay CarPlayBonjour：它发现并 resolve 这个服务）。
+ * 无线 CarPlay 中接收端发现该服务后会反连此端口，先发
+ * `GET /ctrl-int/1/connect`（携带 AirPlay-Receiver-Device-ID）探测手机是否在线，
+ * 期待 HTTP 200（对照 xcertplay CarPlayBonjour.probeOnce：只读状态行）。
+ * 探测通过后，iAP2 控制会话经 AirPlay 事件通道的 type-130 隧道接管（Phase 2 后续）。
  *
- * Phase 0：注册服务 + 接受连接后十六进制转储，验证「接收端能找到并连上我」。
- * Phase 1：接入 iAP2 链路状态机。
+ * 本类同时把每个连接的请求行打进日志——DiPlay 后续发什么会直接可见。
  */
 class CarPlayCtrlAdvertiser(
     private val context: Context,
@@ -22,6 +26,7 @@ class CarPlayCtrlAdvertiser(
     companion object {
         const val SERVICE_TYPE = "_carplay-ctrl._tcp"
         private const val TAG = "CTRL"
+        private const val MAX_HEAD_BYTES = 16 * 1024
     }
 
     private var serverSocket: ServerSocket? = null
@@ -39,8 +44,7 @@ class CarPlayCtrlAdvertiser(
                 serviceName = "sender"
                 serviceType = SERVICE_TYPE
                 setPort(socket.localPort)
-                // TXT id = 蓝牙 MAC（Android 11+ 拿不到自身 MAC，Phase 1 再想办法，
-                // xcertplay 仅将其用于日志/重连参考）
+                // TXT id = 蓝牙 MAC（Android 11+ 拿不到自身 MAC，接收端仅用于日志/重连参考）
                 setAttribute("id", "000000000000")
             }
             nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, registrationListener)
@@ -65,13 +69,90 @@ class CarPlayCtrlAdvertiser(
             } catch (_: Exception) {
                 break
             }
-            log("$TAG: 接收端连入 ${client.inetAddress?.hostAddress}:${client.port}，开始转储")
-            HexDumpObserver(
-                client.getInputStream(),
-                "CTRL",
-                onLine = { line -> log(line) },
-            ).start()
+            Thread({ handleClient(client) }, "ctrl-client").apply {
+                isDaemon = true
+                start()
+            }
         }
+    }
+
+    private fun handleClient(client: Socket) {
+        val peer = client.inetAddress?.hostAddress ?: "?"
+        try {
+            client.soTimeout = 10_000
+            val input = BufferedInputStream(client.getInputStream())
+            val head = readUntilHeaderEnd(input)
+            if (head.isEmpty()) {
+                log("$TAG: $peer 连入但无请求（EOF）")
+                return
+            }
+            val requestLine = head.lineSequence().firstOrNull() ?: ""
+            val headers = head.substringAfter("\r\n", "")
+                .lineSequence()
+                .filter { it.contains(':') }
+                .joinToString("; ") { it.trim() }
+            log("$TAG: $peer -> [$requestLine] $headers")
+
+            val output = client.getOutputStream()
+            val response = when {
+                requestLine.startsWith("GET /ctrl-int/") -> {
+                    log("$TAG: ✓ 应答 ctrl-int 探测 200 OK")
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                }
+
+                else -> {
+                    log("$TAG: 未识别的请求，按 200 空应答处理（后续实现按需细化）")
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                }
+            }
+            output.write(response.toByteArray(Charsets.US_ASCII))
+            output.flush()
+
+            // 对端 Connection: close 会自行断开；等待期间若还有字节（隧道/事件），转储出来
+            client.soTimeout = 3_000
+            val rest = ByteArrayOutputStream()
+            val buffer = ByteArray(4096)
+            try {
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    rest.write(buffer, 0, count)
+                    if (rest.size() > 64 * 1024) break
+                }
+            } catch (_: IOException) {
+                // 读超时即停止转储
+            }
+            if (rest.size() > 0) {
+                log(
+                    "$TAG: 应答后收到 ${rest.size()} 字节：" +
+                        rest.toByteArray().take(64).joinToString(" ") {
+                            "%02x".format(it.toInt() and 0xFF)
+                        },
+                )
+            }
+            log("$TAG: $peer 连接结束")
+        } catch (error: IOException) {
+            log("$TAG: $peer 连接异常 - ${error.message}")
+        } finally {
+            runCatching { client.close() }
+        }
+    }
+
+    private fun readUntilHeaderEnd(input: BufferedInputStream): String {
+        val buffer = ByteArrayOutputStream()
+        val chunk = ByteArray(2048)
+        while (buffer.size() < MAX_HEAD_BYTES) {
+            val count = try {
+                input.read(chunk)
+            } catch (_: IOException) {
+                break
+            }
+            if (count < 0) break
+            buffer.write(chunk, 0, count)
+            val text = buffer.toString("ISO-8859-1")
+            if (text.contains("\r\n\r\n")) return text
+        }
+        return buffer.toString("ISO-8859-1")
     }
 
     fun stop() {

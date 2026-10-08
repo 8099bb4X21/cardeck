@@ -1,28 +1,33 @@
 package com.lizhihua.carplaysender.bt
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
-import com.lizhihua.carplaysender.util.HexDumpObserver
+import com.lizhihua.carplaysender.iap2.Iap2SenderSession
+import com.lizhihua.carplaysender.transport.Iap2LinkChannel
+import com.lizhihua.carplaysender.transport.StreamDuplexStream
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 手机侧（iPhone 角色）的 iAP2 蓝牙 RFCOMM 监听。
  *
- * 真实无线 CarPlay 里 iPhone 配对后会监听这个 SDP 服务等待车机回连；
- * 测试台上 xcertplay 会扫描已配对的 PHONE_SMART 设备并主动连入。
+ * 真实无线 CarPlay 里 iPhone 配对后监听这个 SDP 服务等待车机回连；
+ * 测试台上 DiPlay/xcertplay 会扫描已配对的 PHONE_SMART 设备并主动连入。
  *
- * Phase 0：接受连接后只做十六进制转储——能直接观察到 FF55 SYN / FF5A 链路帧。
- * Phase 1：把流交给 Iap2LinkEngine 状态机。
+ * 连入后：链路协商（marker/同步/ACK）→ 完整发送端 bring-up（Phase 1），
+ * 成功时回调 [onEndpoint] 交出热点 SSID/密码与 AirPlay 端点。
  */
 class Iap2BluetoothServer(
     private val context: Context,
     private val log: (String) -> Unit,
+    private val onEndpoint: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
 ) {
     companion object {
         /**
@@ -31,10 +36,13 @@ class Iap2BluetoothServer(
          */
         val IPHONE_IAP2_UUID: UUID = UUID.fromString("00000000-deca-fade-deca-deafdecacafe")
         private const val SDP_NAME = "iAP2"
+        private const val SESSION_TIMEOUT_MILLIS = 60_000L
     }
 
-    private var serverSocket: BluetoothServerSocket? = null
-    private var observers = mutableListOf<HexDumpObserver>()
+    private var serverSocket: AtomicReference<BluetoothServerSocket?> = AtomicReference(null)
+
+    @Volatile
+    private var activeChannel: Iap2LinkChannel? = null
 
     @Volatile
     private var running = false
@@ -61,9 +69,11 @@ class Iap2BluetoothServer(
             return false
         }
         return try {
-            serverSocket = adapter.listenUsingRfcommWithServiceRecord(SDP_NAME, IPHONE_IAP2_UUID)
+            serverSocket.set(
+                adapter.listenUsingRfcommWithServiceRecord(SDP_NAME, IPHONE_IAP2_UUID),
+            )
             running = true
-            log("BT: 监听 $SDP_NAME ($IPHONE_IAP2_UUID)，等待接收端回连…")
+            log("BT: 监听 $SDP_NAME，等待接收端回连…")
             Thread(::acceptLoop, "iap2-bt-accept").apply {
                 isDaemon = true
                 start()
@@ -75,10 +85,11 @@ class Iap2BluetoothServer(
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun acceptLoop() {
         while (running) {
             val socket: BluetoothSocket = try {
-                serverSocket?.accept() ?: break
+                serverSocket.get()?.accept() ?: break
             } catch (error: IOException) {
                 if (running) log("BT: accept 失败 - ${error.message}")
                 break
@@ -88,23 +99,49 @@ class Iap2BluetoothServer(
             } catch (_: SecurityException) {
                 null
             } ?: "unknown"
-            val peerAddress = try {
-                socket.remoteDevice?.address
-            } catch (_: SecurityException) {
-                null
-            } ?: "unknown"
-            log("BT: 接收端已连入 name=$peerName address=$peerAddress，开始转储字节流")
-            val observer = HexDumpObserver(socket.inputStream, "BT", onLine = { line -> log(line) })
-            observers += observer
-            observer.start()
+            log("BT: 接收端已连入 name=$peerName，开始 iAP2 发送端会话")
+            Thread({ runSession(socket) }, "iap2-bt-session").apply {
+                isDaemon = true
+                start()
+            }
+        }
+    }
+
+    private fun runSession(socket: BluetoothSocket) {
+        val stream = StreamDuplexStream(socket.inputStream, socket.outputStream) {
+            runCatching { socket.close() }
+        }
+        val channel = Iap2LinkChannel(stream, name = "iap2-bt") { line -> log(line) }
+        activeChannel = channel
+        try {
+            val session = Iap2SenderSession(channel) { line -> log(line) }
+            val endpoint = session.run(SESSION_TIMEOUT_MILLIS)
+            onEndpoint(endpoint)
+            // Phase 2 过渡：保持控制通道存活记录配件消息；AirPlay 配对由
+            // onEndpoint 回调发起（必要时会调用 detachCurrentSession 复现
+            // 「BT 控制已结束」状态——实测接收端只在该状态下应答 RTSP）
+            session.pumpIncomingForever()
+        } catch (error: IOException) {
+            log("SESSION 失败: ${error.message}")
+        } finally {
+            activeChannel = null
+            channel.close()
+            log("SESSION 结束，等待接收端重连（BT 监听仍在运行）")
+        }
+    }
+
+    /** 主动结束当前 BT 控制会话（不影响监听）。用于 AirPlay 配对前复现控制通道退役状态。 */
+    fun detachCurrentSession() {
+        activeChannel?.let { channel ->
+            activeChannel = null
+            channel.close()
+            log("BT: 已主动断开当前控制会话（模拟 tunnel handoff 后的退役）")
         }
     }
 
     fun stop() {
         running = false
-        runCatching { serverSocket?.close() }
-        serverSocket = null
-        observers.clear()
+        serverSocket.getAndSet(null)?.let { runCatching { it.close() } }
         log("BT: 监听已停止")
     }
 }

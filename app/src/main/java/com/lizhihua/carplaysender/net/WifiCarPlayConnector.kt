@@ -65,6 +65,34 @@ class WifiCarPlayConnector(
         connectivityManager.requestNetwork(request, newCallback)
     }
 
+    /**
+     * 绑定到当前已连接的 WiFi 网络（用户经系统设置手动加入热点后调用）。
+     * 热点无互联网时系统可能不把它设为默认网络，必须显式 bindProcessToNetwork，
+     * 我们的 socket 才会走 WiFi 而不是蜂窝。
+     */
+    fun bindCurrentWifi(onResult: (Boolean) -> Unit = {}) {
+        release()
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        val newCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                boundNetwork.set(network)
+                val bound = connectivityManager.bindProcessToNetwork(network)
+                log("WiFi: 已绑定当前WiFi网络 $network bindProcessToNetwork=$bound")
+                onResult(true)
+            }
+
+            override fun onUnavailable() {
+                log("WiFi: 没有可用的WiFi连接——请先在系统设置里加入接收端热点")
+                onResult(false)
+            }
+        }
+        callback.set(newCallback)
+        connectivityManager.requestNetwork(request, newCallback)
+    }
+
     fun release() {
         callback.getAndSet(null)?.let {
             runCatching { connectivityManager.unregisterNetworkCallback(it) }

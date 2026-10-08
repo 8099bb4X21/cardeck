@@ -34,6 +34,8 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    // AirPlay 配对密码学：X25519/Ed25519/ChaCha20-Poly1305/HKDF-SHA512
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
     testImplementation("junit:junit:4.13.2")
 }

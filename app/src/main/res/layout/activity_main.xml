@@ -43,14 +43,14 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="① 加入热点（WifiNetworkSpecifier）" />
+            android:text="① 打开WLAN设置（手动加入接收端热点）" />
 
         <Button
             android:id="@+id/btnScan"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="② 扫描 _airplay._tcp（发现车机端点）" />
+            android:text="② 绑定WiFi并扫描 _airplay._tcp" />
 
         <Button
             android:id="@+id/btnBluetooth"
@@ -66,13 +66,31 @@
             android:layout_marginTop="8dp"
             android:text="④ 广播 _carplay-ctrl._tcp（控制通道）" />
 
-        <TextView
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="日志"
-            android:textColor="#9AB0C4"
-            android:textSize="12sp" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="日志"
+                android:textColor="#9AB0C4"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btnCopyLog"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:minWidth="0dp"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:text="复制日志"
+                android:textSize="12sp" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/logText"

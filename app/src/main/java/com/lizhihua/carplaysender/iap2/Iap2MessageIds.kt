@@ -43,8 +43,20 @@ object Iap2MessageIds {
     const val ACCESSORY_HID_REPORT = 0x6802       // 配件 → 手机（触摸/旋钮事件）
     const val STOP_HID = 0x6803
 
-    // ---- MFi 认证（Phase 1；Oligo 证实可单向跳过校验）----
-    const val MFI_AUTH_BASE = 0xAA00
+    // ---- MFi 认证（单向：手机验证配件；发送端可跳过校验、自报成功）----
+    const val MFI_REQUEST_CERTIFICATE = 0xAA00    // 手机 → 配件
+    const val MFI_CERTIFICATE = 0xAA01            // 配件 → 手机（参数0=证书）
+    const val MFI_REQUEST_CHALLENGE = 0xAA02      // 手机 → 配件（参数0=挑战 16B）
+    const val MFI_RESPONSE = 0xAA03               // 配件 → 手机（参数0=签名）
+    const val MFI_AUTHENTICATION_FAILED = 0xAA04  // 手机 → 配件
+    const val MFI_AUTHENTICATION_SUCCEEDED = 0xAA05 // 手机 → 配件（自报结果）
+
+    // ---- 配件 bring-up 期间发来的订阅请求（接收并忽略即可）----
+    const val START_NOW_PLAYING_UPDATES = 0x5000
+    const val START_ROUTE_GUIDANCE_UPDATES = 0x5200
+    const val START_POWER_UPDATES = 0xAE00
+    const val START_COMMUNICATIONS_UPDATES = 0x4157
+    const val START_CALL_STATE_UPDATES = 0x4154
 
     fun nameOf(messageId: Int): String = when (messageId) {
         START_IDENTIFICATION -> "StartIdentification"

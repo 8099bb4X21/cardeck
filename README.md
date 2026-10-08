@@ -17,11 +17,27 @@
 
 | 阶段 | 内容 | 门槛 | 状态 |
 |---|---|---|---|
-| Phase 0 | 测试台 + 网络层 demo（本仓库） | 两台手机 mDNS 互发现 | ✅ 代码就绪 |
-| Phase 1 | iAP2 发送端会话（链路状态机 + 0x1D00/0x5702/0x4300） | xcertplay 日志显示「iPhone 接入」 | ⏳ |
-| Phase 2 | AirPlay 主会话（PairVerify + H.264 编码 + HID 回传） | 备用机显示本机画面并可触摸 | ⏳ |
+| Phase 0 | 测试台 + 网络层 demo（本仓库） | 两台手机 mDNS 互发现 | ✅ 已验收（DiPlay 测试台） |
+| Phase 1 | iAP2 发送端会话（链路状态机 + 0x1D00/0x5702/0x4300） | 接收端日志显示「iPhone 接入」 | ✅ 已验收：完整走通至 0x4301，拿到热点凭据与 AirPlay 端点 |
+| Phase 2 | AirPlay 主会话（PairVerify + H.264 编码 + HID 回传） | 备用机显示本机画面并可触摸 | 🔶 配对/加密通道已通，SETUP/推流进行中 |
 | Phase 3 | 真车（奥迪 MIB3）验证 | 车机点亮 | ⏳ 风险区 |
 | 兜底 | 买 Tbox 安卓盒子，把同一套自绘 UI 装进盒子 | — | 失败时启用 |
+
+**Phase 1 真机调试记录（2026-10-08，DiPlay on Redmi K40）**：
+1. `StreamDuplexStream` 读写共享锁导致死锁（读阻塞持锁，写永远等待）→ 读写分离
+2. MFi 挑战 16 字节被拒（Carlinkit EC 身份走 AuthV3，要求**精确 32 字节**）→ 已修
+3. DiPlay 与 xcertplay 时序差异：**DiPlay 不发 0x6800 StartHID**，订阅完直接等 0x5702 → 改为 2 秒可选等待
+
+**Phase 2 里程碑 A：AirPlay 配对打通（2026-10-08 22:58）**——蓝牙保持连接状态下一次通过：
+`/info` 前哨 87ms 应答 → pair-setup（SRP 固定码 3939，M1/M3/M5）→ pair-verify（M1/M3，
+接收端 ed25519 签名对照 mDNS `pk` 校验通过）→ 控制通道 ChaCha20 密钥派生。
+DiPlay 侧 logcat 确认：5 个 POST 全部处理，随即 `airplay control encryption enabled`，
+之后耐心等待 23 秒（等加密的 SETUP/事件通道）才重置。
+
+**调试教训（值得记一辈子的一个）**：「RTSP 无应答」曾归因于接收端状态门禁/时序竞争，
+最终真凶是**客户端读缓冲 bug**——响应头和 body 在同一次 read 到达，`readExactly` 却去
+流里等已消费的字节。**在下结论「对端不理我」之前，先用对端日志/抓包验证字节是否到达、
+自己的读取路径是否正确。**
 
 ## 测试台搭建（Phase 0 使用说明）
 
