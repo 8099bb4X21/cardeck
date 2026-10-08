@@ -1,0 +1,13 @@
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+# 参考仓库（GPL/第三方源码，不随本项目分发）
+reference/
+# ZCode 会话产物
+.zcode/
