@@ -40,12 +40,15 @@ class CarPlayCtrlAdvertiser(
         return try {
             val socket = ServerSocket(0)
             serverSocket = socket
+            val mac = com.lizhihua.carplaysender.util.DeviceIdentity.bluetoothMac(context)
             val info = NsdServiceInfo().apply {
                 serviceName = "sender"
                 serviceType = SERVICE_TYPE
                 setPort(socket.localPort)
-                // TXT id = 蓝牙 MAC（Android 11+ 拿不到自身 MAC，接收端仅用于日志/重连参考）
-                setAttribute("id", "000000000000")
+                // TXT id = 本机真实蓝牙 MAC（catplay CarPlayInviter 实证：车机按此
+                // 匹配待邀请的手机，占位值会导致车机永远不邀请 → 0x4301 永不到达）。
+                setAttribute("id", mac)
+                setAttribute("srcvers", "950.7.1")
             }
             nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, registrationListener)
             registered = true

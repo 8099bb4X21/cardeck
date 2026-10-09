@@ -33,6 +33,12 @@ object Iap2MessageIds {
     const val WIRELESS_CARPLAY_UPDATE = 0x4E0D     // 手机 → 配件：无线可用性通知
     const val DEVICE_TRANSPORT_IDENTIFIER = 0x4E0E // 手机 → 配件：蓝牙/USB 标识通知
 
+    // ---- 设备状态问候（真 iPhone 在 0x4300 之前发送的一批消息）----
+    const val DEVICE_INFORMATION_UPDATE = 0x4E09   // 手机 → 配件：设备名
+    const val DEVICE_LANGUAGE_UPDATE = 0x4E0A      // 手机 → 配件：语言
+    const val DEVICE_TIME_UPDATE = 0x4E0B          // 手机 → 配件：时间（u64 epoch + u16 tz + u8 dst）
+    const val DEVICE_UUID_UPDATE = 0x4E0C          // 手机 → 配件：UUID
+
     // ---- WiFi 配置交换 ----
     const val REQUEST_ACCESSORY_WIFI_CONFIGURATION = 0x5702      // 手机 → 配件
     const val ACCESSORY_WIFI_CONFIGURATION = 0x5703              // 配件 → 手机

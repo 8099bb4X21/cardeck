@@ -26,8 +26,12 @@ class Iap2SenderSessionTest {
         accessoryThread.isDaemon = true
         accessoryThread.start()
 
-        val endpoint = Iap2SenderSession(phoneChannel) { line -> println("PHONE $line") }
-            .run(timeoutMillis = 10_000L)
+        val endpoint = Iap2SenderSession(
+            phoneChannel,
+            log = { line -> println("PHONE $line") },
+            bluetoothMac = "34:86:DA:86:BB:96",
+            deviceName = "test-device",
+        ).run(timeoutMillis = 10_000L)
 
         assertEquals("MockAP", endpoint.ssid)
         assertEquals("secret-passphrase", endpoint.passphrase)
@@ -87,6 +91,13 @@ class Iap2SenderSessionTest {
                 Iap2Csm.u8(4, 36),
             )
 
+            // 设备状态问候（真机顺序：0x4E0D/0x4E0A/0x4E09/0x4E0B/0x4E0C → 0x4300）
+            expect(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE)
+            expect(Iap2MessageIds.DEVICE_LANGUAGE_UPDATE)
+            expect(Iap2MessageIds.DEVICE_INFORMATION_UPDATE)
+            expect(Iap2MessageIds.DEVICE_TIME_UPDATE)
+            expect(Iap2MessageIds.DEVICE_UUID_UPDATE)
+
             // CarPlay 启动
             expect(Iap2MessageIds.CARPLAY_AVAILABILITY)
             send(
@@ -106,7 +117,6 @@ class Iap2SenderSessionTest {
                 Iap2Csm.string(5, "560.20"),
             )
 
-            expect(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE)
             expect(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER)
         }
 

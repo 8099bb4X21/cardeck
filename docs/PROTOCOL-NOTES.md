@@ -127,7 +127,7 @@ xcertplay 偏好 link-local IPv6，回落 IPv4。
 - 时钟：NTP 风格 timing 端口 + RTCP（catplay `clock/`）
 - ❓ FairPlay/流加密细节无公开规格，靠 catplay 源码 + ludwig-v 解密固件对照
 
-## 9. 真车（奥迪）Phase 3 风险清单
+## 9. 真车（奥迪 MIB3）Phase 3 风险清单
 
 1. catplay 兼容表记录：Audi/Porsche HARMAN MIB2「角色切换后对 dongle 断电重启」——
    但那是 USB 有线方向；无线方向未知
@@ -136,6 +136,40 @@ xcertplay 偏好 link-local IPv6，回落 IPv4。
    配对（❓ 关键未知项：能否纯蓝牙触发。xcertplay 测试台无此限制）
 4. WifiNetworkSpecifier 不支持程序化传入密码（系统弹窗输入）——0x5703 拿到密码后
    无法静默入网，需要用户每次确认（❓ Phase 3 实测影响）
+
+## 9b. 奥迪 MIB3 实测记录（2026-10-09，Audi_MMI_6318 / MHI3_AS_AU_P3801）
+
+车机识别为 `AUDI 3260 / DELPHI / CL37_MIB3H_AU_AS_G4x_2200910PROD`。
+蓝牙 SDP 广播配件端 iAP2 服务 `…decacaff`（系统级蓝牙配对后即可连，无需 USB 触发）。
+
+**实测通过（逐字节对照修正后）**：
+
+| 环节 | 结果 | 关键点 |
+|---|---|---|
+| RFCOMM 双向 | ✅ | 车机也主动回连（约 60s 一轮）；双向都工作 |
+| 链路协商 | ✅ | 车机发 SYN 声明会话表 `{1:control, 2:EA}` → 手机必须**ACK + 原样回显该表**；之后 CSM 走**1 号会话**（发 10 号被静默丢弃，链路层照常 ACK——极具迷惑性） |
+| 识别 | ✅ | 0x1D01 收到 |
+| MFi | ✅ | **20 字节挑战**（32B 车机不应答）；0xAA03 签名 132B |
+| WiFi 凭据 | ✅ | 0x5702 → 0x5703 ssid=Audi_MMI_6318_5GHz ch=149 psk 明文 |
+| ctrl 邀请 | ✅ | 车机在 WiFi 上发现手机 `_carplay-ctrl._tcp` 后 `GET /ctrl-int/1/connect`（死锁关键：手机必须**在 0x5703 到达时立即**绑 WiFi + 广播带**真实蓝牙 MAC** 的 ctrl） |
+| mDNS 端点 | ✅ | 车机 `_airplay._tcp` 上线于 10.174.189.1:7000，TXT: `features=0x4040280,0x61 srcvers=320.17.7 flags=0x4 model=AUDI 3260 deviceid=54:64:DE:5E:51:B0`（**无 pk 字段**） |
+| AirPlay /info | ✅ | RTSP 200/455（在线） |
+| pair-setup | ❌ 403 | 车机不接受匿名 SRP 配对（iAP2 已完成 MFi 信任） |
+| pair-verify 快路径 | ⏳ | 403 后转「已配对设备」pair-verify，待实测 |
+
+**奥迪与测试台（DiPlay/xcertplay）的差异清单**：
+1. 车机**不发 0x4301**——识别帧声明可收 `0x4e0c 0x4e09 0x4e0d 0x4e0e 0x5702 0xea00 0xea01`、
+   可发 `0x5703 0xea03`；AirPlay 端点只能走 WiFi 的 mDNS `_airplay._tcp`
+2. 车机**主动发 SYN**（测试台等手机发）；会话表 {1,2} 且必须回显
+3. MFi 挑战必须 20 字节
+4. `pair-setup` 被 403（测试台接受 3939 SRP）
+5. AirPlay 端口窗口式开放（ctrl 邀请接受后短暂开放；未受邀时 Connection refused）
+6. **不要断 BT 控制会话**（测试台 hack 的前提是 DiPlay 重建栈；奥迪会在断链后拆掉
+   整轮 AirPlay 窗口）
+
+**设备身份（0x4300/0x4E0E/ctrl TXT id 用）**：真实蓝牙 MAC 必须动态解析
+（Android 11+ 应用层只能拿到占位 `02:00:00:00:00:00`）。
+Shizuku shell 侧读法：`content query --uri content://settings/secure/bluetooth_address`。
 
 ## 10. 参考文件速查
 

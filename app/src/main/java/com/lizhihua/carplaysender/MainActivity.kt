@@ -37,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var wifiConnector: WifiCarPlayConnector
     private lateinit var serviceBrowser: CarPlayServiceBrowser
     private lateinit var bluetoothServer: Iap2BluetoothServer
+    private lateinit var bluetoothClient: com.lizhihua.carplaysender.bt.Iap2BluetoothClient
     private lateinit var ctrlAdvertiser: CarPlayCtrlAdvertiser
 
     private val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
@@ -111,37 +112,175 @@ class MainActivity : AppCompatActivity() {
 
         wifiConnector = WifiCarPlayConnector(this) { line -> log(line) }
         serviceBrowser = CarPlayServiceBrowser(this, log = { line -> log(line) })
-        bluetoothServer = Iap2BluetoothServer(this, log = { line -> log(line) }) { endpoint ->
-            log(
-                ">>> 拿到接收端热点：SSID=${endpoint.ssid} 密码=${endpoint.passphrase} " +
-                    "（已回填输入框；点①进系统WLAN设置加入该热点，连上后点②扫描）",
-            )
-            runOnUiThread { ssidInput.setText(endpoint.ssid) }
-            // 自动广播 _carplay-ctrl._tcp：无线 CarPlay 中接收端会反连手机控制端口
-            ctrlAdvertiser.start()
-            // 若手机已加入过接收端热点：等 ctrl 探测完成（实测 +1s~+1.3s）→
-            // 主动断开 BT 控制会话（复现接收端唯一应答 RTSP 的状态）→ 执行 AirPlay 配对
-            wifiConnector.bindCurrentWifi { bound ->
-                if (bound) {
-                    Thread({
-                        Thread.sleep(1_600) // 等 ctrl 探测（实测 +1.0~+1.3s）
-                        fun newClient() = com.lizhihua.carplaysender.airplay.AirPlayClient(
-                            endpoint,
-                            log = { line -> log(line) },
-                            context = applicationContext,
-                        )
-                        retirePreviousSession()
-                        // 第一阶段：保持 BT 在位直接配对 + SETUP（协议上正确的形态）
-                        var client = newClient()
-                        currentClient = client
-                        var keys = client.runPairing()
-                        if (keys == null) {
-                            // 第二阶段：复现「BT 控制已结束」状态再试一次
-                            bluetoothServer.detachCurrentSession()
-                            client = newClient()
-                            currentClient = client
-                            keys = client.runPairing()
-                        }
+        // 两条 BT 路径共用同一套端点处理：
+        //  - Server：测试台（DiPlay/xcertplay 回连手机，等待接收端发起）
+        //  - Client：真车（手机主动连入车机 SDP 的 …caff 配件端服务）
+        val wifiCredentialHook: (com.lizhihua.carplaysender.iap2.Iap2SenderSession.WifiConfiguration) -> Unit =
+            { wifi -> onWifiCredentials(wifi) }
+        bluetoothServer = Iap2BluetoothServer(
+            this,
+            log = { line -> log(line) },
+            onEndpoint = { endpoint -> onCarPlayEndpoint(endpoint, "车机回连") },
+            onWifiCredentials = wifiCredentialHook,
+        )
+        bluetoothClient = com.lizhihua.carplaysender.bt.Iap2BluetoothClient(
+            this,
+            log = { line -> log(line) },
+            onEndpoint = { endpoint -> onCarPlayEndpoint(endpoint, "主动连车机") },
+            onWifiCredentials = wifiCredentialHook,
+        )
+        ctrlAdvertiser = CarPlayCtrlAdvertiser(this) { line -> log(line) }
+
+        setUpUiControls()
+    }
+
+    /**
+     * 0x5703 到达（拿到车机热点凭据）立即执行——真车 0x4301 的前置条件：
+     * 车机在 WiFi 网络上发现手机的 `_carplay-ctrl._tcp`（TXT id=真实蓝牙 MAC）后
+     * 主动发 `GET /ctrl-int/1/connect` 邀请，邀请被接受才发 0x4301。
+     * 因此这里必须：绑车机 WiFi → 广播 ctrl；晚于 0x4300 则双方互等死锁（Audi 实测）。
+     */
+    private fun onWifiCredentials(
+        wifi: com.lizhihua.carplaysender.iap2.Iap2SenderSession.WifiConfiguration,
+    ) {
+        runOnUiThread { ssidInput.setText(wifi.ssid) }
+        log(">>> 拿到车机热点凭据（0x5703）——立即绑定 WiFi + 广播 _carplay-ctrl")
+        ctrlAdvertiser.start()
+        wifiConnector.bindCurrentWifi { bound ->
+            if (!bound) {
+                log(">>> 手机不在车机热点 \"${wifi.ssid}\" —— 请到 系统设置>WLAN 加入后重新连接")
+            } else {
+                log(">>> WiFi 已绑定车机热点，等待车机 ctrl 邀请（随后才回 0x4301）")
+            }
+        }
+    }
+
+    private val sessionStarting = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 复现「BT 控制已结束」状态：断开当前任一路径的 iAP2 控制会话（DiPlay 只在此状态应答 RTSP）。 */
+    private fun detachActiveBtSessions() {
+        bluetoothServer.detachCurrentSession()
+        bluetoothClient.detachCurrentSession()
+    }
+
+    /**
+     * 端点补全：0x4301 缺失/无 IPv4 时用 mDNS 解析车机 `_airplay._tcp` 合成端点
+     * （真 iPhone 同款发现路径，也是 Audi MIB3 唯一路径——它不发 0x4301）。
+     * 测试台端点自带 IPv4 与端口，本方法秒过、行为不变。
+     */
+    private fun resolveEndpointHost(
+        endpoint: com.lizhihua.carplaysender.iap2.Iap2SenderSession.CarPlayEndpoint,
+        source: String,
+    ): com.lizhihua.carplaysender.iap2.Iap2SenderSession.CarPlayEndpoint {
+        var effective = endpoint
+        val needHost = !effective.ipAddresses.any { it.contains('.') && !it.contains(':') }
+        val needPort = effective.airPlayPort <= 0
+        if (!needHost && !needPort) return effective
+
+        log(">>> [$source] 0x4301 端点不完整（port=${effective.airPlayPort} ips=${effective.ipAddresses}），mDNS 解析车机 _airplay._tcp…")
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val found = java.util.concurrent.atomic.AtomicReference<android.net.nsd.NsdServiceInfo?>(null)
+        val browser = com.lizhihua.carplaysender.net.CarPlayServiceBrowser(
+            this,
+            log = { line -> log(line) },
+        ) { info ->
+            if (found.compareAndSet(null, info)) latch.countDown()
+        }
+        browser.start()
+        // 车机热点刚绑定时 mDNS 可能还没起；重试三轮（Audi 的 AirPlay 服务在受邀后才上线）
+        for (round in 1..3) {
+            val resolved = try {
+                latch.await(6, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (_: InterruptedException) {
+                false
+            }
+            if (resolved) break
+            log(">>> [$source] mDNS 第 $round 轮未发现 _airplay._tcp——重试")
+        }
+        browser.stop()
+        val info = found.get() ?: run {
+            log(">>> [$source] mDNS 未发现车机 AirPlay 服务（车机可能尚未启动无线会话）")
+            return effective
+        }
+        val address = info.host?.hostAddress
+        var result = effective
+        if (address != null && address.contains('.') && !address.contains(':')) {
+            result = result.copy(ipAddresses = listOf(address) + result.ipAddresses)
+            log(">>> [$source] mDNS 解析到车机地址 $address:${info.port}")
+        }
+        if (needPort && info.port > 0) {
+            result = result.copy(airPlayPort = info.port)
+        }
+        // TXT 公钥兜底（pair-verify 校验用；0x4301 缺失时只能从这里拿）
+        if (result.publicKey == null) {
+            val txtPk = info.attributes["pk"]?.toString(Charsets.UTF_8)
+                ?.trimEnd { it.code == 0 }
+                ?.takeIf { it.isNotEmpty() }
+            if (txtPk != null) result = result.copy(publicKey = txtPk)
+        }
+        if (result.deviceIdentifier == null) {
+            val txtId = info.attributes["deviceid"]?.toString(Charsets.UTF_8)
+                ?.trimEnd { it.code == 0 }
+                ?.takeIf { it.isNotEmpty() }
+            if (txtId != null) result = result.copy(deviceIdentifier = txtId)
+        }
+        if (result.sourceVersion == null) {
+            val txtVer = info.attributes["srcvers"]?.toString(Charsets.UTF_8)
+                ?.trimEnd { it.code == 0 }
+                ?.takeIf { it.isNotEmpty() }
+            if (txtVer != null) result = result.copy(sourceVersion = txtVer)
+        }
+        return result
+    }
+
+    /** BT 会话交接点：拿到 0x5703/0x4301 后两条路径流程一致——绑 WiFi → AirPlay 配对 → SETUP → 推流。 */
+    private fun onCarPlayEndpoint(
+        endpoint: com.lizhihua.carplaysender.iap2.Iap2SenderSession.CarPlayEndpoint,
+        source: String,
+    ) {
+        if (!sessionStarting.compareAndSet(false, true)) {
+            log(">>> [$source] 已有会话在处理中，忽略本次端点（等待上一轮结束）")
+            return
+        }
+        log(
+            ">>> [$source] 拿到接收端热点：SSID=${endpoint.ssid}；" +
+                "密码=${if (endpoint.passphrase.isEmpty()) "(空)" else "已获取"}",
+        )
+        runOnUiThread { ssidInput.setText(endpoint.ssid) }
+        // ctrl 广播已在 onWifiCredentials（0x5703 到达时）启动；这里兜底再确保一次
+        ctrlAdvertiser.start()
+        // 真车兜底：0x4301 可能不带 IPv4（只有 IPv6 或空）——按真 iPhone 行为用 mDNS
+        // 解析车机 _airplay._tcp 拿地址（车机热点已在连就必须能发现，否则说明不在车机网络）
+        val effectiveEndpoint = resolveEndpointHost(endpoint, source)
+        // 若手机已加入过接收端热点：等 ctrl 探测完成（实测 +1s~+1.3s）→
+        // 主动断开 BT 控制会话（复现接收端唯一应答 RTSP 的状态）→ 执行 AirPlay 配对
+        wifiConnector.bindCurrentWifi { bound ->
+            if (!bound) {
+                log(">>> [$source] 手机当前不在该热点——请到 设置>WLAN 加入 \"${effectiveEndpoint.ssid}\" 后断开重连")
+                sessionStarting.set(false)
+                return@bindCurrentWifi
+            }
+            Thread({
+                Thread.sleep(1_600) // 等 ctrl 探测（实测 +1.0~+1.3s）
+                fun newClient() = com.lizhihua.carplaysender.airplay.AirPlayClient(
+                    effectiveEndpoint,
+                    log = { line -> log(line) },
+                    context = applicationContext,
+                )
+                retirePreviousSession()
+                // 第一阶段：保持 BT 在位直接配对 + SETUP（协议上正确的形态）
+                var client = newClient()
+                currentClient = client
+                var keys = client.runPairing()
+                if (keys == null && !client.pairSetupRejected) {
+                    // 第二阶段（仅测试台 DiPlay）：复现「BT 控制已结束」状态再试一次。
+                    // 真车（pair-setup 被 403）绝不断 BT——真无线 CarPlay 的 BT 控制通道
+                    // 全程保活，断开会让车机拆掉整轮会话（Audi 实测）。
+                    detachActiveBtSessions()
+                    client = newClient()
+                    currentClient = client
+                    keys = client.runPairing()
+                }
                         if (keys != null) {
                             log(
                                 "AIRPLAY: ✓ 配对完成 writeKey=" +
@@ -198,7 +337,7 @@ class MainActivity : AppCompatActivity() {
                                 val screen = client.runScreenStream(keys.sharedSecret)
                                 if (screen != null) {
                                     client.record()
-                                    val host = endpoint.ipAddresses.firstOrNull { it.contains('.') }
+                                    val host = effectiveEndpoint.ipAddresses.firstOrNull { it.contains('.') }
                                     if (host != null) {
                                         videoSender = com.lizhihua.carplaysender.video.VideoSender(
                                             host = host,
@@ -259,12 +398,13 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
                         }
-                    }, "airplay-pairing").start()
-                }
-            }
+                sessionStarting.set(false)
+            }, "airplay-pairing").start()
         }
-        ctrlAdvertiser = CarPlayCtrlAdvertiser(this) { line -> log(line) }
+    }
 
+    /** onCreate 的 UI 初始化尾部：模式选择/开关/按钮/日志面板（从原 onCreate 拆出，保持结构清晰）。 */
+    private fun setUpUiControls() {
         // 模式选择（持久化；切换后如已连接，断开当前蓝牙会话触发下一轮按新模式重建）
         val modeGroup = findViewById<android.widget.RadioGroup>(R.id.modeGroup)
         val preferences = getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -301,8 +441,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             bluetoothServer.detachCurrentSession()
+            bluetoothClient.detachCurrentSession()
         }
-        // 常亮 + 暗幕（替代息屏，规避锁屏冻结车机触摸）
         val alwaysOn = findViewById<android.widget.CheckBox>(R.id.switchAlwaysOn)
         com.lizhihua.carplaysender.ui.ScreenDimmer.enabled =
             preferences.getBoolean("alwaysOn", true)
@@ -378,6 +518,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             com.lizhihua.carplaysender.service.CarPlayService.start(this)
+            // 真车路径：手机主动连车机（SDP …caff 配件服务）
+            // 测试台路径：监听手机侧 iPhone UUID，等 DiPlay/xcertplay 回连
+            bluetoothClient.start()
             bluetoothServer.start()
         }
         findViewById<Button>(R.id.btnDimNow).setOnClickListener {
@@ -393,6 +536,7 @@ class MainActivity : AppCompatActivity() {
             retirePreviousSession()
             com.lizhihua.carplaysender.service.CarPlayService.stop(this)
             bluetoothServer.stop()
+            bluetoothClient.stop()
             ctrlAdvertiser.stop()
             wifiConnector.release()
             log("已手动断开并停止保活服务（常亮已恢复）")
@@ -452,7 +596,8 @@ class MainActivity : AppCompatActivity() {
         com.lizhihua.carplaysender.shizuku.CarInputClient.logSink = { line -> log(line) }
 
         log("CarPlay Sender Phase 0 就绪")
-        log("测试台流程：两台手机蓝牙配对 -> 备用机跑 xcertplay 无线模式 -> 本机 ③ 监听")
+        log("真车：与车机蓝牙配对 + 手机加入车机热点 -> 点「启动连接」（自动主动连入车机）")
+        log("测试台：两台手机蓝牙配对 -> 备用机跑 xcertplay 无线模式 -> 点「启动连接」等待回连")
     }
 
     private fun log(message: String) {

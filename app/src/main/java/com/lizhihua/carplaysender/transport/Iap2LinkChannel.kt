@@ -26,9 +26,45 @@ class Iap2LinkChannel(
     private var terminated = false
     private var readySignalled = false
 
+    /** 原始字节转储预算（每方向每连接），真车字节级对照用。 */
+    private var rxDumpBudget = RAW_DUMP_LIMIT
+    private var txDumpBudget = RAW_DUMP_LIMIT_TX
+
+    /** 逐帧摘要日志预算（每方向每连接）。 */
+    private var rxFrameLogs = 0
+    private var txFrameLogs = 0
+
     val isAlive: Boolean get() = !terminated
 
     init {
+        engine.onPeerSynchronizationAdopted = { sync ->
+            log(
+                "LINK: 采纳对端会话表 maxOutgoing=${sync.maxOutgoing} maxLen=${sync.maxLength} " +
+                    "sessions=" + sync.sessions.joinToString { "${it.id}/k${it.kind}/v${it.version}" },
+            )
+        }
+        engine.onUnknownSessionData = { sessionId, size ->
+            log("LINK: 丢弃未知会话 $sessionId 的数据帧（${size} 字节）")
+        }
+        engine.onFrameReceived = { control, sequence, ack, sessionId, size ->
+            // 真车调试关键观测：车机在识别阶段是否回帧、回什么（静默分歧全靠它定位）
+            if (rxFrameLogs < FRAME_LOG_LIMIT) {
+                rxFrameLogs++
+                log(
+                    "LINK rx: ctl=0x${"%02x".format(control)} seq=$sequence ack=$ack " +
+                        "session=$sessionId len=$size",
+                )
+            }
+        }
+        engine.onFrameSent = { control, sequence, ack, sessionId, size ->
+            if (txFrameLogs < FRAME_LOG_LIMIT) {
+                txFrameLogs++
+                log(
+                    "LINK tx: ctl=0x${"%02x".format(control)} seq=$sequence ack=$ack " +
+                        "session=$sessionId len=$size",
+                )
+            }
+        }
         Thread({ runReader() }, "$name-reader").apply {
             isDaemon = true
             start()
@@ -93,6 +129,7 @@ class Iap2LinkChannel(
                 if (count == 0) continue
                 synchronized(lock) {
                     if (terminated) return
+                    dumpInbound(buffer.copyOf(count))
                     engine.feed(buffer.copyOf(count), nowMillis())
                     processEventsLocked()
                     drainOutputLocked()
@@ -102,6 +139,17 @@ class Iap2LinkChannel(
         } catch (error: Throwable) {
             finish(error.message ?: error.javaClass.simpleName)
         }
+    }
+
+    /**
+     * 原始字节抓包（真车字节级对照的唯一手段）：每方向仅转储前
+     * [RAW_DUMP_LIMIT] 字节，防止长期会话日志爆炸。
+     */
+    private fun dumpInbound(bytes: ByteArray) {
+        if (bytes.isEmpty() || rxDumpBudget <= 0) return
+        val shown = minOf(bytes.size, rxDumpBudget)
+        log("RAW rx: " + bytes.copyOf(shown).joinToString(" ") { "%02x".format(it) })
+        rxDumpBudget -= shown
     }
 
     private fun runPacer() {
@@ -156,12 +204,20 @@ class Iap2LinkChannel(
     private fun drainOutputLocked() {
         val bytes = engine.takeOutput()
         if (bytes.isEmpty()) return
+        dumpOutbound(bytes)
         try {
             stream.write(bytes)
         } catch (error: IOException) {
             finishLocked(error)
         }
         signalReadyLocked()
+    }
+
+    private fun dumpOutbound(bytes: ByteArray) {
+        if (txDumpBudget <= 0) return
+        val shown = minOf(bytes.size, txDumpBudget)
+        log("RAW tx: " + bytes.copyOf(shown).joinToString(" ") { "%02x".format(it) })
+        txDumpBudget -= shown
     }
 
     private fun signalReadyLocked() {
@@ -190,6 +246,13 @@ class Iap2LinkChannel(
 
     private companion object {
         const val PACER_POLL_MILLIS = 20L
+
+        /** 原始字节转储预算：rx 需覆盖车机全部协商帧（Audi 实测约 140B），给 512B 余量。 */
+        const val RAW_DUMP_LIMIT = 512
+        const val RAW_DUMP_LIMIT_TX = 256
+
+        /** 逐帧摘要日志上限（每方向每连接）。 */
+        const val FRAME_LOG_LIMIT = 40
 
         /** 链路终结哨兵；真实控制载荷至少包含一段 CSM 帧，不会为空。 */
         val POISON = ByteArray(0)

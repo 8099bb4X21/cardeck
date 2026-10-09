@@ -101,6 +101,32 @@ class Iap2LinkEngine(
     private var lastSentAcknowledged: Int? = null
     private var lastReceivedInOrder = 0
 
+    /**
+     * 采纳的对端控制会话 ID（收到对端 sync 载荷时确定）。
+     * Audi 真车字节级实测（2026-10-09）：车机（MIB3）以发起方姿态发 SYN，声明
+     * 会话表 {1:control, 2:EA}，手机回显其表后它以 **1 号会话**通信——
+     * CSM 发在 10 号会被静默丢弃（链路层照常 ACK，极具迷惑性）。
+     * 测试台 DiPlay/xcertplay 声明 10，采纳后与本表默认一致，行为不变。
+     */
+    private var adoptedPeerControlSessionId: Int? = null
+
+    /** 采纳过的对端 sync 载荷（协商回显/诊断用）。 */
+    private var adoptedSynchronization: SynchronizationPayload? = null
+
+    /** 诊断：首次采纳对端会话表时回调（打印对端提议的会话表，便于真车排查）。 */
+    var onPeerSynchronizationAdopted: ((SynchronizationPayload) -> Unit)? = null
+
+    /** 诊断：丢弃未知会话 ID 的数据帧时回调（(sessionId, bytes)）。 */
+    var onUnknownSessionData: ((Int, Int) -> Unit)? = null
+
+    /** 诊断：每个入向链路帧的摘要（control/seq/ack/sessionId/载荷长度），真车排查用。 */
+    var onFrameReceived: ((control: Int, sequence: Int, ack: Int, sessionId: Int, size: Int) -> Unit)? = null
+
+    /** 诊断：每个出向链路帧的摘要（仅链路层帧，用于对照真车协商时序）。 */
+    var onFrameSent: ((control: Int, sequence: Int, ack: Int, sessionId: Int, size: Int) -> Unit)? = null
+
+    private var unknownSessionDropped = 0
+
     private val unacknowledged = ArrayList<Packet>()
     private val sendBacklog = ArrayDeque<Packet>()
     private val pendingEvents = ArrayDeque<Event>()
@@ -165,7 +191,13 @@ class Iap2LinkEngine(
         if (syncDeadline != null && syncDeadline!! <= nowMillis) {
             syncDeadline = null
             if (state == State.NEGOTIATING) {
-                sendSynchronization()
+                // 已采纳对端表：只补裸 ACK（回显仅首次发一次，避免协商轮次膨胀）；
+                // 未采纳：继续重发本表 SYN（测试台时序）
+                if (adoptedSynchronization != null) {
+                    sendAcknowledgement()
+                } else {
+                    sendSynchronization()
+                }
                 syncDeadline = nowMillis + SYNC_RESEND_MILLIS
             }
         }
@@ -240,6 +272,7 @@ class Iap2LinkEngine(
         payload: ByteArray?,
         nowMillis: Long,
     ) {
+        onFrameReceived?.invoke(control, sequence, ack, sessionId, payload?.size ?: 0)
         if (control and CONTROL_RESET != 0) {
             die("peer sent reset")
             return
@@ -247,25 +280,67 @@ class Iap2LinkEngine(
         if (control and CONTROL_SYNCHRONIZE != 0) {
             val sync = SynchronizationPayload.decode(payload ?: ByteArray(0))
             if (sync != null && state == State.NEGOTIATING) {
+                val firstAdoption = adoptedSynchronization == null
                 peerSynchronization = sync
+                if (firstAdoption) adoptedSynchronization = sync
+                // Audi 真车实测（2026-10-09，字节级对照）：车机以发起方姿态发 SYN 声明其会话表
+                // {1:control,2:EA}，手机必须「ACK + 原样回显其表（SYN|ACK）」——车机见到回显才发
+                // 最终 ACK 完成协商（只回裸 ACK 时它永不回 ACK）。回显即声明「我采纳你的表」，
+                // 之后 CSM 走采纳表的控制会话 ID（1）；发 10 会被静默丢弃。
+                sync.sessions.firstOrNull { it.kind == CONTROL_KIND }?.let {
+                    adoptedPeerControlSessionId = it.id
+                }
                 lastReceivedInOrder = sequence
                 sendAcknowledgement()
+                if (firstAdoption) {
+                    sendSynchronizationEcho(sync)
+                    onPeerSynchronizationAdopted?.invoke(sync)
+                }
             }
         }
         if (control and CONTROL_ACKNOWLEDGEMENT != 0) {
             handleAcknowledgement(ack, nowMillis)
         }
-        if (control == CONTROL_ACKNOWLEDGEMENT && payload != null && sessionId == SESSION_CONTROL) {
-            handleData(sequence, payload)
+        val isDataFrame = payload != null &&
+            (control and CONTROL_ACKNOWLEDGEMENT) != 0 &&
+            (control and CONTROL_SYNCHRONIZE) == 0 &&
+            (control and CONTROL_EXTENDED_ACKNOWLEDGEMENT) == 0
+        if (isDataFrame) {
+            // 控制消息的会话 ID：本国表 10 或采纳表（Audi=1；测试台两者一致）
+            if (sessionId == SESSION_CONTROL || sessionId == adoptedPeerControlSessionId) {
+                // 收到对端的数据即代表对端认为链路可用；ACK 帧若丢失/被跳过，这里兜底进入 NORMAL
+                completeNegotiationIfPending(nowMillis)
+                handleData(sequence, payload!!)
+            } else {
+                reportUnknownSessionData(sessionId, payload!!.size)
+            }
         }
     }
 
-    private fun handleAcknowledgement(acknowledgement: Int, nowMillis: Long) {
+    private fun completeNegotiationIfPending(nowMillis: Long) {
         if (state == State.NEGOTIATING && peerSynchronization != null) {
             state = State.NORMAL
             markerDeadline = null
             syncDeadline = null
+            drainSendWindow(nowMillis)
         }
+    }
+
+    private fun reportUnknownSessionData(sessionId: Int, size: Int) {
+        unknownSessionDropped++
+        if (unknownSessionDropped <= 5) onUnknownSessionData?.invoke(sessionId, size)
+    }
+
+    /**
+     * 回显对端 sync（SYN|ACK，载荷与对端完全一致）——声明「手机采纳车机会话表」。
+     * 不消耗发送序号（Audi 实测可用；extractor 真车客户端同款：ACK 与 echo 都不占序号）。
+     */
+    private fun sendSynchronizationEcho(sync: SynchronizationPayload) {
+        writePacket(sync.encode(), sentSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
+    }
+
+    private fun handleAcknowledgement(acknowledgement: Int, nowMillis: Long) {
+        completeNegotiationIfPending(nowMillis)
         lastSentAcknowledged = acknowledgement
         val window = (peerSynchronization?.maxOutgoing ?: maxOutgoing) + ACK_SLACK
         unacknowledged.removeAll { sequenceDistance(it.sequence, acknowledgement) !in 1..window }
@@ -280,11 +355,8 @@ class Iap2LinkEngine(
             sendAcknowledgement() // 重复或过期：重新确认当前序号
             return
         }
-        if (distance != 1) {
-            // RFCOMM 有序传输下不应出现：保守确认并丢弃
-            sendAcknowledgement()
-            return
-        }
+        // RFCOMM 为可靠有序流，不会丢包；序号跳变只可能是对端把 ACK/SYN 也计入了序号
+        // （各家实现账法不一致）。因此接受任意前进量并推进水位，避免死锁式丢帧。
         lastReceivedInOrder = sequence
         if (pendingEvents.size >= 256) {
             die("event queue overflow")
@@ -311,7 +383,7 @@ class Iap2LinkEngine(
             sentSequence = nextSequence(sentSequence)
             packet.sequence = sentSequence
             packet.deadlineMillis = nowMillis + retransmissionTimeoutMillis
-            writePacket(packet.payload, packet.sequence, CONTROL_ACKNOWLEDGEMENT, SESSION_CONTROL)
+            writePacket(packet.payload, packet.sequence, CONTROL_ACKNOWLEDGEMENT, controlSessionId())
             if (peer == null || peer.maxRetransmissions > 0) {
                 unacknowledged += packet
                 retransmitDeadline = packet.deadlineMillis
@@ -321,6 +393,9 @@ class Iap2LinkEngine(
         }
     }
 
+    /** 出向控制消息的会话 ID：采纳了对端表就用其 control ID（Audi=1），否则本表 10。 */
+    private fun controlSessionId(): Int = adoptedPeerControlSessionId ?: SESSION_CONTROL
+
     private fun retransmitDue(nowMillis: Long) {
         val next = unacknowledged.minByOrNull { it.deadlineMillis } ?: return
         next.deadlineMillis = nowMillis + retransmissionTimeoutMillis
@@ -329,7 +404,7 @@ class Iap2LinkEngine(
             die("packet ${next.sequence} not acknowledged")
             return
         }
-        writePacket(next.payload, next.sequence, CONTROL_ACKNOWLEDGEMENT, SESSION_CONTROL)
+        writePacket(next.payload, next.sequence, CONTROL_ACKNOWLEDGEMENT, controlSessionId())
         retransmitDeadline = unacknowledged.minOfOrNull { it.deadlineMillis }
     }
 
@@ -356,6 +431,7 @@ class Iap2LinkEngine(
 
     private fun writePacket(payload: ByteArray?, sequence: Int, control: Int, sessionId: Int) {
         if (state == State.DEAD) return
+        onFrameSent?.invoke(control, sequence, lastReceivedInOrder, sessionId, payload?.size ?: 0)
         val length = payload?.size?.plus(HEADER_BYTES + 1) ?: HEADER_BYTES
         val frame = ByteArray(length)
         frame[0] = 0xFF.toByte()
@@ -444,11 +520,15 @@ class Iap2LinkEngine(
         const val SESSION_EA = 11
         const val SESSION_FILE_TRANSFER = 12
 
+        /** 会话描述符里的类型字段：0 = 控制会话（xcertplay/extractor/catplay 一致）。 */
+        private const val CONTROL_KIND = 0
+
         val MARKER = byteArrayOf(0xFF.toByte(), 0x55, 0x02, 0x00, 0xEE.toByte(), 0x10)
         const val HEADER_BYTES = 9
         private const val SYNCHRONIZATION_VERSION = 1
         private const val CONTROL_SYNCHRONIZE = 0x80
         private const val CONTROL_ACKNOWLEDGEMENT = 0x40
+        private const val CONTROL_EXTENDED_ACKNOWLEDGEMENT = 0x20
         private const val CONTROL_RESET = 0x10
         private const val INITIAL_SEQUENCE = 99
         private const val MARKER_RESEND_MILLIS = 1_000L

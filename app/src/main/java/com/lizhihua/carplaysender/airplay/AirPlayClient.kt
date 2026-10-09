@@ -30,10 +30,16 @@ class AirPlayClient(
 
     // ---- 对外流程 ----
 
+    /** pair-setup 是否被 403 拒绝（真车特征）；主控据此决定是否使用 BT 退役 hack。 */
+    @Volatile
+    var pairSetupRejected: Boolean = false
+        private set
+
     /**
-     * 完整配对：pair-setup（注册长期公钥）+ pair-verify（派生控制密钥）。
-     * DiPlay 的无线栈按轮重建 RTSP 监听，且 ctrl 探测（约 +1s）先于其就绪——
-     * 因此延迟启动，且每次重试都换全新 TCP 连接。
+     * 配对：先试 pair-setup（注册长期公钥）→ pair-verify（派生控制密钥）；
+     * 若 pair-setup 被 **403** 拒绝（真车 Audi MIB3 实测：iAP2 阶段已完成 MFi 信任，
+     * 不接受匿名 SRP 配对窗口），则改走「已配对设备快路径」直接 pair-verify。
+     * 每次重试都换全新 TCP 连接（部分接收端按连接维护状态机）。
      */
     fun runPairing(): PairVerifyClient.ControlKeys? {
         val identity = loadOrCreateIdentity()
@@ -56,12 +62,38 @@ class AirPlayClient(
             }
             val transport = TlvTransport { path, body -> post(path, body) }
             try {
-                PairSetupClient(identity, transport, log).run()
+                val setupRejected = try {
+                    PairSetupClient(identity, transport, log).run()
+                    false
+                } catch (error: IOException) {
+                    val forbidden = error.message?.contains("403") == true
+                    if (forbidden) pairSetupRejected = true
+                    log(
+                        "AIRPLAY: pair-setup " +
+                            if (forbidden) {
+                                "被 403 拒绝（车机不接受匿名配对——iAP2 已完成信任）→ 转已配对快路径"
+                            } else {
+                                "失败（${error.message}）"
+                            },
+                    )
+                    forbidden
+                }
+                // 403 后旧连接的状态机不可用：换全新连接走快路径
+                if (setupRejected) {
+                    close()
+                    if (!ensureConnected(2_000)) continue
+                    val fastPathTransport = TlvTransport { path, body -> post(path, body) }
+                    val receiverStaticKey = endpoint.publicKey?.let(::hexToBytes)
+                    val keys = PairVerifyClient(identity, fastPathTransport, log).run(receiverStaticKey)
+                    cipher = ControlCipher(keys.phoneReadKey, keys.phoneWriteKey)
+                    log("AIRPLAY: 控制通道加密已启用（已配对快路径）")
+                    return keys
+                }
                 val receiverStaticKey = endpoint.publicKey?.let(::hexToBytes)
                 val keys = PairVerifyClient(identity, transport, log).run(receiverStaticKey)
                 // pair-verify 之后双方立即启用加密（接收端在 M4 应答后开启）
                 cipher = ControlCipher(keys.phoneReadKey, keys.phoneWriteKey)
-                log("AIRPLAY: 控制通道加密已启用（后续 RTSP 报文全部加密）")
+                log("AIRPLAY: 控制通道加密已启用")
                 return keys
             } catch (error: IOException) {
                 log("AIRPLAY: 配对第 $attempt 次尝试失败 - ${error.message}")

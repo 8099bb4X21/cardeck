@@ -28,6 +28,8 @@ class Iap2BluetoothServer(
     private val context: Context,
     private val log: (String) -> Unit,
     private val onEndpoint: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
+    /** 0x5703 一到即触发（绑 WiFi + 广播 _carplay-ctrl），真车 0x4301 的前置条件。 */
+    private val onWifiCredentials: (Iap2SenderSession.WifiConfiguration) -> Unit = {},
 ) {
     companion object {
         /**
@@ -113,8 +115,17 @@ class Iap2BluetoothServer(
         }
         val channel = Iap2LinkChannel(stream, name = "iap2-bt") { line -> log(line) }
         activeChannel = channel
+        BtSessionGate.inboundActive = true
         try {
-            val session = Iap2SenderSession(channel) { line -> log(line) }
+            val mac = com.lizhihua.carplaysender.util.DeviceIdentity.bluetoothMac(context)
+            val name = com.lizhihua.carplaysender.util.DeviceIdentity.deviceName(context)
+            val session = Iap2SenderSession(
+                channel,
+                { line -> log(line) },
+                mac,
+                name,
+                onWifiCredentials,
+            )
             val endpoint = session.run(SESSION_TIMEOUT_MILLIS)
             onEndpoint(endpoint)
             // Phase 2 过渡：保持控制通道存活记录配件消息；AirPlay 配对由
@@ -125,6 +136,7 @@ class Iap2BluetoothServer(
             log("SESSION 失败: ${error.message}")
         } finally {
             activeChannel = null
+            BtSessionGate.inboundActive = false
             channel.close()
             log("SESSION 结束，等待接收端重连（BT 监听仍在运行）")
         }

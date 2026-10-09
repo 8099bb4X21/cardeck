@@ -101,7 +101,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="启动连接（蓝牙监听，等待车机回连）" />
+            android:text="启动连接（主动连车机 / 测试台等回连）" />
 
         <Button
             android:id="@+id/btnDimNow"
