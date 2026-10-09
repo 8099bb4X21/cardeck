@@ -169,7 +169,23 @@ class MainActivity : AppCompatActivity() {
             if (!bluetoothServer.hasPermission()) {
                 permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
             }
+            // 通知权限（API 33+）：前台服务通知可见；拒绝也不影响保活
+            if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                permissionLauncher.launch("android.permission.POST_NOTIFICATIONS")
+            }
+            // 前台保活：连接期间进程不被后台清理杀死
+            com.lizhihua.carplaysender.service.CarPlayService.start(this)
             bluetoothServer.start()
+        }
+        findViewById<Button>(R.id.btnDisconnect).setOnClickListener {
+            com.lizhihua.carplaysender.service.CarPlayService.stop(this)
+            bluetoothServer.stop()
+            ctrlAdvertiser.stop()
+            wifiConnector.release()
+            log("已手动断开并停止保活服务")
         }
         findViewById<Button>(R.id.btnAdvertise).setOnClickListener {
             ctrlAdvertiser.start()
@@ -208,9 +224,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        wifiConnector.release()
-        serviceBrowser.stop()
-        bluetoothServer.stop()
-        ctrlAdvertiser.stop()
+        // 注意：不再在这里拆连接——Activity 销毁（如划掉任务）时连接由前台服务保活；
+        // 显式断开请用「断开」按钮。
     }
 }
