@@ -51,10 +51,18 @@ class CarPlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, buildNotification())
+        // 必须显式指定类型为 connectedDevice：
+        // 2 参 startForeground 会拾取 manifest 声明的全部类型（含 mediaProjection），
+        // 而 Android 14 启动 mediaProjection 类型要求 AppOps PROJECT_MEDIA（用户当次授权才有效）——
+        // 重启/授权过期后直接 SecurityException 崩溃（2026-10-09 实测踩坑）。
+        androidx.core.app.ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            buildNotification(),
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+        )
         acquireLocks()
-        // Android 14+ 顺序要求：先以 mediaProjection 类型声明前台，再 getMediaProjection；
-        // 否则主线程 SecurityException 闪退
+        // 授权结果在（用户刚确认投屏）时：升级前台类型再创建投影（try/catch 兜底不崩）
         if (pendingProjectionResult != null) {
             upgradeToProjection()
             takeProjection()

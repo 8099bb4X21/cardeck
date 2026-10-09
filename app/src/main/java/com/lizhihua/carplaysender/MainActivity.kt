@@ -173,8 +173,8 @@ class MainActivity : AppCompatActivity() {
                                                 report != null
                                             ) {
                                                 val contacts = com.lizhihua.carplaysender.input.TouchReports.parse(report)
-                                                if (touchLogCount < 20) {
-                                                    touchLogCount++
+                                                touchLogCount++
+                                                if (touchLogCount <= 30 || touchLogCount % 50 == 0) {
                                                     log(
                                                         "EVENT: 触摸 " + contacts.joinToString {
                                                             "#${it.slot}(${it.xPixels},${it.yPixels})${if (it.down) "↓" else "↑"}"
@@ -317,7 +317,12 @@ class MainActivity : AppCompatActivity() {
                     com.lizhihua.carplaysender.ui.ScreenDimmer.attach(this)
                 }
             } else {
-                com.lizhihua.carplaysender.ui.ScreenDimmer.detach()
+                if (com.lizhihua.carplaysender.launcher.VirtualLauncher.appDisplayId >= 0) {
+                    // 会话中：仅关闭常亮/暗幕，保留触摸探针（任务看护需要）
+                    com.lizhihua.carplaysender.ui.ScreenDimmer.disableDim()
+                } else {
+                    com.lizhihua.carplaysender.ui.ScreenDimmer.detach()
+                }
             }
             log("MODE: 常亮+暗幕 ${if (checked) "开启" else "关闭"}")
         }
@@ -352,6 +357,26 @@ class MainActivity : AppCompatActivity() {
                 permissionLauncher.launch("android.permission.POST_NOTIFICATIONS")
             }
             // 前台保活：连接期间进程不被后台清理杀死
+            // 隐形屏模式：连接时提示 Shizuku 状态（冻结/未授权时触摸注入会失败）
+            if (com.lizhihua.carplaysender.input.TouchRouter.mode ==
+                com.lizhihua.carplaysender.input.TouchRouter.Mode.HIDDEN
+            ) {
+                when (com.lizhihua.carplaysender.shizuku.ShizukuGate.state(this)) {
+                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY ->
+                        log("SHIZUKU: 就绪（触摸注入可用）")
+
+                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.UNAUTHORIZED -> {
+                        log("SHIZUKU: 未授权本应用——已发起授权请求，请在弹窗点允许后重连")
+                        com.lizhihua.carplaysender.shizuku.ShizukuGate.requestPermission()
+                    }
+
+                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_RUNNING ->
+                        log("SHIZUKU: 服务未运行——打开 Shizuku App 点「启动」")
+
+                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_INSTALLED ->
+                        log("SHIZUKU: 未安装（隐形屏模式需要）")
+                }
+            }
             com.lizhihua.carplaysender.service.CarPlayService.start(this)
             bluetoothServer.start()
         }
@@ -422,6 +447,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        com.lizhihua.carplaysender.input.TouchRouter.logSink = { line -> log(line) }
+        com.lizhihua.carplaysender.launcher.VirtualLauncher.logSink = { line -> log(line) }
+        com.lizhihua.carplaysender.shizuku.CarInputClient.logSink = { line -> log(line) }
+
         log("CarPlay Sender Phase 0 就绪")
         log("测试台流程：两台手机蓝牙配对 -> 备用机跑 xcertplay 无线模式 -> 本机 ③ 监听")
     }
@@ -429,6 +458,7 @@ class MainActivity : AppCompatActivity() {
     private fun log(message: String) {
         // 镜像到 logcat：真机排查（息屏/断链类问题）必须能从 adb 侧看到协议日志
         android.util.Log.i("CarPlaySender", message)
+        appendDebugFile(message)
         // 关闭「监听日志」后：不采集也不渲染（状态行仍更新）
         if (preferences().getBoolean("logEnabled", true)) {
             runOnUiThread {
@@ -474,6 +504,26 @@ class MainActivity : AppCompatActivity() {
 
     private fun preferences(): android.content.SharedPreferences =
         getSharedPreferences("settings", Context.MODE_PRIVATE)
+
+    /**
+     * 日志落盘（files/main_debug.log）：荣耀机型 logcat 被 HKS 加密，
+     * 该文件是 adb 侧唯一调试通道（run-as 读取）。2MB 上限自动滚动。
+     */
+    private fun appendDebugFile(message: String) {
+        try {
+            synchronized(debugFileLock) {
+                val file = java.io.File(filesDir, "main_debug.log")
+                if (file.length() > 2_000_000) file.delete()
+                java.io.FileWriter(file, true).use { writer ->
+                    writer.append('[').append(timestamp.format(Date())).append("] ")
+                        .append(message).append('\n')
+                }
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private val debugFileLock = Any()
 
     override fun onDestroy() {
         super.onDestroy()

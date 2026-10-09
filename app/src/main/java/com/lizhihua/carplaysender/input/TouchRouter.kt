@@ -34,12 +34,28 @@ object TouchRouter {
     @Volatile
     var carHeight: Int = 0
 
+    /** 诊断日志出口（由 MainActivity 接到文件日志）。 */
+    @Volatile
+    var logSink: ((String) -> Unit)? = null
+
+    private var diagAt = 0L
+
+    private fun diag(message: String) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - diagAt < 1000L) return
+        diagAt = now
+        logSink?.invoke("TOUCH: $message")
+    }
+
     private var pressed = false
     private var pressedDisplay = -1
+    private var failStreak = 0
 
     fun onContact(context: Context, contact: Contact) {
         // 空闲槽占位（未按下且 0,0）忽略
         if (!contact.down && contact.xPixels == 0 && contact.yPixels == 0) return
+        // 车机侧触摸踪迹：任务看护用它区分「车机操作」与「手机操作」
+        com.lizhihua.carplaysender.launcher.VirtualLauncher.onCarTouch()
         when (mode) {
             Mode.DESKTOP -> renderer?.dispatchTouch(contact)
 
@@ -76,37 +92,62 @@ object TouchRouter {
                 val launcher = com.lizhihua.carplaysender.launcher.VirtualLauncher
                 val dockW = launcher.dockWidthPx
                 if (dockW <= 0 || launcher.appDisplayId < 0) return
-                val svc = CarInputClient.service
+                var svc = CarInputClient.service
                 if (svc == null) {
-                    Log.w("TouchRouter", "隐形屏注入服务不可用")
+                    // 主动触发重绑（手机重启/Shizuku 重启后 binder 丢失）
+                    CarInputClient.ensure(context)
+                    svc = CarInputClient.service
+                }
+                if (svc == null) {
+                    failStreak++
+                    diag(
+                        "注入服务不可用（连续 $failStreak 次，自动重绑中；" +
+                            "若持续失效请打开 Shizuku App 或在系统设置中允许其后台运行）",
+                    )
                     return
                 }
+                failStreak = 0
                 // 主画面坐标 → 分流：dock 区（x < dockW）→ dock 屏；其余 → 应用屏（x 平移）
                 val inDock = contact.xPixels < dockW
                 val targetDisplay = if (inDock) launcher.dockDisplayId else launcher.appDisplayId
-                if (targetDisplay < 0) return
+                if (targetDisplay < 0) {
+                    diag("目标屏无效 dock=${launcher.dockDisplayId} app=${launcher.appDisplayId}")
+                    return
+                }
                 val localX = if (inDock) contact.xPixels else contact.xPixels - dockW
                 val localY = contact.yPixels
                 try {
-                    if (contact.down && !pressed) {
-                        pressed = true
-                        pressedDisplay = targetDisplay
-                        svc.pointerDown(targetDisplay, localX, localY)
-                    } else if (contact.down) {
-                        // 跨屏拖动：先在旧屏收笔，再在新屏按下
-                        if (pressedDisplay != targetDisplay) {
-                            runCatching { svc.pointerUp(pressedDisplay, 0, 0) }
-                            svc.pointerDown(targetDisplay, localX, localY)
+                    val ok: Boolean = when {
+                        contact.down && !pressed -> {
+                            pressed = true
                             pressedDisplay = targetDisplay
-                        } else {
-                            svc.pointerMove(targetDisplay, localX, localY)
+                            svc.pointerDown(targetDisplay, localX, localY)
                         }
-                    } else {
-                        pressed = false
-                        svc.pointerUp(pressedDisplay, localX, localY)
+
+                        contact.down && pressedDisplay != targetDisplay -> {
+                            // 跨屏拖动：先在旧屏收笔，再在新屏按下
+                            runCatching { svc.pointerUp(pressedDisplay, 0, 0) }
+                            pressedDisplay = targetDisplay
+                            svc.pointerDown(targetDisplay, localX, localY)
+                        }
+
+                        contact.down -> svc.pointerMove(targetDisplay, localX, localY)
+
+                        else -> {
+                            pressed = false
+                            svc.pointerUp(pressedDisplay, localX, localY)
+                        }
+                    }
+                    if (!ok) {
+                        diag(
+                            "注入被拒 disp=$targetDisplay ($localX,$localY) " +
+                                "down=${contact.down} pressed=$pressed pressedDisplay=$pressedDisplay",
+                        )
+                    } else if (contact.down) {
+                        diag("注入OK disp=$targetDisplay ($localX,$localY)")
                     }
                 } catch (e: Exception) {
-                    Log.w("TouchRouter", "注入失败：${e.message}")
+                    diag("注入异常：${e.message}")
                 }
             }
         }
@@ -117,6 +158,7 @@ object TouchRouter {
 
     fun reset() {
         pressed = false
+        pressedDisplay = -1
         StrokeInjector.reset()
     }
 }

@@ -93,8 +93,15 @@ class DockActivity : AppCompatActivity() {
         refresh()
     }
 
+    private var lastRendered: List<String> = emptyList()
+
     private fun refresh() {
         val container = list ?: return
+        val current = synchronized(VirtualLauncher.runningApps) {
+            VirtualLauncher.runningApps.map { it.flattenToString() }
+        }
+        if (current == lastRendered) return
+        lastRendered = current
         container.removeAllViews()
         val density = resources.displayMetrics.density
         val dp = { v: Int -> (v * density).toInt() }

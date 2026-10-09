@@ -199,13 +199,21 @@ class DualDisplayComposer(
         onSurfacesReady?.invoke(dock.surface, app.surface)
         startLatch?.countDown()
 
-        // ---- 合成循环：轮询新帧（16ms 节拍足够 60fps）----
+        // ---- 合成循环 ----
+        // 有输入新帧：立即合成。
+        // 无新帧（界面静止，如启动器/阅读页/地图停靠）：以 33ms 心跳重复合成最后一帧内容——
+        // 否则编码器无输入、视频流停摆，接收端画面冻结（表现为"桌面卡死/不可交互"，
+        // 2026-10-09 实测踩坑：触摸其实送到了，只是没有帧能反映出来）。
         try {
+            var lastComposeAt = System.currentTimeMillis()
             while (running.get()) {
-                if (dock.hasNewFrame || app.hasNewFrame) {
+                val hasNew = dock.hasNewFrame || app.hasNewFrame
+                val now = System.currentTimeMillis()
+                if (hasNew || now - lastComposeAt >= 33) {
                     composeFrame(fullRedraw = false)
+                    lastComposeAt = now
                 } else {
-                    Thread.sleep(16)
+                    Thread.sleep(8)
                 }
             }
         } catch (_: InterruptedException) {

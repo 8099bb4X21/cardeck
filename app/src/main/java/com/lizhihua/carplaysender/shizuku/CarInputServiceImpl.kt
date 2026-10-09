@@ -2,6 +2,7 @@ package com.lizhihua.carplaysender.shizuku
 
 import android.content.Context
 import android.hardware.input.InputManager
+import android.view.Surface
 import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
@@ -166,6 +167,67 @@ class CarInputServiceImpl(private val context: Context) : ICarInput.Stub() {
         return inject(up, displayId)
     }
 
+    // ---- 受信虚拟屏 ----
+
+    // VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 << 30（@hide/@SystemApi，编译期不可引用，写原始值）
+    private val virtualDisplays = HashMap<Int, android.hardware.display.VirtualDisplay>()
+
+    /** 文件日志：shell 进程 logcat 被 HKS 加密，写 /data/local/tmp 供 adb 读取。 */
+    private fun fileLog(message: String) {
+        try {
+            java.io.FileWriter("/data/local/tmp/carinput_svc.log", true).use { w ->
+                w.append(android.text.format.DateFormat.format("HH:mm:ss.SSS", System.currentTimeMillis()).toString())
+                    .append(' ').append(message).append('\n')
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    override fun createDisplay(name: String, width: Int, height: Int, dpi: Int, surface: Surface): Int {
+        return try {
+            fileLog("createDisplay $name ${width}x$height@$dpi start")
+            // 关键：必须用「shell 包的 Context」——系统检查 packageName 与调用 uid(2000) 匹配，
+            // 用本 app 的 Context 会报 SecurityException('packageName must match the owner uid')
+            val shellContext = try {
+                context.createPackageContext("com.android.shell", 0)
+            } catch (t: Throwable) {
+                fileLog("createPackageContext(com.android.shell) 失败：$t，回退本 app context")
+                context
+            }
+            fileLog("ctx package=${shellContext.packageName}")
+            val dm = shellContext.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+            val flags = FLAG_TRUSTED or
+                android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+            fileLog("flags=0x${flags.toString(16)}")
+            val vd = dm.createVirtualDisplay(name, width, height, dpi, surface, flags, null, null)
+            val id = vd?.display?.displayId ?: -1
+            fileLog("createVirtualDisplay -> vd=$vd id=$id")
+            if (vd == null || id < 0) {
+                Log.w(TAG, "createDisplay $name -> null")
+                return -1
+            }
+            synchronized(virtualDisplays) { virtualDisplays[id] = vd }
+            Log.i(TAG, "createDisplay $name id=$id size=${width}x$height@$dpi flags=0x${flags.toString(16)}")
+            id
+        } catch (t: Throwable) {
+            fileLog("createDisplay $name failed: $t")
+            Log.w(TAG, "createDisplay $name failed: $t")
+            -1
+        }
+    }
+
+    override fun releaseDisplay(displayId: Int): Boolean {
+        val vd = synchronized(virtualDisplays) { virtualDisplays.remove(displayId) } ?: return false
+        return try {
+            vd.release()
+            Log.i(TAG, "releaseDisplay id=$displayId")
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "releaseDisplay $displayId failed: $t")
+            false
+        }
+    }
+
     override fun ping(): Boolean = injector != null
 
     override fun diag(): String {
@@ -175,5 +237,8 @@ class CarInputServiceImpl(private val context: Context) : ICarInput.Stub() {
 
     companion object {
         private const val TAG = "CarInputSvc"
+
+        /** VIRTUAL_DISPLAY_FLAG_TRUSTED（@hide；AOSP 定义 = 1 << 10 = 0x400）。 */
+        private const val FLAG_TRUSTED = 1 shl 10
     }
 }

@@ -33,6 +33,11 @@ object ScreenDimmer {
     @Volatile
     var enabled: Boolean = true
 
+    /** 手机侧最近一次真实触摸时间（uptimeMillis）；任务看护用它区分「用户主动在手机上操作」与「车机内跳转」。 */
+    @Volatile
+    var lastUserTouchAt: Long = 0L
+        private set
+
     private var appContext: Context? = null
     private var windowManager: WindowManager? = null
     private var handler: Handler? = null
@@ -45,24 +50,44 @@ object ScreenDimmer {
     private val showRunnable = Runnable { showDim() }
 
     fun attach(context: Context) {
-        if (!enabled || appContext != null) return
+        if (appContext != null) {
+            // 已附着：本次若为「启用」切换，补齐常亮与自动计时（触摸探针此前已挂）
+            if (enabled) {
+                enableStayAwake(context)
+                handler?.post { schedule() }
+            }
+            return
+        }
         if (!Settings.canDrawOverlays(context)) {
-            Log.w(TAG, "缺少悬浮窗权限，暗幕不可用（常亮仍生效）")
+            Log.w(TAG, "缺少悬浮窗权限，暗幕/触摸探针不可用（常亮不可用）")
             appContext = context.applicationContext
             windowManager = null
             handler = Handler(Looper.getMainLooper())
-            enableStayAwake(context)
             return
         }
         appContext = context.applicationContext
         windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         handler = Handler(Looper.getMainLooper())
-        enableStayAwake(context)
+        if (enabled) enableStayAwake(context)
         handler?.post {
             addWatcher()
-            schedule()
+            if (enabled) schedule()
         }
-        Log.i("CarPlaySender", "DIMMER: 已启动（常亮 + ${IDLE_TIMEOUT_MS / 1000}s 无操作后暗幕，点击恢复）")
+        if (enabled) {
+            Log.i("CarPlaySender", "DIMMER: 已启动（常亮 + ${IDLE_TIMEOUT_MS / 1000}s 无操作后暗幕，点击恢复）")
+        } else {
+            Log.i("CarPlaySender", "DIMMER: 触摸探针已启动（常亮/暗幕关闭，仅用于任务看护）")
+        }
+    }
+
+    /** 关闭常亮/暗幕但保留触摸探针（会话中任务看护仍需手机触摸信号）。 */
+    fun disableDim() {
+        enabled = false
+        val ctx = appContext ?: return
+        restoreTimeout(ctx)
+        handler?.removeCallbacks(showRunnable)
+        handler?.post { hideDim() }
+        Log.i("CarPlaySender", "DIMMER: 常亮/暗幕已关闭（触摸探针保留）")
     }
 
     fun detach() {
@@ -104,9 +129,10 @@ object ScreenDimmer {
 
     /** 物理触摸（任意 app/界面）或暗幕点击时调用。 */
     fun onUserInteraction() {
+        lastUserTouchAt = android.os.SystemClock.uptimeMillis()
         val h = handler ?: return
         if (dimShown) hideDim()
-        schedule()
+        if (enabled) schedule()
     }
 
     private fun schedule() {
@@ -197,9 +223,9 @@ object ScreenDimmer {
                 Log.w(TAG, "读取屏幕超时失败（Shizuku 未就绪？）")
                 return@Thread
             }
-            if (current < TIMEOUT_MAX) {
-                ctx.getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
-                    .putInt("screen_off_timeout_backup", current).apply()
+            val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            if (current < TIMEOUT_MAX && !prefs.contains("screen_off_timeout_backup")) {
+                prefs.edit().putInt("screen_off_timeout_backup", current).apply()
             }
             Shell.exec("settings put system screen_off_timeout $TIMEOUT_MAX")
             Log.i("CarPlaySender", "DIMMER: 屏幕超时设为永不（原值 $current）")
