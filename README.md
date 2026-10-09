@@ -20,8 +20,22 @@
 | Phase 0 | 测试台 + 网络层 demo（本仓库） | 两台手机 mDNS 互发现 | ✅ 已验收（DiPlay 测试台） |
 | Phase 1 | iAP2 发送端会话（链路状态机 + 0x1D00/0x5702/0x4300） | 接收端日志显示「iPhone 接入」 | ✅ 已验收：完整走通至 0x4301，拿到热点凭据与 AirPlay 端点 |
 | Phase 2 | AirPlay 主会话（PairVerify + H.264 编码 + HID 回传） | 备用机显示本机画面并可触摸 | ✅ 已验收（2026-10-08 23:17）：30fps 推流+渲染、触摸事件回传打通 |
-| Phase 3 | 真车（奥迪 MIB3）验证 | 车机点亮 | ⏳ 风险区 |
+| Phase 3 | 真车（奥迪 MIB3）验证 | 车机点亮 | 🔶 进行中（2026-10-09 实车）：iAP2 全链路打通（识别→MFi→凭据→ctrl 邀请→mDNS 端点），卡在 AirPlay 配对（pair-setup 403 → 已实现 pair-verify 快路径，待实车复测） |
 | 兜底 | 买 Tbox 安卓盒子，把同一套自绘 UI 装进盒子 | — | 失败时启用 |
+
+**Phase 3 实车突破（2026-10-09，Audi_MMI_6318 / MHI3_AS_AU_P3801，见 `docs/PROTOCOL-NOTES.md` §9b）**：
+与测试台（DiPlay/xcertplay）相比，奥迪 MIB3 有六处关键差异，逐一修正后 iAP2 全链路首次贯通：
+1. 车机**主动发 SYN** 声明会话表 `{1:control, 2:EA}`，手机必须 ACK+原样回显，
+   之后 CSM 走 **1 号会话**（发 10 号被车机静默丢弃，而链路层照常 ACK——极具迷惑性）
+2. **MFi 挑战必须 20 字节**（32B 车机完全不应答；测试台 DiPlay 反而要 32B → 做成 32/20/16 回退）
+3. 车机**不发 0x4301**（识别帧能力清单实锤：可收 0x4e0c/0x4e09/0x4e0d/0x4e0e/0x5702/0xea00/0xea01、
+   可发 0x5703/0xea03）→ AirPlay 端点只能走 WiFi 上 **mDNS `_airplay._tcp`** 发现
+4. **ctrl 邀请死锁**：车机在 WiFi 上发现手机 `_carplay-ctrl._tcp` 并 `GET /ctrl-int/1/connect`
+   邀请后才开放 AirPlay 窗口 → 手机必须**在 0x5703 到达时立即**绑热点+广播 ctrl
+5. ctrl TXT `id` 必须是**真实蓝牙 MAC**（Shizuku shell 读 `settings secure bluetooth_address`；
+   应用层 API 只有占位 `02:00:…`，占位值导致车机不邀请 → 双向死锁）
+6. pair-setup 被 **403**（奥迪不接受匿名 SRP 配对）→ 转「已配对设备」pair-verify 快路径；
+   且**绝不能**断 BT 控制会话（测试台 detach hack 会让奥迪拆掉整轮会话）
 
 **Phase 1 真机调试记录（2026-10-08，DiPlay on Redmi K40）**：
 1. `StreamDuplexStream` 读写共享锁导致死锁（读阻塞持锁，写永远等待）→ 读写分离
