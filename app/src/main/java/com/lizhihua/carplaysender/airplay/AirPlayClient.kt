@@ -312,7 +312,13 @@ class AirPlayClient(
                 val buffer = ByteArray(8192)
                 try {
                     while (true) {
-                        val count = input.read(buffer)
+                        val count = try {
+                            input.read(buffer)
+                        } catch (_: java.net.SocketTimeoutException) {
+                            // 30s 空闲是正常状态（事件通道低频）：仅作唤醒节拍，绝不能退出——
+                            // 读取线程退出会被接收端视作事件连接断开并拆除整个会话（含视频/蓝牙）
+                            continue
+                        }
                         if (count < 0) {
                             log("EVENT: 通道关闭（EOF）")
                             break

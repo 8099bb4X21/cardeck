@@ -17,11 +17,48 @@ import androidx.core.app.NotificationCompat
  */
 class CarPlayService : Service() {
 
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
+        acquireLocks()
         return START_STICKY
+    }
+
+    /**
+     * 息屏保活：CPU 唤醒锁维持编码/协议线程与 TCP 存活探测的响应；
+     * WiFi 低延迟锁阻止无线进入激进省电（否则接收端 20s 内判死拆链）。
+     */
+    private fun acquireLocks() {
+        if (wakeLock?.isHeld == true && wifiLock?.isHeld == true) return
+        val power = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        wakeLock = power.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "CarPlaySender:session").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+        wifiLock = wifi.createWifiLock(
+            android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY,
+            "CarPlaySender:wifi",
+        ).apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    private fun releaseLocks() {
+        runCatching { wakeLock?.release() }
+        wakeLock = null
+        runCatching { wifiLock?.release() }
+        wifiLock = null
+    }
+
+    override fun onDestroy() {
+        releaseLocks()
+        super.onDestroy()
     }
 
     private fun buildNotification(): Notification {

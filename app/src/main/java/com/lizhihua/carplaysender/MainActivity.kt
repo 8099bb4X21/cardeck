@@ -44,6 +44,18 @@ class MainActivity : AppCompatActivity() {
     private var touchLogCount = 0
 
     private var videoSender: com.lizhihua.carplaysender.video.VideoSender? = null
+    private var currentRenderer: com.lizhihua.carplaysender.ui.CarDisplayRenderer? = null
+    private var currentClient: com.lizhihua.carplaysender.airplay.AirPlayClient? = null
+
+    /** 新 BT 周期开始前彻底退役上一代会话（旧管线泄漏会累积编码器/虚拟显示器，最终 dequeueBuffer -19）。 */
+    private fun retirePreviousSession() {
+        videoSender?.stop()
+        videoSender = null
+        currentRenderer?.release()
+        currentRenderer = null
+        currentClient?.close()
+        currentClient = null
+    }
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -79,13 +91,16 @@ class MainActivity : AppCompatActivity() {
                             log = { line -> log(line) },
                             context = applicationContext,
                         )
+                        retirePreviousSession()
                         // 第一阶段：保持 BT 在位直接配对 + SETUP（协议上正确的形态）
                         var client = newClient()
+                        currentClient = client
                         var keys = client.runPairing()
                         if (keys == null) {
                             // 第二阶段：复现「BT 控制已结束」状态再试一次
                             bluetoothServer.detachCurrentSession()
                             client = newClient()
+                            currentClient = client
                             keys = client.runPairing()
                         }
                         if (keys != null) {
@@ -102,6 +117,7 @@ class MainActivity : AppCompatActivity() {
                                     height = setup.displayHeight,
                                     log = { line -> log(line) },
                                 )
+                                currentRenderer = renderer
                                 client.connectEventChannel(keys.sharedSecret, setup) { command ->
                                     when (command["type"]) {
                                         "hidSendReport" -> {
@@ -224,6 +240,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun log(message: String) {
+        // 镜像到 logcat：真机排查（息屏/断链类问题）必须能从 adb 侧看到协议日志
+        android.util.Log.i("CarPlaySender", message)
         runOnUiThread {
             logBuilder.append('[').append(timestamp.format(Date())).append("] ")
                 .append(message).append('\n')

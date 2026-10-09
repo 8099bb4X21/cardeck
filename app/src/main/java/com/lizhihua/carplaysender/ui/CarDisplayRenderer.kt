@@ -83,12 +83,20 @@ class CarDisplayRenderer(
                         findViewById<Button>(R.id.btnRed).setOnClickListener { onClick("红色") }
                         findViewById<Button>(R.id.btnGreen).setOnClickListener { onClick("绿色") }
                         findViewById<Button>(R.id.btnBlue).setOnClickListener { onClick("蓝色") }
-                        // 时钟每 33ms 刷新：驱动持续绘制，保证视频流不因静止而中断
+                        // 时钟每 33ms 刷新：驱动持续绘制，保证视频流不因静止而中断。
+                        // 注意：必须无条件重排自己——窗口挂载是异步的，若首次执行时
+                        // 尚未 attach 就 return，ticker 会当场死亡（静止时零出帧、
+                        // 画面冻结，看似断联）。
                         val format = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
                         val tick = object : Runnable {
                             override fun run() {
-                                if (presentation == null || !status.isAttachedToWindow) return
-                                status.text = format.format(Date()) + "  " + lastStatus
+                                if (presentation != null) {
+                                    if (status.isAttachedToWindow) {
+                                        status.text = format.format(Date()) + "  " + lastStatus
+                                    }
+                                    // 双保险：强制整棵视图树重绘，确保每拍都有新帧
+                                    window?.decorView?.postInvalidate()
+                                }
                                 mainHandler.postDelayed(this, 33)
                             }
                         }

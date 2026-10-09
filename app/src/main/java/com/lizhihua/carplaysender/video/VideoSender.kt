@@ -98,26 +98,34 @@ class VideoSender(
         val codec = encoder ?: return
         val output = socket?.getOutputStream() ?: return
         val bufferInfo = MediaCodec.BufferInfo()
-        while (running.get()) {
-            val index = try {
-                codec.dequeueOutputBuffer(bufferInfo, 10_000)
-            } catch (_: Exception) {
-                break
-            }
-            when {
-                index == MediaCodec.INFO_TRY_AGAIN_LATER -> continue
+        try {
+            while (running.get()) {
+                val index = try {
+                    codec.dequeueOutputBuffer(bufferInfo, 10_000)
+                } catch (_: Exception) {
+                    break
+                }
+                when {
+                    index == MediaCodec.INFO_TRY_AGAIN_LATER -> continue
 
-                index >= 0 -> {
-                    val buffer = codec.getOutputBuffer(index) ?: continue
-                    val flags = bufferInfo.flags
-                    if (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                        sendVideoConfig(buffer, bufferInfo.size, output)
-                    } else if (bufferInfo.size > 0) {
-                        sendVideoFrame(buffer, bufferInfo.size, flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0, output)
+                    index >= 0 -> {
+                        val buffer = codec.getOutputBuffer(index) ?: continue
+                        val flags = bufferInfo.flags
+                        if (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                            sendVideoConfig(buffer, bufferInfo.size, output)
+                        } else if (bufferInfo.size > 0) {
+                            sendVideoFrame(buffer, bufferInfo.size, flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0, output)
+                        }
+                        codec.releaseOutputBuffer(index, false)
                     }
-                    codec.releaseOutputBuffer(index, false)
                 }
             }
+        } catch (error: Exception) {
+            // 视频数据口断开（如接收端屏幕关闭收摊会话）：只终止推流，绝不冒泡——
+            // 后台线程未捕获异常会杀死整个进程（曾导致锁屏后 app 消失）
+            log("VIDEO: 推流中止 - ${error.message}（等待接收端恢复后重连）")
+        } finally {
+            stop()
         }
     }
 
