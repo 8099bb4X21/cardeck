@@ -42,8 +42,13 @@ DiPlay 侧 logcat 确认：5 个 POST 全部处理，随即 `airplay control enc
 **Phase 2 全链路验收（2026-10-08 23:17）**：控制面（蓝牙 iAP2 → pair-setup/verify →
 加密 RTSP → SETUP → 事件通道 → 流协商 → RECORD）+ 数据面（MediaCodec H.264 →
 128 字节头+ChaCha20 帧封装 → TCP 推流）。接收端实测 rx=shown=29.6fps、decode p50=6ms、
-touch2frame 18ms、recoveries=0。剩余：触摸事件消费（hidSendReport 解析→UI 命中）、
-正式车机桌面 UI 替换测试卡、音频流、真车（Phase 3）。
+touch2frame 18ms、recoveries=0。
+
+**触摸闭环验收（2026-10-09 10:20）**：事件通道命令解析（RtspAccumulator + plist）→
+hidSendReport 双槽报文解析（u16LE 像素坐标）→ UI 命中测试。真机确认：按住高亮、
+松开熄灭、计数递增、坐标实时刷新；拖动轨迹完整。注意坑：报文第二槽是
+`(0,0)↑` 空闲占位，必须过滤，否则覆盖真实手指状态。剩余：正式车机桌面 UI
+（导航/音乐）替换测试界面、音频流、真车（Phase 3）。
 
 ## 测试台搭建（Phase 0 使用说明）
 

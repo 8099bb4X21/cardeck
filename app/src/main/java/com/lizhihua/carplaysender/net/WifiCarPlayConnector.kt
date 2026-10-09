@@ -69,6 +69,8 @@ class WifiCarPlayConnector(
      * 绑定到当前已连接的 WiFi 网络（用户经系统设置手动加入热点后调用）。
      * 热点无互联网时系统可能不把它设为默认网络，必须显式 bindProcessToNetwork，
      * 我们的 socket 才会走 WiFi 而不是蜂窝。
+     * 带看门狗：WiFi 未连接时 requestNetwork 会无限静默挂起——5 秒无果给出明确指引
+     * （请求保持挂起，用户加入热点后仍会自动完成绑定并回调）。
      */
     fun bindCurrentWifi(onResult: (Boolean) -> Unit = {}) {
         release()
@@ -76,21 +78,41 @@ class WifiCarPlayConnector(
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
+        var reported = false
         val newCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 boundNetwork.set(network)
                 val bound = connectivityManager.bindProcessToNetwork(network)
                 log("WiFi: 已绑定当前WiFi网络 $network bindProcessToNetwork=$bound")
-                onResult(true)
+                if (!reported) {
+                    reported = true
+                    onResult(true)
+                }
             }
 
             override fun onUnavailable() {
                 log("WiFi: 没有可用的WiFi连接——请先在系统设置里加入接收端热点")
-                onResult(false)
+                if (!reported) {
+                    reported = true
+                    onResult(false)
+                }
             }
         }
         callback.set(newCallback)
         connectivityManager.requestNetwork(request, newCallback)
+        Thread({
+            try {
+                Thread.sleep(5_000)
+            } catch (_: InterruptedException) {
+                return@Thread
+            }
+            if (!reported) {
+                log("WiFi: 5 秒未绑定——手机当前不在任何WiFi上。请到 设置>WLAN 加入接收端热点（如 \"Redmi K40\"），加入后本轮挂起的绑定会自动完成")
+            }
+        }, "wifi-bind-watchdog").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     fun release() {

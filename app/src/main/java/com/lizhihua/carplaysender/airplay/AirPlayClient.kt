@@ -256,9 +256,14 @@ class AirPlayClient(
     /**
      * 连接事件通道（接收端在 SETUP 应答的 eventPort 上等我们）。事件通道用
      * Events 密钥加密（注意方向标签与直觉相反：接收端用 Events-Read 读我们的数据）。
-     * 连接后启动读取线程，把收到的解密明文按行打日志（触摸 HID 事件将在此出现）。
+     * 读取线程把解密明文按 RTSP 报文重组、解析 plist 命令（如 hidSendReport 触摸）
+     * 并回调 [onCommand]。
      */
-    fun connectEventChannel(sharedSecret: ByteArray, setup: SetupInfo) {
+    fun connectEventChannel(
+        sharedSecret: ByteArray,
+        setup: SetupInfo,
+        onCommand: (Map<*, *>) -> Unit = {},
+    ) {
         if (setup.eventPort == 0) {
             log("EVENT: SETUP 未提供 eventPort，跳过")
             return
@@ -268,7 +273,7 @@ class AirPlayClient(
             val socket = Socket()
             socket.connect(InetSocketAddress(host, setup.eventPort), 5_000)
             socket.tcpNoDelay = true
-            socket.soTimeout = 15_000
+            socket.soTimeout = 30_000
             log("EVENT: ✓ 已连接事件通道 $host:${setup.eventPort}")
             val phoneWriteKey = AirPlayCrypto.hkdfSha512(
                 sharedSecret,
@@ -283,6 +288,7 @@ class AirPlayClient(
             val cipher = ControlCipher(phoneReadKey, phoneWriteKey)
             Thread({
                 val input = socket.getInputStream()
+                val accumulator = RtspAccumulator()
                 var pending = ByteArray(0)
                 val buffer = ByteArray(8192)
                 try {
@@ -295,12 +301,22 @@ class AirPlayClient(
                         pending += buffer.copyOf(count)
                         val decrypted = cipher.decrypt(pending)
                         pending = decrypted.rest
-                        if (decrypted.data.isNotEmpty()) {
-                            log(
-                                "EVENT: 收到 ${decrypted.data.size} 字节：" +
-                                    decrypted.data.toString(Charsets.ISO_8859_1)
-                                        .lineSequence().firstOrNull { it.isNotBlank() }.orEmpty(),
-                            )
+                        for ((firstLine, body) in accumulator.offer(decrypted.data)) {
+                            if (!firstLine.contains("/command")) continue
+                            val command = try {
+                                BinaryPlist.parse(body) as? Map<*, *>
+                            } catch (_: IllegalArgumentException) {
+                                null
+                            }
+                            if (command == null) {
+                                log("EVENT: 命令 plist 解析失败 [$firstLine] body=${body.size}B")
+                                continue
+                            }
+                            try {
+                                onCommand(command)
+                            } catch (error: Exception) {
+                                log("EVENT: 命令处理异常 - ${error.message}")
+                            }
                         }
                     }
                 } catch (error: IOException) {
@@ -312,6 +328,41 @@ class AirPlayClient(
             }
         } catch (error: IOException) {
             log("EVENT: 连接失败 - ${error.message}")
+        }
+    }
+
+    /** 流式 RTSP 报文重组器：喂入任意分片明文，弹出完整消息（首行 + body）。 */
+    private class RtspAccumulator {
+        private var buffer = ByteArray(0)
+
+        fun offer(bytes: ByteArray): List<Pair<String, ByteArray>> {
+            if (bytes.isEmpty()) return emptyList()
+            buffer += bytes
+            val messages = ArrayList<Pair<String, ByteArray>>()
+            val separator = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
+            while (true) {
+                val index = indexOf(buffer, separator)
+                if (index < 0) break
+                val headText = String(buffer, 0, index, Charsets.ISO_8859_1)
+                val contentLength = Regex("Content-Length:\\s*(\\d+)", RegexOption.IGNORE_CASE)
+                    .find(headText)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val bodyStart = index + separator.size
+                if (buffer.size - bodyStart < contentLength) break
+                val firstLine = headText.lineSequence().firstOrNull() ?: ""
+                messages += firstLine to buffer.copyOfRange(bodyStart, bodyStart + contentLength)
+                buffer = buffer.copyOfRange(bodyStart + contentLength, buffer.size)
+            }
+            return messages
+        }
+
+        private fun indexOf(source: ByteArray, target: ByteArray): Int {
+            outer@ for (index in 0..source.size - target.size) {
+                for (offset in target.indices) {
+                    if (source[index + offset] != target[offset]) continue@outer
+                }
+                return index
+            }
+            return -1
         }
     }
 
@@ -331,10 +382,14 @@ class AirPlayClient(
             newSocket.connect(InetSocketAddress(host, endpoint.airPlayPort), timeoutMillis)
             newSocket.soTimeout = timeoutMillis
             socket = newSocket
-            log("AIRPLAY: TCP 已连通 $host:${endpoint.airPlayPort}")
+            log("AIRPLAY: TCP 已连通 $host:${endpoint.airPlayPort}（本机 ${newSocket.localAddress.hostAddress}）")
             true
         } catch (error: IOException) {
-            log("AIRPLAY: 连接失败 - ${error.message}")
+            log(
+                "AIRPLAY: 连接失败 - ${error.message}\n" +
+                    "  ↳ 若反复失败：确认手机当前连的是接收端热点 \"${endpoint.ssid}\"，" +
+                    "而不是家里/公司 WiFi（绑定到的网络不对时到达不了车机网段）",
+            )
             false
         }
     }

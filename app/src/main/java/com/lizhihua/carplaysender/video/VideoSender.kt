@@ -30,6 +30,7 @@ class VideoSender(
     private val streamKey: ByteArray,
     private val width: Int,
     private val height: Int,
+    private val state: CarUiState,
     private val log: (String) -> Unit,
 ) {
     private var socket: Socket? = null
@@ -90,14 +91,20 @@ class VideoSender(
         socket = null
     }
 
-    // ---- 绘制：测试画面（彩条 + 帧号） ----
+    // ---- 绘制：交互测试界面（按钮 + 点击计数），触摸来自车机事件通道 ----
 
     private fun drawLoop(surface: Surface) {
         val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.WHITE
-            textSize = 64f
+            textSize = height * 0.03f
         }
-        val small = android.graphics.Paint(paint).apply { textSize = 36f }
+        val small = android.graphics.Paint(paint).apply { textSize = height * 0.018f }
+        val dim = android.graphics.Paint(paint).apply { alpha = 90 }
+        val activeStroke = android.graphics.Paint(paint).apply {
+            style = android.graphics.Paint.Style.STROKE
+            strokeWidth = 10f
+        }
+        val background = android.graphics.Paint().apply { color = 0xFF101418.toInt() }
         var frame = 0L
         while (running.get()) {
             val canvas = try {
@@ -106,24 +113,61 @@ class VideoSender(
                 break
             }
             try {
-                val bands = 8
-                val bandWidth = width.toFloat() / bands
-                val colors = intArrayOf(
-                    android.graphics.Color.WHITE, android.graphics.Color.YELLOW, android.graphics.Color.CYAN,
-                    android.graphics.Color.GREEN, android.graphics.Color.MAGENTA, android.graphics.Color.RED,
-                    android.graphics.Color.BLUE, android.graphics.Color.BLACK,
+                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), background)
+                paint.color = android.graphics.Color.WHITE
+                canvas.drawText("CarPlay Sender", width * 0.07f, height * 0.12f, paint)
+                small.color = 0xFF9AB0C4.toInt()
+                canvas.drawText(
+                    "点下面的按钮（触摸来自车机屏）",
+                    width * 0.07f,
+                    height * 0.17f,
+                    small,
                 )
-                for (band in 0 until bands) {
-                    paint.color = colors[band]
-                    canvas.drawRect(
-                        band * bandWidth, 0f,
-                        (band + 1) * bandWidth, height.toFloat(),
-                        paint,
+
+                for (index in state.buttonLabels.indices) {
+                    val top = state.buttonTop(index)
+                    val active = state.activeButton == index
+                    val fill = android.graphics.Paint().apply {
+                        color = state.buttonColors[index].toInt()
+                        alpha = if (active) 255 else 110
+                    }
+                    canvas.drawRoundRect(
+                        state.buttonLeft,
+                        top,
+                        state.buttonLeft + state.buttonWidth,
+                        top + state.buttonHeight,
+                        40f,
+                        40f,
+                        fill,
+                    )
+                    if (active) {
+                        activeStroke.color = android.graphics.Color.WHITE
+                        canvas.drawRoundRect(
+                            state.buttonLeft,
+                            top,
+                            state.buttonLeft + state.buttonWidth,
+                            top + state.buttonHeight,
+                            40f,
+                            40f,
+                            activeStroke,
+                        )
+                    }
+                    dim.color = android.graphics.Color.WHITE
+                    canvas.drawText(
+                        state.buttonLabels[index],
+                        state.buttonLeft + state.buttonWidth / 2 - paint.measureText(state.buttonLabels[index]) / 2,
+                        top + state.buttonHeight / 2 + paint.textSize / 3,
+                        dim,
                     )
                 }
-                paint.color = android.graphics.Color.WHITE
-                canvas.drawText("CarPlay Sender", 40f, height / 2f, paint)
-                canvas.drawText("frame $frame  ${width}x$height", 40f, height / 2f + 80f, small)
+
+                small.color = 0xFF7EE3A0.toInt()
+                canvas.drawText(
+                    "点击 ${state.taps.get()} 次   最近触摸 ${state.lastTouch}",
+                    width * 0.07f,
+                    height * 0.9f,
+                    small,
+                )
             } finally {
                 surface.unlockCanvasAndPost(canvas)
             }

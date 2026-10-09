@@ -41,6 +41,7 @@ class MainActivity : AppCompatActivity() {
 
     private val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private val logBuilder = StringBuilder()
+    private var touchLogCount = 0
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -93,7 +94,33 @@ class MainActivity : AppCompatActivity() {
                             )
                             val setup = client.runSetup()
                             if (setup != null) {
-                                client.connectEventChannel(keys.sharedSecret, setup)
+                                val uiState = com.lizhihua.carplaysender.video.CarUiState(1080, 2320)
+                                client.connectEventChannel(keys.sharedSecret, setup) { command ->
+                                    when (command["type"]) {
+                                        "hidSendReport" -> {
+                                            val uuid = command["uuid"]?.toString()
+                                            val report = command["hidReport"] as? ByteArray
+                                            if (uuid == com.lizhihua.carplaysender.input.TouchReports.TOUCH_UUID_HEX &&
+                                                report != null
+                                            ) {
+                                                val contacts = com.lizhihua.carplaysender.input.TouchReports.parse(report)
+                                                if (touchLogCount < 20) {
+                                                    touchLogCount++
+                                                    log(
+                                                        "EVENT: 触摸 " + contacts.joinToString {
+                                                            "#${it.slot}(${it.xPixels},${it.yPixels})${if (it.down) "↓" else "↑"}"
+                                                        },
+                                                    )
+                                                }
+                                                contacts.forEach(uiState::onTouch)
+                                            } else if (report != null) {
+                                                log("EVENT: 其他 HID 报告 uuid=$uuid bytes=${report.size}")
+                                            }
+                                        }
+
+                                        else -> log("EVENT: 命令 type=${command["type"]}")
+                                    }
+                                }
                                 val screen = client.runScreenStream(keys.sharedSecret)
                                 if (screen != null) {
                                     client.record()
@@ -105,6 +132,7 @@ class MainActivity : AppCompatActivity() {
                                             streamKey = screen.streamKey,
                                             width = 1080,
                                             height = 2320,
+                                            state = uiState,
                                             log = { line -> log(line) },
                                         ).start()
                                     }
