@@ -149,7 +149,7 @@ xcertplay 偏好 link-local IPv6，回落 IPv4。
 | RFCOMM 双向 | ✅ | 车机也主动回连（约 60s 一轮）；双向都工作 |
 | 链路协商 | ✅ | 车机发 SYN 声明会话表 `{1:control, 2:EA}` → 手机必须**ACK + 原样回显该表**；之后 CSM 走**1 号会话**（发 10 号被静默丢弃，链路层照常 ACK——极具迷惑性） |
 | 识别 | ✅ | 0x1D01 收到 |
-| MFi | ✅ | **20 字节挑战**（32B 车机不应答）；0xAA03 签名 132B |
+| MFi | ✅ | **20 字节挑战**（32B 静默但不打断链）；0xAA03 签名 132B |
 | WiFi 凭据 | ✅ | 0x5702 → 0x5703 ssid=Audi_MMI_6318_5GHz ch=149 psk 明文 |
 | ctrl 邀请 | ✅ | 车机在 WiFi 上发现手机 `_carplay-ctrl._tcp` 后 `GET /ctrl-int/1/connect`（死锁关键：手机必须**在 0x5703 到达时立即**绑 WiFi + 广播带**真实蓝牙 MAC** 的 ctrl） |
 | mDNS 端点 | ✅ | 车机 `_airplay._tcp` 上线于 10.174.189.1:7000，TXT: `features=0x4040280,0x61 srcvers=320.17.7 flags=0x4 model=AUDI 3260 deviceid=54:64:DE:5E:51:B0`（**无 pk 字段**） |
@@ -161,7 +161,11 @@ xcertplay 偏好 link-local IPv6，回落 IPv4。
 1. 车机**不发 0x4301**——识别帧声明可收 `0x4e0c 0x4e09 0x4e0d 0x4e0e 0x5702 0xea00 0xea01`、
    可发 `0x5703 0xea03`；AirPlay 端点只能走 WiFi 的 mDNS `_airplay._tcp`
 2. 车机**主动发 SYN**（测试台等手机发）；会话表 {1,2} 且必须回显
-3. MFi 挑战必须 20 字节
+3. **MFi 挑战长度双兼容（重要坑，2026-10-10 踩过）**：
+   - DiPlay（Carlinkit AuthV3 EC 身份）：**只接受精确 32B**，收到 20B **直接断链**
+     （实测 70~350ms 断；表现为「连不上 DiPlay + 挑战期间链路断开」）；应答 ~0.2s
+   - Audi MIB3：对 32B **静默**（不断链），对 20B 秒答
+   - 结论：顺序必须 **32B(3s) → 20B(6s) → 16B(3s)** 回退。反过来 20B 优先会打死 DiPlay
 4. `pair-setup` 被 403（测试台接受 3939 SRP）
 5. AirPlay 端口窗口式开放（ctrl 邀请接受后短暂开放；未受邀时 Connection refused）
 6. **不要断 BT 控制会话**（测试台 hack 的前提是 DiPlay 重建栈；奥迪会在断链后拆掉
