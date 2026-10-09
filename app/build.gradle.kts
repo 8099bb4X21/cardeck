@@ -29,6 +29,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    buildFeatures {
+        aidl = true
+    }
 }
 
 dependencies {
@@ -36,6 +40,9 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     // AirPlay 配对密码学：X25519/Ed25519/ChaCha20-Poly1305/HKDF-SHA512
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    // 隐形屏模式：shell 权限（无线调试激活，免 root）
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 
     testImplementation("junit:junit:4.13.2")
 }

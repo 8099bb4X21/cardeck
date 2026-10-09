@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 图标前景：圆角屏幕 + 播放三角（车机投屏意象） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:pathData="M26,34 A8,8 0 0 1 34,26 L74,26 A8,8 0 0 1 82,34 L82,74 A8,8 0 0 1 74,82 L34,82 A8,8 0 0 1 26,74 Z"
+        android:strokeColor="#7EE3A0"
+        android:strokeWidth="4"
+        android:fillColor="#00000000" />
+
+    <path
+        android:pathData="M47,43 L67,54 L47,65 Z"
+        android:fillColor="#7EE3A0" />
+</vector>

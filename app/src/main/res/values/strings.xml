@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">CarPlay Sender</string>
+    <string name="app_name">CarPlay车机投屏</string>
+    <string name="accessibility_description">镜像模式：把车机触摸手势注入手机屏幕，不读取屏幕内容</string>
 </resources>

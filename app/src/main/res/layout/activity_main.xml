@@ -27,6 +27,57 @@
             android:textSize="13sp"
             android:text="idle" />
 
+        <RadioGroup
+            android:id="@+id/modeGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/modeDesktop"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="桌面"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp" />
+
+            <RadioButton
+                android:id="@+id/modeMirror"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="镜像主屏"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp" />
+
+            <RadioButton
+                android:id="@+id/modeHidden"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="隐形屏"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp" />
+        </RadioGroup>
+
+        <CheckBox
+            android:id="@+id/switchAlwaysOn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="常亮+暗幕（手机不锁屏，防车机触摸冻结）"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/btnProjection"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="申请投屏权限（镜像模式用）"
+            android:textSize="13sp" />
+
         <EditText
             android:id="@+id/ssidInput"
             android:layout_width="match_parent"
@@ -43,28 +94,21 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="① 打开WLAN设置（手动加入接收端热点）" />
-
-        <Button
-            android:id="@+id/btnScan"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="② 绑定WiFi并扫描 _airplay._tcp" />
+            android:text="打开WLAN设置（加入接收端热点）" />
 
         <Button
             android:id="@+id/btnBluetooth"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="③ 启动蓝牙 iAP2 监听（等待回连）" />
+            android:text="启动连接（蓝牙监听，等待车机回连）" />
 
         <Button
-            android:id="@+id/btnAdvertise"
+            android:id="@+id/btnDimNow"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="④ 广播 _carplay-ctrl._tcp（控制通道）" />
+            android:text="立即假息屏（点击屏幕恢复）" />
 
         <Button
             android:id="@+id/btnDisconnect"
@@ -75,6 +119,7 @@
             android:textColor="#E57373" />
 
         <LinearLayout
+            android:id="@+id/logHeader"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
@@ -89,13 +134,31 @@
                 android:textColor="#9AB0C4"
                 android:textSize="12sp" />
 
+            <CheckBox
+                android:id="@+id/switchLog"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="监听日志"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btnClearLog"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:minWidth="0dp"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:text="清除"
+                android:textSize="12sp" />
+
             <Button
                 android:id="@+id/btnCopyLog"
                 android:layout_width="wrap_content"
                 android:layout_height="40dp"
                 android:minWidth="0dp"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
                 android:text="复制日志"
                 android:textSize="12sp" />
         </LinearLayout>

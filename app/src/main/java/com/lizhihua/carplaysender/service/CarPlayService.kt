@@ -22,12 +22,6 @@ class CarPlayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, buildNotification())
-        acquireLocks()
-        return START_STICKY
-    }
-
     /**
      * 息屏保活：CPU 唤醒锁维持编码/协议线程与 TCP 存活探测的响应；
      * WiFi 低延迟锁阻止无线进入激进省电（否则接收端 20s 内判死拆链）。
@@ -56,9 +50,82 @@ class CarPlayService : Service() {
         wifiLock = null
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForeground(NOTIFICATION_ID, buildNotification())
+        acquireLocks()
+        // Android 14+ 顺序要求：先以 mediaProjection 类型声明前台，再 getMediaProjection；
+        // 否则主线程 SecurityException 闪退
+        if (pendingProjectionResult != null) {
+            upgradeToProjection()
+            takeProjection()
+        } else if (mediaProjection != null) {
+            upgradeToProjection()
+        }
+        return START_STICKY
+    }
+
+    private fun takeProjection() {
+        val (code, data) = pendingProjectionResult ?: return
+        pendingProjectionResult = null
+        try {
+            val manager =
+                getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+            val projection = manager.getMediaProjection(code, data)
+            // Android 14+：createVirtualDisplay 前必须注册回调（资源管理强制）
+            projection?.registerCallback(
+                object : android.media.projection.MediaProjection.Callback() {
+                    override fun onStop() {
+                        mediaProjection = null
+                        android.util.Log.i("CarPlayService", "MediaProjection 停止")
+                    }
+                },
+                android.os.Handler(android.os.Looper.getMainLooper()),
+            )
+            mediaProjection = projection
+            android.util.Log.i("CarPlayService", "MediaProjection 就绪")
+        } catch (error: Exception) {
+            android.util.Log.w("CarPlayService", "getMediaProjection 失败：${error.message}")
+        }
+    }
+
+    private fun upgradeToProjection() {
+        try {
+            androidx.core.app.ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                buildNotification(),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+            )
+        } catch (error: Exception) {
+            android.util.Log.w("CarPlayService", "升级 mediaProjection FGS 类型失败：${error.message}")
+        }
+    }
+
     override fun onDestroy() {
         releaseLocks()
         super.onDestroy()
+    }
+
+    companion object {
+        private const val CHANNEL_ID = "carplay_connection"
+        private const val NOTIFICATION_ID = 1
+
+        /** 镜像模式：授权后由 MainActivity 写入；服务重声明 FGS 类型后方可创建虚拟屏。 */
+        @Volatile
+        var mediaProjection: android.media.projection.MediaProjection? = null
+
+        /** 授权结果暂存：由服务在前台类型升级后调用 getMediaProjection（Android 14+ 顺序要求）。 */
+        @Volatile
+        var pendingProjectionResult: Pair<Int, Intent>? = null
+
+        fun start(context: Context) {
+            context.startForegroundService(Intent(context, CarPlayService::class.java))
+        }
+
+        fun stop(context: Context) {
+            context.stopService(Intent(context, CarPlayService::class.java))
+        }
     }
 
     private fun buildNotification(): Notification {
@@ -82,18 +149,5 @@ class CarPlayService : Service() {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
-    }
-
-    companion object {
-        private const val CHANNEL_ID = "carplay_connection"
-        private const val NOTIFICATION_ID = 1
-
-        fun start(context: Context) {
-            context.startForegroundService(Intent(context, CarPlayService::class.java))
-        }
-
-        fun stop(context: Context) {
-            context.stopService(Intent(context, CarPlayService::class.java))
-        }
     }
 }
