@@ -43,6 +43,8 @@ class MainActivity : AppCompatActivity() {
     private val logBuilder = StringBuilder()
     private var touchLogCount = 0
 
+    private var videoSender: com.lizhihua.carplaysender.video.VideoSender? = null
+
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             log("BLUETOOTH_CONNECT 授权: $granted")
@@ -94,7 +96,12 @@ class MainActivity : AppCompatActivity() {
                             )
                             val setup = client.runSetup()
                             if (setup != null) {
-                                val uiState = com.lizhihua.carplaysender.video.CarUiState(1080, 2320)
+                                val renderer = com.lizhihua.carplaysender.ui.CarDisplayRenderer(
+                                    applicationContext,
+                                    width = setup.displayWidth,
+                                    height = setup.displayHeight,
+                                    log = { line -> log(line) },
+                                )
                                 client.connectEventChannel(keys.sharedSecret, setup) { command ->
                                     when (command["type"]) {
                                         "hidSendReport" -> {
@@ -112,7 +119,7 @@ class MainActivity : AppCompatActivity() {
                                                         },
                                                     )
                                                 }
-                                                contacts.forEach(uiState::onTouch)
+                                                contacts.forEach(renderer::dispatchTouch)
                                             } else if (report != null) {
                                                 log("EVENT: 其他 HID 报告 uuid=$uuid bytes=${report.size}")
                                             }
@@ -126,15 +133,18 @@ class MainActivity : AppCompatActivity() {
                                     client.record()
                                     val host = endpoint.ipAddresses.firstOrNull { it.contains('.') }
                                     if (host != null) {
-                                        com.lizhihua.carplaysender.video.VideoSender(
+                                        videoSender = com.lizhihua.carplaysender.video.VideoSender(
                                             host = host,
                                             dataPort = screen.dataPort,
                                             streamKey = screen.streamKey,
-                                            width = 1080,
-                                            height = 2320,
-                                            state = uiState,
+                                            width = setup.displayWidth,
+                                            height = setup.displayHeight,
                                             log = { line -> log(line) },
-                                        ).start()
+                                        )
+                                        val rendererRef = renderer
+                                        videoSender?.start { surface ->
+                                            runOnUiThread { rendererRef.attach(surface) }
+                                        }
                                     }
                                 }
                             }
@@ -185,6 +195,8 @@ class MainActivity : AppCompatActivity() {
             bluetoothServer.stop()
             ctrlAdvertiser.stop()
             wifiConnector.release()
+            videoSender?.stop()
+            videoSender = null
             log("已手动断开并停止保活服务")
         }
         findViewById<Button>(R.id.btnAdvertise).setOnClickListener {

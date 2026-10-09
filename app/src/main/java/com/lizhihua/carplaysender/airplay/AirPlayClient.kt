@@ -137,15 +137,29 @@ class AirPlayClient(
             log("AIRPLAY: SETUP 应答不是字典")
             return null
         }
+        // 拉取主显示屏参数（跟随接收端屏幕方向；横屏车机应推横屏画面，触摸坐标也按此对齐）
+        val display = try {
+            val (_, infoBody) = request("GET", "/info", ByteArray(0))
+            val info = BinaryPlist.parse(infoBody) as? Map<*, *>
+            val displays = info?.get("displays") as? List<*>
+            displays?.firstOrNull() as? Map<*, *>
+        } catch (_: Exception) {
+            null
+        }
         val info = SetupInfo(
             eventPort = portOf(root["eventPort"]),
             timingPort = portOf(root["timingPort"]),
             keepAlivePort = root["keepAlivePort"]?.let(::portOf)?.takeIf { it != 0 },
             enabledFeatures = (root["enabledFeatures"] as? List<*>)?.map { it.toString() }.orEmpty(),
+            displayWidth = ((display?.get("widthPixels") as? Long) ?: 1080L).toInt(),
+            displayHeight = ((display?.get("heightPixels") as? Long) ?: 2320L).toInt(),
+            displayUuid = display?.get("UUID")?.toString(),
+            maxFps = ((display?.get("maxFPS") as? Long) ?: 30L).toInt(),
         )
         log(
             "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
-                "keepAlive=${info.keepAlivePort ?: "无"} features=${info.enabledFeatures}",
+                "keepAlive=${info.keepAlivePort ?: "无"} features=${info.enabledFeatures} " +
+                "display=${info.displayWidth}x${info.displayHeight}@${info.maxFps}",
         )
         return info
     }
@@ -155,6 +169,11 @@ class AirPlayClient(
         val timingPort: Int,
         val keepAlivePort: Int?,
         val enabledFeatures: List<String>,
+        /** 主显示屏参数（/info displays[0]，跟随接收端当前屏幕方向）。 */
+        val displayWidth: Int,
+        val displayHeight: Int,
+        val displayUuid: String?,
+        val maxFps: Int,
     )
 
     /** 屏幕流协商结果。 */

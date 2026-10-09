@@ -30,7 +30,6 @@ class VideoSender(
     private val streamKey: ByteArray,
     private val width: Int,
     private val height: Int,
-    private val state: CarUiState,
     private val log: (String) -> Unit,
 ) {
     private var socket: Socket? = null
@@ -41,7 +40,11 @@ class VideoSender(
     private var configSent = false
     private var framesSent = 0L
 
-    fun start(): Boolean {
+    /**
+     * 启动编码与推流。编码器输入 Surface 通过 [onSurfaceReady] 交给调用方渲染
+     * （当前由 CarDisplayRenderer 的虚拟显示器 + Presentation 绘制标准 View 层级）。
+     */
+    fun start(onSurfaceReady: (Surface) -> Unit): Boolean {
         if (running.get()) return true
         return try {
             val client = Socket()
@@ -64,11 +67,9 @@ class VideoSender(
             inputSurface = surface
             running.set(true)
 
+            onSurfaceReady(surface)
+
             Thread({ drainEncoder() }, "video-drain").apply {
-                isDaemon = true
-                start()
-            }
-            Thread({ drawLoop(surface) }, "video-draw").apply {
                 isDaemon = true
                 start()
             }
@@ -89,95 +90,6 @@ class VideoSender(
         inputSurface = null
         runCatching { socket?.close() }
         socket = null
-    }
-
-    // ---- 绘制：交互测试界面（按钮 + 点击计数），触摸来自车机事件通道 ----
-
-    private fun drawLoop(surface: Surface) {
-        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.WHITE
-            textSize = height * 0.03f
-        }
-        val small = android.graphics.Paint(paint).apply { textSize = height * 0.018f }
-        val dim = android.graphics.Paint(paint).apply { alpha = 90 }
-        val activeStroke = android.graphics.Paint(paint).apply {
-            style = android.graphics.Paint.Style.STROKE
-            strokeWidth = 10f
-        }
-        val background = android.graphics.Paint().apply { color = 0xFF101418.toInt() }
-        var frame = 0L
-        while (running.get()) {
-            val canvas = try {
-                surface.lockHardwareCanvas()
-            } catch (_: Exception) {
-                break
-            }
-            try {
-                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), background)
-                paint.color = android.graphics.Color.WHITE
-                canvas.drawText("CarPlay Sender", width * 0.07f, height * 0.12f, paint)
-                small.color = 0xFF9AB0C4.toInt()
-                canvas.drawText(
-                    "点下面的按钮（触摸来自车机屏）",
-                    width * 0.07f,
-                    height * 0.17f,
-                    small,
-                )
-
-                for (index in state.buttonLabels.indices) {
-                    val top = state.buttonTop(index)
-                    val active = state.activeButton == index
-                    val fill = android.graphics.Paint().apply {
-                        color = state.buttonColors[index].toInt()
-                        alpha = if (active) 255 else 110
-                    }
-                    canvas.drawRoundRect(
-                        state.buttonLeft,
-                        top,
-                        state.buttonLeft + state.buttonWidth,
-                        top + state.buttonHeight,
-                        40f,
-                        40f,
-                        fill,
-                    )
-                    if (active) {
-                        activeStroke.color = android.graphics.Color.WHITE
-                        canvas.drawRoundRect(
-                            state.buttonLeft,
-                            top,
-                            state.buttonLeft + state.buttonWidth,
-                            top + state.buttonHeight,
-                            40f,
-                            40f,
-                            activeStroke,
-                        )
-                    }
-                    dim.color = android.graphics.Color.WHITE
-                    canvas.drawText(
-                        state.buttonLabels[index],
-                        state.buttonLeft + state.buttonWidth / 2 - paint.measureText(state.buttonLabels[index]) / 2,
-                        top + state.buttonHeight / 2 + paint.textSize / 3,
-                        dim,
-                    )
-                }
-
-                small.color = 0xFF7EE3A0.toInt()
-                canvas.drawText(
-                    "点击 ${state.taps.get()} 次   最近触摸 ${state.lastTouch}",
-                    width * 0.07f,
-                    height * 0.9f,
-                    small,
-                )
-            } finally {
-                surface.unlockCanvasAndPost(canvas)
-            }
-            frame++
-            try {
-                Thread.sleep(33)
-            } catch (_: InterruptedException) {
-                break
-            }
-        }
     }
 
     // ---- 编码输出 → 协议封装发送 ----
