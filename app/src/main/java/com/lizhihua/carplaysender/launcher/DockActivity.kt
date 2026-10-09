@@ -70,9 +70,19 @@ class DockActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
         }
+        // 运行中列表放入 ScrollView：应用多时图标可上下滚动（问题 2 修复）。
+        // 用 weight=1f 占满剩余高度，ScrollView 才能获得有限的测量高度并启用滚动。
+        val listScroll = android.widget.ScrollView(this).apply {
+            isFillViewport = false
+            addView(
+                list,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
         root.addView(
-            list,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            listScroll,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
         )
         setContentView(root)
         VirtualLauncher.addRunningAppsListener(refreshListener)

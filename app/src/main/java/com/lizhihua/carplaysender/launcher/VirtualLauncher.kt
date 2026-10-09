@@ -83,8 +83,7 @@ object VirtualLauncher {
         detach()
         val density = densityDpi / 160f
         dockWidthPx = (DOCK_WIDTH_DP * density).toInt().coerceAtLeast(120)
-        val appWidth = (totalWidth - dockWidthPx).coerceAtLeast(200)
-        // 横屏应用屏用「手机密度」：竖屏锁定应用被 letterbox 的窗口 ≈ 390dp 宽（正常手机布局），
+        val appWidth = (totalWidth - dockWidthPx).coerceAtLeast(200)        // 横屏应用屏用「手机密度」：竖屏锁定应用被 letterbox 的窗口 ≈ 390dp 宽（正常手机布局），
         // 字号/间距不再是「平板放大版」；竖屏应用屏（本就手机比例）保持原密度
         val appDensity = if (appWidth > totalHeight) {
             val letterboxWidthPx = totalHeight * 9f / 16f
@@ -243,6 +242,10 @@ object VirtualLauncher {
      * 不落到 X 屏；`am task move` 静默无效。可靠做法：
      *  1) 车机屏已有该包任务 → 普通启动带回前台（复用，保留任务栈）
      *  2) 车机屏没有该包任务 → `-f 0x18000000`（NEW_TASK|MULTIPLE_TASK）在车机屏新建实例
+     *
+     * 已知局限（2026-10-10 实测）：应用在手机侧也有实例时，进程基准密度停留在
+     * 手机屏（560dpi），车机屏渲染文字偏大（≈2.2 倍）。唯一根治是强制重启该进程，
+     * 但会杀掉用户手机侧正在用的实例（不可接受）——故维持现状不处理。
      */
     fun launchApp(component: ComponentName): Boolean {
         if (appDisplayId < 0) return false
@@ -265,7 +268,9 @@ object VirtualLauncher {
             val retry = Shell.exec("am start -n $target --display $appDisplayId -f 0x18000000", timeoutMs = 8000)
             ok = retry.ok && retry.output.contains("Starting:", ignoreCase = true)
         }
-        logSink?.invoke("LAUNCH(${component.packageName}): onApp=$onApp ok=$ok out=${result.output.take(80)}")
+        logSink?.invoke(
+            "LAUNCH(${component.packageName}): onApp=$onApp ok=$ok out=${result.output.take(80)}",
+        )
         if (ok) {
             synchronized(runningApps) { runningApps.add(component) }
             // 车机侧主动启动：清除「跟随手机」标记，标记该包来过车机屏
@@ -340,7 +345,7 @@ object VirtualLauncher {
     private var watchdogActive = false
     private var watchdogThread: Thread? = null
 
-    private val taskRegex = Regex("""Task\{[0-9a-f]+ #(\d+) type=standard A=\d+:(\S+)""")
+    val taskRegex = Regex("""Task\{[0-9a-f]+ #(\d+) type=standard A=\d+:(\S+)""")
     private val displayRegex = Regex("""Display: mDisplayId=(\d+)""")
 
     /** 本会话曾在车机屏显示过的包（跟随判定用：不因中途跑到主屏而丢失「来过车机」事实）。 */

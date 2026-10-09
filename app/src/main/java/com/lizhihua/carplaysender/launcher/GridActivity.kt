@@ -28,6 +28,9 @@ class GridActivity : AppCompatActivity() {
     private var letters: List<String> = emptyList()
     private val sectionOffsets = HashMap<String, Int>()
 
+    /** 导航条拖动中：抑制「滚动同步高亮」回写，避免与手指位置打架。 */
+    private var navDragging = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val density = resources.displayMetrics.density
@@ -106,6 +109,13 @@ class GridActivity : AppCompatActivity() {
 
         val scrollView = ScrollView(this).apply { addView(grid) }
         scroll = scrollView
+        // 滚动跟随：用户滚动网格时，右侧导航条高亮当前所在分区字母（问题 1 修复）。
+        // 拖动导航条期间抑制（navDragging），否则高亮会与手指位置来回抢。
+        scrollView.setOnScrollChangeListener { _, _, scrollY, _, _ ->
+            if (navDragging) return@setOnScrollChangeListener
+            val letter = letterForScrollY(scrollY) ?: return@setOnScrollChangeListener
+            highlightLetter(letter)
+        }
         val nav = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -175,6 +185,34 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
+    /** 当前滚动位置所在的分区字母（取最后一个 top ≤ scrollY 的分区）。 */
+    private fun letterForScrollY(scrollY: Int): String? {
+        var best: String? = null
+        var bestTop = -1
+        letters.forEach { letter ->
+            val top = sectionOffsets[letter] ?: return@forEach
+            if (top <= scrollY + 8 && top > bestTop) {
+                bestTop = top
+                best = letter
+            }
+        }
+        return best ?: letters.firstOrNull()
+    }
+
+    /** 仅更新导航条高亮（不滚动、不弹气泡）——滚动跟随用。 */
+    private fun highlightLetter(letter: String) {
+        navBar?.let { bar ->
+            for (i in 0 until bar.childCount) {
+                val child = bar.getChildAt(i) as? TextView ?: continue
+                val selected = letters.getOrNull(i) == letter
+                child.setTextColor(
+                    if (selected) 0xFF7EE3A0.toInt() else 0xFF5A6B7A.toInt(),
+                )
+                child.setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            }
+        }
+    }
+
     private fun buildCell(
         entry: VirtualLauncher.AppEntry,
         dp: (Int) -> Int,
@@ -217,12 +255,14 @@ class GridActivity : AppCompatActivity() {
         if (letters.isEmpty() || nav.height == 0) return
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                navDragging = true
                 val index = (event.y / nav.height * letters.size)
                     .toInt().coerceIn(0, letters.size - 1)
                 selectLetter(letters[index], dp)
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                navDragging = false
                 bubble?.postDelayed({ bubble?.visibility = View.INVISIBLE }, 600)
             }
         }
@@ -240,14 +280,7 @@ class GridActivity : AppCompatActivity() {
                 scroll?.smoothScrollTo(0, sectionOffsets[letter] ?: 0)
             }
         }
-        // 导航条字母随选中高亮
-        navBar?.let { bar ->
-            for (i in 0 until bar.childCount) {
-                (bar.getChildAt(i) as? TextView)?.setTextColor(
-                    if (letters.getOrNull(i) == letter) 0xFF7EE3A0.toInt() else 0xFF5A6B7A.toInt(),
-                )
-            }
-        }
+        highlightLetter(letter)
     }
 
     override fun onBackPressed() = Unit // 桌面不退出
