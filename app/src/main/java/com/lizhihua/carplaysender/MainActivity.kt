@@ -261,6 +261,7 @@ class MainActivity : AppCompatActivity() {
                 return@bindCurrentWifi
             }
             Thread({
+                try {
                 Thread.sleep(1_600) // 等 ctrl 探测（实测 +1.0~+1.3s）
                 fun newClient() = com.lizhihua.carplaysender.airplay.AirPlayClient(
                     effectiveEndpoint,
@@ -398,7 +399,12 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
                         }
-                sessionStarting.set(false)
+                } catch (error: Throwable) {
+                    // 配对线程任何异常都不能留下「已有会话在处理中」的卡死状态
+                    log("AIRPLAY: 配对线程异常 - ${error.message ?: error.javaClass.simpleName}")
+                } finally {
+                    sessionStarting.set(false)
+                }
             }, "airplay-pairing").start()
         }
     }

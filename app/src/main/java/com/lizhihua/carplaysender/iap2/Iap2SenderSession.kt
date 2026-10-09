@@ -59,9 +59,6 @@ class Iap2SenderSession(
         /** 等 StartHID 的窗口：xcertplay 会发（订阅后立即到），DiPlay 不发。 */
         const val HID_WAIT_NANOS = 2_000_000_000L
 
-        /** 单次 MFi 挑战的等待窗口（超时则回退下一长度）。 */
-        const val MFI_RESPONSE_WAIT_NANOS = 6_000_000_000L
-
         /** 等 0x4301 的短窗口（真车不发该消息，走 mDNS；测试台毫秒级应答）。 */
         const val START_SESSION_WAIT_NANOS = 10_000_000_000L
     }
@@ -208,20 +205,24 @@ class Iap2SenderSession(
     // ---- 帧收发 ----
 
     /**
-     * MFi 挑战应答：依次尝试 32B（AuthV3 要求）/ 20B（extractor 真车实录）/ 16B（部分旧配件）。
-     * 每次失败（0xAA04 / 静默超时）换下一档；全部无应答时不抛异常直接返回——
-     * 我们跳过签名校验，车机可能在未完成挑战时也接受 0xAA05（真车实测据此推进）。
-     * 单次等待窗口见 [MFI_RESPONSE_WAIT_NANOS]。
+     * MFi 挑战应答：按「对端可接受的长度」依次尝试，每次失败（0xAA04 / 静默超时）换下一档。
+     * 顺序与窗口由两端实测决定（2026-10-09/10，缺一不可）：
+     *  - **32B 优先**：测试台 DiPlay（Carlinkit AuthV3 EC 身份）**只接受精确 32B**，
+     *    长度不对会直接断开链路（实测 70~350ms 内断链）；其应答快（~0.2s），3s 窗口足够。
+     *  - **20B 次之**：真车 Audi MIB3 对 32B 静默（不断链）、对 20B 秒答；
+     *    catplay/extractor 的真车实录同款。
+     *  - **16B 兜底**：部分旧配件。
+     * 全部无应答时不抛异常直接返回——我们跳过签名校验，由后续 0x5702 是否获得应答
+     * 判定对端是否放行（真车实测无应答后 0xaa05 仍可推进）。
      */
     private fun runMfiChallenge(deadline: Long) {
-        // 20B 优先：catplay（真车验证）与 extractor 真车实录都用 20B；Audi MIB3 实测对 32B 静默。
-        // 32B 次之（AuthV3 EC 身份精确要求，测试台 DiPlay 同款）；16B 兜底旧配件。
-        val attempts = listOf(20, 32, 16)
-        for ((index, size) in attempts.withIndex()) {
+        val attempts = listOf(32 to 3_000L, 20 to 6_000L, 16 to 3_000L)
+        for ((index, attempt) in attempts.withIndex()) {
+            val size = attempt.first
             val challenge = ByteArray(size).also(random::nextBytes)
             send(Iap2MessageIds.MFI_REQUEST_CHALLENGE, Iap2Csm.param(0, challenge))
             log("iap2 tx=0xaa02 challenge=${size}B（第 ${index + 1} 次）")
-            val window = minOf(System.nanoTime() + MFI_RESPONSE_WAIT_NANOS, deadline)
+            val window = minOf(System.nanoTime() + attempt.second * 1_000_000L, deadline)
             var gotResponse = false
             var gotFailure = false
             while (true) {
@@ -230,7 +231,7 @@ class Iap2SenderSession(
                 val frame = recvFrame(remaining)
                 if (frame == null) {
                     if (!channel.isAlive) {
-                        log("iap2 MFi 挑战期间链路断开（${size}B）")
+                        log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）")
                         return
                     }
                     continue
@@ -255,7 +256,7 @@ class Iap2SenderSession(
             }
             if (gotResponse) return
             if (index < attempts.size - 1) {
-                log("iap2 MFi ${size}B 无应答，改用 ${attempts[index + 1]}B 重试")
+                log("iap2 MFi ${size}B 无应答，改用 ${attempts[index + 1].first}B 重试")
             } else {
                 log("iap2 MFi 挑战全部无应答——跳过校验直接发 0xaa05（由 0x5702 判定车机是否放行）")
             }
