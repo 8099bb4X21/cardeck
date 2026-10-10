@@ -45,6 +45,7 @@ class MainActivity : AppCompatActivity() {
     private var touchLogCount = 0
 
     private var videoSender: com.lizhihua.carplaysender.video.VideoSender? = null
+    private var audioSender: com.lizhihua.carplaysender.audio.AudioSender? = null
     private var currentRenderer: com.lizhihua.carplaysender.ui.CarDisplayRenderer? = null
     private var currentClient: com.lizhihua.carplaysender.airplay.AirPlayClient? = null
     private var currentMirrorSource: com.lizhihua.carplaysender.capture.MirrorScreenSource? = null
@@ -54,6 +55,8 @@ class MainActivity : AppCompatActivity() {
     private fun retirePreviousSession() {
         videoSender?.stop()
         videoSender = null
+        audioSender?.stop()
+        audioSender = null
         currentRenderer?.release()
         currentRenderer = null
         currentMirrorSource?.release()
@@ -70,6 +73,11 @@ class MainActivity : AppCompatActivity() {
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             log("BLUETOOTH_CONNECT 授权: $granted")
+        }
+
+    private val audioPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            log("MODE: RECORD_AUDIO 授权: $granted（音频通道需要）")
         }
 
     private val projectionLauncher =
@@ -161,6 +169,44 @@ class MainActivity : AppCompatActivity() {
     private fun detachActiveBtSessions() {
         bluetoothServer.detachCurrentSession()
         bluetoothClient.detachCurrentSession()
+    }
+
+    /**
+     * 音频通道（手机 → 车机，RTP over UDP）：SETUP type=100 协商 → 播放捕获 → ChaCha 封包推流。
+     *
+     * 依赖 MediaProjection（AudioPlaybackCapture 的授权来源）——镜像模式已有；其他模式
+     * 若未授权则音频不可用（不阻塞主链路，日志说明原因即可）。
+     */
+    private fun startAudioChannel(
+        client: com.lizhihua.carplaysender.airplay.AirPlayClient,
+        sharedSecret: ByteArray,
+        host: String?,
+    ) {
+        if (host == null) {
+            log("AUDIO: 无接收端 IPv4 地址，跳过音频通道")
+            return
+        }
+        val projection = com.lizhihua.carplaysender.service.CarPlayService.mediaProjection
+        if (projection == null) {
+            log("AUDIO: 缺少投屏权限（播放捕获依赖 MediaProjection）——音频通道未启动；如需音频请先点「申请投屏权限」")
+            return
+        }
+        try {
+            val audio = client.runAudioStream(sharedSecret) ?: return
+            val sender = com.lizhihua.carplaysender.audio.AudioSender(
+                host = host,
+                dataPort = audio.dataPort,
+                streamKey = audio.streamKey,
+                log = { line -> log(line) },
+            )
+            audioSender = sender
+            if (!sender.start(projection)) {
+                audioSender = null
+            }
+        } catch (error: Exception) {
+            log("AUDIO: 通道启动异常 - ${error.message}")
+            audioSender = null
+        }
     }
 
     /**
@@ -337,8 +383,11 @@ class MainActivity : AppCompatActivity() {
                                 }
                                 val screen = client.runScreenStream(keys.sharedSecret)
                                 if (screen != null) {
-                                    client.record()
                                     val host = effectiveEndpoint.ipAddresses.firstOrNull { it.contains('.') }
+                                    // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
+                                    // 协议顺序：全部 SETUP 完成后再 RECORD 激活会话；失败不影响主链路。
+                                    startAudioChannel(client, keys.sharedSecret, host)
+                                    client.record()
                                     if (host != null) {
                                         videoSender = com.lizhihua.carplaysender.video.VideoSender(
                                             host = host,
@@ -474,6 +523,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<Button>(R.id.btnProjection).setOnClickListener {
+            // 音频通道（播放捕获）也依赖 RECORD_AUDIO：与投屏授权一起请求
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
             val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
             projectionLauncher.launch(manager.createScreenCaptureIntent())
         }

@@ -131,6 +131,31 @@ pi=<配对ID>  pk=<ed25519公钥hex>
 - 时钟：NTP 风格 timing 端口 + RTCP（catplay `clock/`）
 - ❓ FairPlay/流加密细节无公开规格，靠 catplay 源码 + ludwig-v 解密固件对照
 
+## 8b. 音频通道（✅ 已实现：手机 → 车机主音频流）
+
+**协商**：在已加密的 RTSP 会话上 `SETUP`，body = `streams:[{type:100(主音频),
+streamConnectionID, audioFormat:<位图>, audioType:"media"}]`；接收端应答
+`{type:100, dataPort:<UDP>, controlPort:<UDP>, streamConnectionID}`。
+- 音频格式位图（catplay `msg/streams.rs` AudioFormat）：PCM 48k 立体声 = `1<<15`、
+  AAC-LC 48k 立体声 = `1<<23`；当前实现用 PCM 48k 立体声（协议基线）
+- 流密钥与视频同规则：`HKDF(shared, "DataStream-Salt<音频 connId>", "DataStream-Output-Encryption-Key")`
+- 音频流 ID 独立（用自己的 connId），与视频互不影响
+
+**线格式**（RTP over UDP；接收端 DiPlay `AudioStream.kt` 解密路径证实）：
+```
+[RTP 头 12B][ChaCha20-Poly1305 密文 + 16B tag][8B 小端 nonce]
+头: v=2 | M=0 PT=<stream type=100> | seq u16BE | timestamp u32BE(累计样本帧) | ssrc u32BE
+AAD = 头字节 4..12（timestamp+ssrc 的 BE 表示，catplay "modern AAD"）
+nonce(12B) = 4 字节零 + 尾 8 字节小端计数（逐包递增）
+```
+- 每包 512 样本帧（48000Hz 立体声 16bit = 2048B 负载，整包 ~2084B；
+  接收端 UDP 收包缓冲 4096B，安全）
+- 采集：`AudioPlaybackCapture`（Android 10+，需要 MediaProjection 授权 + RECORD_AUDIO）
+- 当前为单向（媒体/导航下车机）；麦克风上行（通话）未实现
+
+**本项目代码**：`audio/AudioSender.kt`（采集+封包+UDP）、
+`airplay/AirPlayClient.runAudioStream()`（协商）、单测 `AudioSenderTest`（解密回环）
+
 ## 9. 真车（奥迪 MIB3）Phase 3 风险清单
 
 1. catplay 兼容表记录：Audi/Porsche HARMAN MIB2「角色切换后对 dongle 断电重启」——

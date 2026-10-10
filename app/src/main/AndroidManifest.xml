@@ -16,6 +16,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- 音频通道：AudioPlaybackCapture（捕获本机媒体/导航声音上车）必需 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 暗幕（替代息屏）需要；系统「显示在其他应用上层」列表只收录声明本权限的应用 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 

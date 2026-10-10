@@ -62,8 +62,13 @@ touch2frame 18ms、recoveries=0。
 **触摸闭环验收（2026-10-09 10:20）**：事件通道命令解析（RtspAccumulator + plist）→
 hidSendReport 双槽报文解析（u16LE 像素坐标）→ UI 命中测试。真机确认：按住高亮、
 松开熄灭、计数递增、坐标实时刷新；拖动轨迹完整。注意坑：报文第二槽是
-`(0,0)↑` 空闲占位，必须过滤，否则覆盖真实手指状态。剩余：正式车机桌面 UI
-（导航/音乐）替换测试界面、音频流、真车（Phase 3）。
+`(0,0)↑` 空闲占位，必须过滤，否则覆盖真实手指状态。
+
+**音频通道（2026-10-10）**：SETUP type=100 协商 UDP 音频流 → `AudioPlaybackCapture`
+捕获本机媒体/导航声音 → PCM 48k 立体声按 RTP+ChaCha20 封包推流（每包 512 帧）。
+密钥与视频同规则（`DataStream-Salt<connId>`）；需要 MediaProjection + RECORD_AUDIO
+授权（点「申请投屏权限」时一并请求）。已单测（解密回环 3 用例），待真机验证。
+剩余：麦克风上行（通话）、正式车机桌面 UI 完善、真车（Phase 3）。
 
 ## 测试台搭建（Phase 0 使用说明）
 

@@ -215,12 +215,135 @@ class AirPlayClient(
         val streamKey: ByteArray,
     )
 
+    /** 音频流协商结果（RTP over UDP；密钥同视频流规则，盐用音频连接 ID）。 */
+    class AudioStreamInfo(
+        val streamConnectionId: Long,
+        val dataPort: Int,
+        val controlPort: Int,
+        val streamKey: ByteArray,
+    )
+
     /** plist 端口是 u16 但以 2 字节有符号整数编码（>32767 读出为负），按位掩出真实值。 */
     private fun portOf(value: Any?): Int = ((value as? Long) ?: 0L).toInt() and 0xFFFF
 
     private companion object {
         /** 主屏视频流类型（对照接收端 STREAM_TYPE_MAIN_SCREEN；100 是音频、130 是数据/iAP 隧道）。 */
         const val SCREEN_STREAM_TYPE = 110L
+
+        /** 主音频流类型（DiPlay STREAM_TYPE_MAIN_AUDIO；媒体/导航音频走这条）。 */
+        const val AUDIO_STREAM_TYPE = 100L
+
+        /** 音频格式位：PCM 48000Hz 16bit 立体声（catplay AudioFormat 定义 1<<15）。 */
+        const val AUDIO_FORMAT_PCM_48K_STEREO = 1L shl 15
+
+        /** AAC-LC 48000Hz 立体声（1<<23），/info 偏好时使用；当前仅记录。 */
+        const val AUDIO_FORMAT_AAC_48K_STEREO = 1L shl 23
+    }
+
+    /**
+     * SETUP：协商主音频流（type 100，RTP over UDP）。
+     *
+     * 线格式与视频同族但传输不同：接收端在应答里开 **UDP** dataPort/controlPort，
+     * 手机把 PCM 帧按 [RtpAudioSender] 的格式发过去。密钥 = HKDF(shared,
+     * "DataStream-Salt<音频 connId>", "DataStream-Output-Encryption-Key")。
+     *
+     * 格式选择：优先看 /info 的 audioFormats（真车按能力取舍），
+     * 拿不到则默认 PCM 48k 立体声（协议基线，接收端普遍支持）。
+     */
+    fun runAudioStream(sharedSecret: ByteArray): AudioStreamInfo? {
+        val connectionId = System.currentTimeMillis() % 100_000L + 4242L
+        // /info 里车机声明支持的音频格式（仅日志/选择参考；失败不影响）
+        val advertisedFormats = fetchAudioFormats()
+        val wantPcm = advertisedFormats.isEmpty() ||
+            advertisedFormats.any { (it and AUDIO_FORMAT_PCM_48K_STEREO) != 0L }
+        if (!wantPcm) {
+            log(
+                "AIRPLAY: 车机未声明 PCM 48k 立体声（audioFormats=" +
+                    advertisedFormats.joinToString { "0x%x".format(it) } +
+                    "），暂用 PCM 尝试（AAC 编码待实现）",
+            )
+        }
+        val body = BinaryPlist.encode(
+            linkedMapOf(
+                "streams" to listOf(
+                    linkedMapOf<String, Any?>(
+                        "type" to AUDIO_STREAM_TYPE,
+                        "streamConnectionID" to connectionId,
+                        "audioFormat" to AUDIO_FORMAT_PCM_48K_STEREO,
+                        "audioType" to "media",
+                    ),
+                ),
+            ),
+        )
+        val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
+        val (statusLine, responseBody) = try {
+            request(
+                "SETUP",
+                "rtsp://$host:${endpoint.airPlayPort}/",
+                body,
+                contentType = "application/x-apple-binary-plist",
+            )
+        } catch (error: IOException) {
+            log("AIRPLAY: 音频流协商失败 - ${error.message}")
+            return null
+        }
+        if (!statusLine.contains("200")) {
+            log("AIRPLAY: 音频流协商应答 [$statusLine]")
+            return null
+        }
+        val root = try {
+            BinaryPlist.parse(responseBody) as? Map<*, *>
+        } catch (error: IllegalArgumentException) {
+            null
+        } ?: run {
+            log("AIRPLAY: 音频流协商应答解析失败")
+            return null
+        }
+        val streams = root["streams"] as? List<*> ?: run {
+            log("AIRPLAY: 音频流协商应答缺少 streams")
+            return null
+        }
+        val audio = streams.firstOrNull { entry ->
+            ((entry as? Map<*, *>)?.get("type") as? Long) == AUDIO_STREAM_TYPE
+        } as? Map<*, *> ?: run {
+            log("AIRPLAY: 音频流被拒绝（streams=$streams）")
+            return null
+        }
+        val dataPort = portOf(audio["dataPort"])
+        if (dataPort == 0) {
+            log("AIRPLAY: 音频流未返回 dataPort（$audio）")
+            return null
+        }
+        val streamKey = AirPlayCrypto.hkdfSha512(
+            sharedSecret,
+            "DataStream-Salt$connectionId".toByteArray(Charsets.US_ASCII),
+            "DataStream-Output-Encryption-Key".toByteArray(Charsets.US_ASCII),
+        )
+        log(
+            "AIRPLAY: ✓ 音频流协商成功（type=100 PCM48k）dataPort=$dataPort " +
+                "controlPort=${portOf(audio["controlPort"])} connId=$connectionId",
+        )
+        return AudioStreamInfo(
+            streamConnectionId = connectionId,
+            dataPort = dataPort,
+            controlPort = portOf(audio["controlPort"]),
+            streamKey = streamKey,
+        )
+    }
+
+    /** 读 /info 的 audioFormats（车机声明的可接受音频编码位图）；失败返回空表。 */
+    private fun fetchAudioFormats(): List<Long> = try {
+        val (statusLine, body) = request("GET", "/info", ByteArray(0), 3_000)
+        if (!statusLine.contains("200") || body.isEmpty()) {
+            emptyList()
+        } else {
+            val root = BinaryPlist.parse(body) as? Map<*, *>
+            (root?.get("audioFormats") as? List<*>)
+                ?.mapNotNull { (it as? Long) }
+                .orEmpty()
+        }
+    } catch (_: Exception) {
+        emptyList()
     }
 
     /**
