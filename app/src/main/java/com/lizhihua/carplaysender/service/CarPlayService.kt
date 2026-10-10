@@ -150,10 +150,21 @@ class CarPlayService : Service() {
                 },
             )
         }
+        // 点击通知 → 打开 App 主界面（此前缺 setContentIntent，点击无反应）
+        val contentIntent = android.app.PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, com.lizhihua.carplaysender.MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            },
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setContentTitle("CarPlay Sender 运行中")
             .setContentText("正在保持与车机的连接，点开应用可查看日志")
+            .setContentIntent(contentIntent)
+            .setAutoCancel(false)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
