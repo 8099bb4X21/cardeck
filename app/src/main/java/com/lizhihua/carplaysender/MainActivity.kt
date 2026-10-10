@@ -113,8 +113,105 @@ class MainActivity : AppCompatActivity() {
                     return@Thread
                 }
                 maybeStartAudioNow()
+                // 「启动连接」时选了开启声音、投屏授权在此刻才拿到：接着启动连接
+                if (pendingStartAfterProjection.compareAndSet(true, false)) {
+                    startConnectionNow()
+                }
             }, "audio-late-start").start()
         }
+
+    /** 本次会话是否在车机侧播放声音（由「启动连接」弹窗选择）。 */
+    @Volatile
+    private var audioEnabledForSession = false
+
+    /** 投屏授权是「启动连接」的前置（选了开启声音且尚未授权）时置位。 */
+    private val pendingStartAfterProjection = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * 「启动连接」前的音频选择弹窗（2026-10-10 用户要求）：
+     * 音频与视频同时推流会显著增加负载（实测 48k 立体声 PCM ≈1.5Mbps + 视频 ≈4Mbps），
+     * 测试台出现画面卡顿与断连；真车链路能力未知。因此默认不推音频，需用户显式开启。
+     */
+    private fun showAudioChoiceDialog() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("是否在车机侧播放声音？")
+            .setMessage(
+                "开启后：手机媒体/导航声音将投到车机播放，手机本机静音（不开启则车上无声音）。\n\n" +
+                    "注意：声音与画面同时传输会明显增加负载，可能出现画面卡顿或连接不稳；" +
+                    "以看视频为主时建议暂不开启。\n\n" +
+                    "开启声音需要「投屏」权限，选择后会一并申请。",
+            )
+            .setPositiveButton("开启声音") { _, _ -> beginWithAudio(enabled = true) }
+            .setNegativeButton("仅视频（更流畅）") { _, _ -> beginWithAudio(enabled = false) }
+            .setNeutralButton("取消", null)
+            .show()
+    }
+
+    private fun beginWithAudio(enabled: Boolean) {
+        audioEnabledForSession = enabled
+        if (!enabled) {
+            log("MODE: 本次连接仅推视频（未开启车机侧声音）")
+            startConnectionNow()
+            return
+        }
+        if (com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null) {
+            log("MODE: 已选择开启声音（投屏权限已就绪）")
+            startConnectionNow()
+            return
+        }
+        // 开启声音需要投屏权限（播放捕获的授权来源）：先申请，授权完成后再启动连接
+        log("MODE: 开启声音需要投屏权限——先后申请（音频捕获依赖），授权后自动开始连接")
+        pendingStartAfterProjection.set(true)
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+        projectionLauncher.launch(manager.createScreenCaptureIntent())
+    }
+
+    /** 「启动连接」主体（权限检查 + 保活服务 + 双向蓝牙启动）。原按钮逻辑抽取。 */
+    private fun startConnectionNow() {
+        runOnUiThread {
+            if (!bluetoothServer.hasPermission()) {
+                permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+            }
+            // 通知权限（API 33+）：前台服务通知可见；拒绝也不影响保活
+            if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                permissionLauncher.launch("android.permission.POST_NOTIFICATIONS")
+            }
+            // 前台保活：连接期间进程不被后台清理杀死
+            // 隐形屏模式：连接时提示 Shizuku 状态（冻结/未授权时触摸注入会失败）
+            if (com.lizhihua.carplaysender.input.TouchRouter.mode ==
+                com.lizhihua.carplaysender.input.TouchRouter.Mode.HIDDEN
+            ) {
+                when (com.lizhihua.carplaysender.shizuku.ShizukuGate.state(this)) {
+                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY ->
+                        log("SHIZUKU: 就绪（触摸注入可用）")
+
+                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.UNAUTHORIZED -> {
+                        log("SHIZUKU: 未授权本应用——已发起授权请求，请在弹窗点允许后重连")
+                        com.lizhihua.carplaysender.shizuku.ShizukuGate.requestPermission()
+                    }
+
+                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_RUNNING ->
+                        log("SHIZUKU: 服务未运行——打开 Shizuku App 点「启动」")
+
+                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_INSTALLED ->
+                        log("SHIZUKU: 未安装（隐形屏模式需要）")
+                }
+            }
+            com.lizhihua.carplaysender.service.CarPlayService.start(this)
+            // 真车路径：手机主动连车机（SDP …caff 配件服务）
+            // 测试台路径：监听手机侧 iPhone UUID，等 DiPlay/xcertplay 回连
+            bluetoothClient.start()
+            bluetoothServer.start()
+        }
+    }
 
     /** 会话已建立且投影就绪、但音频尚未启动时，动态补启（投影授权晚于连接的场景）。 */
     @Synchronized
@@ -209,14 +306,18 @@ class MainActivity : AppCompatActivity() {
     /**
      * 音频通道（手机 → 车机，RTP over UDP）：SETUP type=100 协商 → 播放捕获 → ChaCha 封包推流。
      *
-     * 依赖 MediaProjection（AudioPlaybackCapture 的授权来源）——镜像模式已有；其他模式
-     * 若未授权则音频不可用（不阻塞主链路，日志说明原因即可）。
+     * 依赖 MediaProjection（AudioPlaybackCapture 的授权来源），且需用户在「启动连接」
+     * 弹窗中选择「开启声音」——音视频同时推流显著增加负载（实测会卡顿/断连）。
      */
     private fun startAudioChannel(
         client: com.lizhihua.carplaysender.airplay.AirPlayClient,
         sharedSecret: ByteArray,
         host: String?,
     ) {
+        if (!audioEnabledForSession) {
+            log("AUDIO: 本次连接未开启车机侧声音（「启动连接」弹窗选择）——仅推视频")
+            return
+        }
         if (host == null) {
             log("AUDIO: 无接收端 IPv4 地址，跳过音频通道")
             return
@@ -589,42 +690,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<Button>(R.id.btnBluetooth).setOnClickListener {
-            if (!bluetoothServer.hasPermission()) {
-                permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
-            }
-            // 通知权限（API 33+）：前台服务通知可见；拒绝也不影响保活
-            if (android.os.Build.VERSION.SDK_INT >= 33 &&
-                ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") !=
-                PackageManager.PERMISSION_GRANTED
-            ) {
-                permissionLauncher.launch("android.permission.POST_NOTIFICATIONS")
-            }
-            // 前台保活：连接期间进程不被后台清理杀死
-            // 隐形屏模式：连接时提示 Shizuku 状态（冻结/未授权时触摸注入会失败）
-            if (com.lizhihua.carplaysender.input.TouchRouter.mode ==
-                com.lizhihua.carplaysender.input.TouchRouter.Mode.HIDDEN
-            ) {
-                when (com.lizhihua.carplaysender.shizuku.ShizukuGate.state(this)) {
-                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY ->
-                        log("SHIZUKU: 就绪（触摸注入可用）")
-
-                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.UNAUTHORIZED -> {
-                        log("SHIZUKU: 未授权本应用——已发起授权请求，请在弹窗点允许后重连")
-                        com.lizhihua.carplaysender.shizuku.ShizukuGate.requestPermission()
-                    }
-
-                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_RUNNING ->
-                        log("SHIZUKU: 服务未运行——打开 Shizuku App 点「启动」")
-
-                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_INSTALLED ->
-                        log("SHIZUKU: 未安装（隐形屏模式需要）")
-                }
-            }
-            com.lizhihua.carplaysender.service.CarPlayService.start(this)
-            // 真车路径：手机主动连车机（SDP …caff 配件服务）
-            // 测试台路径：监听手机侧 iPhone UUID，等 DiPlay/xcertplay 回连
-            bluetoothClient.start()
-            bluetoothServer.start()
+            showAudioChoiceDialog()
         }
         findViewById<Button>(R.id.btnDimNow).setOnClickListener {
             if (!com.lizhihua.carplaysender.ui.ScreenDimmer.isAttached()) {
