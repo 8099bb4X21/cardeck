@@ -51,12 +51,21 @@ class MainActivity : AppCompatActivity() {
     private var currentMirrorSource: com.lizhihua.carplaysender.capture.MirrorScreenSource? = null
     private var currentHiddenSource: com.lizhihua.carplaysender.capture.HiddenDisplaySource? = null
 
+    /** 当前会话的共享密钥与接收端地址：投影授权晚于连接时，动态补启音频用。 */
+    @Volatile
+    private var currentSharedSecret: ByteArray? = null
+
+    @Volatile
+    private var currentAudioHost: String? = null
+
     /** 新 BT 周期开始前彻底退役上一代会话（旧管线泄漏会累积编码器/虚拟显示器，最终 dequeueBuffer -19）。 */
     private fun retirePreviousSession() {
         videoSender?.stop()
         videoSender = null
         audioSender?.stop()
         audioSender = null
+        currentSharedSecret = null
+        currentAudioHost = null
         currentRenderer?.release()
         currentRenderer = null
         currentMirrorSource?.release()
@@ -84,7 +93,7 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val data = result.data
             if (result.resultCode != RESULT_OK || data == null) {
-                log("MODE: 投屏权限被拒绝（镜像模式不可用）")
+                log("MODE: 投屏权限被拒绝（镜像模式与音频通道不可用）")
                 return@registerForActivityResult
             }
             // Android 14+ 顺序：先把结果交给服务，由服务升级 FGS 类型后调 getMediaProjection
@@ -92,7 +101,33 @@ class MainActivity : AppCompatActivity() {
                 result.resultCode to data
             com.lizhihua.carplaysender.service.CarPlayService.start(this)
             log("MODE: ✓ 投屏权限已授予（重启手机后需重新授权）")
+            // 会话已在进行中授权（授权晚于连接）：等投影就绪后动态补启音频通道
+            Thread({
+                val deadline = android.os.SystemClock.uptimeMillis() + 5_000L
+                while (android.os.SystemClock.uptimeMillis() < deadline) {
+                    if (com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null) break
+                    Thread.sleep(200)
+                }
+                if (com.lizhihua.carplaysender.service.CarPlayService.mediaProjection == null) {
+                    log("MODE: 投影 5 秒未就绪（服务异常？），音频通道本次未启动")
+                    return@Thread
+                }
+                maybeStartAudioNow()
+            }, "audio-late-start").start()
         }
+
+    /** 会话已建立且投影就绪、但音频尚未启动时，动态补启（投影授权晚于连接的场景）。 */
+    @Synchronized
+    private fun maybeStartAudioNow() {
+        val client = currentClient ?: run {
+            log("MODE: 投屏已就绪（当前无会话——下次连接时自动启用音频）")
+            return
+        }
+        val secret = currentSharedSecret ?: return
+        if (audioSender?.isRunning == true) return
+        log("MODE: 会话进行中，动态补启音频通道…")
+        startAudioChannel(client, secret, currentAudioHost)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -188,7 +223,10 @@ class MainActivity : AppCompatActivity() {
         }
         val projection = com.lizhihua.carplaysender.service.CarPlayService.mediaProjection
         if (projection == null) {
-            log("AUDIO: 缺少投屏权限（播放捕获依赖 MediaProjection）——音频通道未启动；如需音频请先点「申请投屏权限」")
+            log(
+                "AUDIO: 缺少投屏权限（播放捕获依赖 MediaProjection）——音频通道未启动。" +
+                    "现在点「申请投屏权限」也可即时补启（无需重连）；注意「断开连接」会停服务并连带失效投屏授权",
+            )
             return
         }
         try {
@@ -198,6 +236,7 @@ class MainActivity : AppCompatActivity() {
                 dataPort = audio.dataPort,
                 streamKey = audio.streamKey,
                 log = { line -> log(line) },
+                context = applicationContext,
             )
             audioSender = sender
             if (!sender.start(projection)) {
@@ -336,6 +375,9 @@ class MainActivity : AppCompatActivity() {
                             )
                             val setup = client.runSetup()
                             if (setup != null) {
+                                // 记录会话凭据：投影授权晚于连接时用于动态补启音频
+                                currentSharedSecret = keys.sharedSecret
+                                currentAudioHost = effectiveEndpoint.ipAddresses.firstOrNull { it.contains('.') }
                                 val mode = com.lizhihua.carplaysender.input.TouchRouter.mode
                                 com.lizhihua.carplaysender.input.TouchRouter.carWidth = setup.displayWidth
                                 com.lizhihua.carplaysender.input.TouchRouter.carHeight = setup.displayHeight
@@ -594,13 +636,20 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<Button>(R.id.btnDisconnect).setOnClickListener {
+            val hadProjection = com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null
             retirePreviousSession()
             com.lizhihua.carplaysender.service.CarPlayService.stop(this)
             bluetoothServer.stop()
             bluetoothClient.stop()
             ctrlAdvertiser.stop()
             wifiConnector.release()
-            log("已手动断开并停止保活服务（常亮已恢复）")
+            if (hadProjection) {
+                // Android 14+：MediaProjection 与保活服务（mediaProjection FGS 类型）绑定，
+                // 停服务会连带失效授权——下次连接需重新点「申请投屏权限」
+                log("已手动断开并停止保活服务（常亮已恢复）；投屏授权已随服务停止失效，下次连接如需音频/镜像请重新申请")
+            } else {
+                log("已手动断开并停止保活服务（常亮已恢复）")
+            }
         }
 
         // 日志开关（默认开；关闭后不采集、不显示日志区域；选择持久化）
@@ -716,20 +765,9 @@ class MainActivity : AppCompatActivity() {
      * 该文件是 adb 侧唯一调试通道（run-as 读取）。2MB 上限自动滚动。
      */
     private fun appendDebugFile(message: String) {
-        try {
-            synchronized(debugFileLock) {
-                val file = java.io.File(filesDir, "main_debug.log")
-                if (file.length() > 2_000_000) file.delete()
-                java.io.FileWriter(file, true).use { writer ->
-                    writer.append('[').append(timestamp.format(Date())).append("] ")
-                        .append(message).append('\n')
-                }
-            }
-        } catch (_: Throwable) {
-        }
+        // 与 CarPlayService 共用 DebugFileLog（同一把锁，避免同文件并发写交叉）
+        com.lizhihua.carplaysender.util.DebugFileLog.append(this, message)
     }
-
-    private val debugFileLock = Any()
 
     override fun onDestroy() {
         super.onDestroy()

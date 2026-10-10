@@ -84,15 +84,20 @@ class CarPlayService : Service() {
                 object : android.media.projection.MediaProjection.Callback() {
                     override fun onStop() {
                         mediaProjection = null
-                        android.util.Log.i("CarPlayService", "MediaProjection 停止")
+                        // 关键诊断：授权丢失会导致音频/镜像不可用（此前只写 logcat，HKS 加密看不到）
+                        fileLog("SVC: MediaProjection 被系统停止（onStop）——音频/镜像需重新授权")
                     }
                 },
                 android.os.Handler(android.os.Looper.getMainLooper()),
             )
             mediaProjection = projection
-            android.util.Log.i("CarPlayService", "MediaProjection 就绪")
+            if (projection != null) {
+                fileLog("SVC: MediaProjection 就绪（投影创建成功）")
+            } else {
+                fileLog("SVC: getMediaProjection 返回 null（授权结果已失效？）")
+            }
         } catch (error: Exception) {
-            android.util.Log.w("CarPlayService", "getMediaProjection 失败：${error.message}")
+            fileLog("SVC: getMediaProjection 失败 - ${error.message ?: error.javaClass.simpleName}")
         }
     }
 
@@ -106,13 +111,25 @@ class CarPlayService : Service() {
                     android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
             )
         } catch (error: Exception) {
-            android.util.Log.w("CarPlayService", "升级 mediaProjection FGS 类型失败：${error.message}")
+            fileLog("SVC: 升级 mediaProjection FGS 类型失败 - ${error.message}")
         }
     }
 
     override fun onDestroy() {
         releaseLocks()
+        // Android 14+：MediaProjection 与前台的 mediaProjection 类型绑定——
+        // 保活服务停止（如用户点「断开连接」）时系统会连带停止投影。
+        fileLog(
+            "SVC: onDestroy（保活服务停止）mediaProjection=" +
+                (if (mediaProjection != null) "仍在（即将被系统回收）" else "null"),
+        )
         super.onDestroy()
+    }
+
+    /** 投影生命周期等关键事件：logcat + 文件双写（HKS 环境下文件是唯一可读通道）。 */
+    private fun fileLog(message: String) {
+        android.util.Log.i("CarPlayService", message)
+        com.lizhihua.carplaysender.util.DebugFileLog.append(this, message)
     }
 
     companion object {

@@ -35,6 +35,8 @@ class AudioSender(
     private val dataPort: Int,
     private val streamKey: ByteArray,
     private val log: (String) -> Unit,
+    /** 静音手机媒体音量（声音只从车机出）。null = 不做（测试用）。 */
+    private val context: android.content.Context? = null,
 ) {
     companion object {
         const val SAMPLE_RATE = 48_000
@@ -71,6 +73,45 @@ class AudioSender(
 
     val isRunning: Boolean get() = running.get()
 
+    /** 静音前的手机媒体音量 index（-1 = 未静音）。 */
+    private var mutedOriginalVolume = -1
+
+    /**
+     * 静音手机媒体输出：音频通道激活后声音只从车机出（真 CarPlay 行为）。
+     * 依据（实测 2026-10-10）：播放捕获取自 REMOTE_SUBMIX（音量应用点之前），
+     * 手机流音量静音**不影响捕获数据**——手机不响、车机照常出声。
+     */
+    private fun mutePhoneMedia() {
+        val ctx = context ?: return
+        try {
+            val manager = ctx.getSystemService(android.content.Context.AUDIO_SERVICE)
+                as android.media.AudioManager
+            if (mutedOriginalVolume >= 0) return
+            mutedOriginalVolume = manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+            manager.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, 0, 0)
+            log("AUDIO: 已静音手机媒体输出（原音量 $mutedOriginalVolume，断开后恢复）——声音只从车机出")
+        } catch (error: Exception) {
+            log("AUDIO: 静音手机媒体失败 - ${error.message}")
+        }
+    }
+
+    private fun restorePhoneMedia() {
+        val ctx = context ?: return
+        if (mutedOriginalVolume < 0) return
+        try {
+            val manager = ctx.getSystemService(android.content.Context.AUDIO_SERVICE)
+                as android.media.AudioManager
+            manager.setStreamVolume(
+                android.media.AudioManager.STREAM_MUSIC,
+                mutedOriginalVolume,
+                0,
+            )
+            log("AUDIO: 已恢复手机媒体音量（$mutedOriginalVolume）")
+        } catch (_: Exception) {
+        }
+        mutedOriginalVolume = -1
+    }
+
     /**
      * 启动音频发送。需要 MediaProjection（AudioPlaybackCapture 的授权来源）。
      * 返回是否成功进入采集循环。
@@ -103,6 +144,7 @@ class AudioSender(
             record = recorder
             recorder.startRecording()
             running.set(true)
+            mutePhoneMedia()
             log(
                 "AUDIO: 已启动（播放捕获 48kHz 立体声 → $host:$dataPort，" +
                     "每包 ${SAMPLES_PER_PACKET} 帧）",
@@ -128,6 +170,7 @@ class AudioSender(
         runCatching { socket?.close() }
         socket = null
         thread = null
+        restorePhoneMedia()
         log("AUDIO: 已停止（共发 $packetsSent 包 / ${bytesSent / 1024}KB）")
     }
 
