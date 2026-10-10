@@ -516,58 +516,6 @@ object VirtualLauncher {
         }
     }
 
-    /**
-     * 把一个位于主屏的任务拉回车机应用屏。返回是否验证到已移动。
-     *
-     * 本 ROM 实测（MagicOS）：
-     * - 原生移动：`am task move <taskId> --windowingMode 1 --display <id>`。
-     *   成功输出 `taskId=…` 行；任务不可见时失败输出 `targetTaskInfo is null !`（exit 255）。
-     * - 因此顺序：先直接移动（任务前台时有效）→ 带前台再移动 → `am start --display` 兜底。
-     * - 每一步都重新 dump 验证，未验证到即降级下一步。
-     */
-    private fun pullBack(pkg: String, taskId: String?, log: (String) -> Unit): Boolean {
-        val target = appDisplayId
-        if (target < 0) return false
-        // 1) 任务已可见（前台）：直接原生移动
-        if (taskId != null) {
-            val moved = moveTask(taskId, target)
-            log("DIAG-PULL($pkg): step1 moveTask task=$taskId ok=$moved")
-            if (moved) {
-                Thread.sleep(800)
-                if (!isOnMainDisplay(pkg)) return true
-            }
-        }
-        // 2) 任务在后台：先带到前台（无 --display），再原生移动
-        if (taskId != null) {
-            Shell.exec(
-                "am start -n \$(cmd package resolve-activity --brief $pkg | tail -n 1)",
-                timeoutMs = 6000,
-            )
-            Thread.sleep(400)
-            val moved2 = moveTask(taskId, target)
-            log("DIAG-PULL($pkg): step2 foreground+moveTask ok=$moved2")
-            if (moved2) {
-                Thread.sleep(800)
-                if (!isOnMainDisplay(pkg)) return true
-            }
-        }
-        // 3) 兜底：am start --display（PUBLIC 屏时新建实例会落目标屏）
-        val r3 = Shell.exec(
-            "am start --display $target \$(cmd package resolve-activity --brief $pkg | tail -n 1)",
-            timeoutMs = 6000,
-        )
-        Thread.sleep(800)
-        val onApp = packagesOnDisplay(pkg, target)
-        log("DIAG-PULL($pkg): step3 am start --display exit=${r3.exitCode} onApp=$onApp stillOnMain=${isOnMainDisplay(pkg)}")
-        return onApp
-    }
-
-    /** 原生任务移动。成功输出含 `taskId=` 行；失败输出 `targetTaskInfo is null`/Exception。 */
-    private fun moveTask(taskId: String, target: Int): Boolean {
-        val r = Shell.exec("am task move $taskId --windowingMode 1 --display $target", timeoutMs = 5000)
-        return r.exitCode == 0 && !r.output.contains("null") && !r.output.contains("xception")
-    }
-
     /** 重新 dump 一次，判断包是否有任务在指定 display。 */
     private fun packagesOnDisplay(pkg: String, displayId: Int): Boolean {
         val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
@@ -576,18 +524,6 @@ object VirtualLauncher {
             displayRegex.find(line)?.let { current = it.groupValues[1].toInt() }
             val task = taskRegex.find(line) ?: continue
             if (current == displayId && task.groupValues[2] == pkg) return true
-        }
-        return false
-    }
-
-    /** 重新 dump 一次，判断包的任务是否仍在主屏。 */
-    private fun isOnMainDisplay(pkg: String): Boolean {
-        val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
-        var displayId = -1
-        for (line in dump.lineSequence()) {
-            displayRegex.find(line)?.let { displayId = it.groupValues[1].toInt() }
-            val task = taskRegex.find(line) ?: continue
-            if (displayId == 0 && task.groupValues[2] == pkg) return true
         }
         return false
     }
