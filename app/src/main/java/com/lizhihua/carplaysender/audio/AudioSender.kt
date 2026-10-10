@@ -56,6 +56,22 @@ class AudioSender(
         private const val PAYLOAD_TYPE = 100
 
         private const val READ_TIMEOUT_QUIET_MILLIS = 500L
+
+        /** 静音前媒体音量的持久化键（进程被杀也不丢恢复目标）。 */
+        private const val KEY_SAVED_VOLUME = "audio_saved_media_volume"
+
+        /** 小端 s16 → 大端 s16（每两字节换序）。CarPlay 线格式要求大端样本。 */
+        fun bigEndianS16(source: ByteArray): ByteArray {
+            val out = source.copyOf()
+            var index = 0
+            while (index + 1 < out.size) {
+                val tmp = out[index]
+                out[index] = out[index + 1]
+                out[index + 1] = tmp
+                index += 2
+            }
+            return out
+        }
     }
 
     private val running = AtomicBoolean(false)
@@ -80,6 +96,9 @@ class AudioSender(
      * 静音手机媒体输出：音频通道激活后声音只从车机出（真 CarPlay 行为）。
      * 依据（实测 2026-10-10）：播放捕获取自 REMOTE_SUBMIX（音量应用点之前），
      * 手机流音量静音**不影响捕获数据**——手机不响、车机照常出声。
+     *
+     * 恢复值持久化（SharedPreferences）：进程被系统杀死/安装更新时来不及恢复，
+     * 下次静音若读到 0 会把它当"原音量"，导致断开后永久静音（2026-10-10 踩过）。
      */
     private fun mutePhoneMedia() {
         val ctx = context ?: return
@@ -87,9 +106,24 @@ class AudioSender(
             val manager = ctx.getSystemService(android.content.Context.AUDIO_SERVICE)
                 as android.media.AudioManager
             if (mutedOriginalVolume >= 0) return
-            mutedOriginalVolume = manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+            val prefs = ctx.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
+            val saved = prefs.getInt(KEY_SAVED_VOLUME, -1)
+            val current = manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+            // 目标恢复值：优先上次未恢复成功的保存值；否则当前值（>0 才可信）
+            val restoreTarget = when {
+                saved > 0 -> saved
+                current > 0 -> current
+                else -> -1
+            }
+            if (restoreTarget > 0) {
+                prefs.edit().putInt(KEY_SAVED_VOLUME, restoreTarget).apply()
+            }
+            mutedOriginalVolume = restoreTarget
             manager.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, 0, 0)
-            log("AUDIO: 已静音手机媒体输出（原音量 $mutedOriginalVolume，断开后恢复）——声音只从车机出")
+            log(
+                "AUDIO: 已静音手机媒体输出（原音量 ${if (restoreTarget > 0) restoreTarget else "未知"}，" +
+                    "断开后恢复）——声音只从车机出",
+            )
         } catch (error: Exception) {
             log("AUDIO: 静音手机媒体失败 - ${error.message}")
         }
@@ -97,16 +131,25 @@ class AudioSender(
 
     private fun restorePhoneMedia() {
         val ctx = context ?: return
-        if (mutedOriginalVolume < 0) return
         try {
             val manager = ctx.getSystemService(android.content.Context.AUDIO_SERVICE)
                 as android.media.AudioManager
-            manager.setStreamVolume(
-                android.media.AudioManager.STREAM_MUSIC,
-                mutedOriginalVolume,
-                0,
-            )
-            log("AUDIO: 已恢复手机媒体音量（$mutedOriginalVolume）")
+            val prefs = ctx.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
+            val target = when {
+                mutedOriginalVolume > 0 -> mutedOriginalVolume
+                else -> prefs.getInt(KEY_SAVED_VOLUME, -1)
+            }
+            if (target > 0) {
+                manager.setStreamVolume(
+                    android.media.AudioManager.STREAM_MUSIC,
+                    target,
+                    0,
+                )
+                log("AUDIO: 已恢复手机媒体音量（$target）")
+            } else {
+                log("AUDIO: 无有效原音量记录，手机媒体保持当前值（请按音量键调整）")
+            }
+            prefs.edit().remove(KEY_SAVED_VOLUME).apply()
         } catch (_: Exception) {
         }
         mutedOriginalVolume = -1
@@ -258,7 +301,11 @@ class AudioSender(
         val header = buildRtpHeader(sequence, timestamp)
         // AAD = header 的 timestamp+ssrc 段（字节 4..12）——catplay "modern AAD" / DiPlay 解密同款
         val aad = header.copyOfRange(4, RTP_HEADER_LEN)
-        val sealed = AirPlayCrypto.chachaSeal(streamKey, AirPlayCrypto.nonce64(nonceCounter), pcm, aad)
+        // 关键：CarPlay 线格式的 LPCM 是**大端** s16 样本——接收端对收到的负载做
+        // byteSwapS16 转回小端再喂 AudioTrack（DiPlay AndroidMediaSink.kt:1687）。
+        // Android 采集是原生小端，因此这里必须换序；漏掉会得到「沙沙声」（2026-10-10 实测）。
+        val wirePcm = bigEndianS16(pcm)
+        val sealed = AirPlayCrypto.chachaSeal(streamKey, AirPlayCrypto.nonce64(nonceCounter), wirePcm, aad)
         val wire = ByteArray(RTP_HEADER_LEN + sealed.size + NONCE_SIZE)
         header.copyInto(wire, 0)
         sealed.copyInto(wire, RTP_HEADER_LEN)
