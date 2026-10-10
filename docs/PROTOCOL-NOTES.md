@@ -1,14 +1,17 @@
 # 无线 CarPlay 发送端协议笔记
 
 > 本项目目标：Android 手机扮演 iPhone（CarPlay 发送端），连接 CarPlay 车机（接收端）。
-> 本笔记综合三个本地参考仓库（`reference/`，已 gitignore）与公开逆向资料整理。
+> 本笔记综合四个本地参考仓库（`reference/`：DiPlay、xcertplay、catplay、
+> carplay-wifi-extractor，已 gitignore）与公开逆向资料整理。
+> **测试台接收端实际使用 DiPlay**（xcertplay 的衍生版，`reference/DiPlay/`）；
+> 代码精读路径多为 xcertplay（`reference/xcertplay/`），两份源码同源、协议逻辑一致。
 > 标注 ✅ 的为已在参考代码中逐行确证；标注 ❓ 的为待验证项。
 
 ## 1. 角色与认证模型
 
 | | 接收端（车机角色） | 发送端（iPhone 角色，本项目） |
 |---|---|---|
-| 承担者 | 奥迪车机 / xcertplay（测试台） | 本 app |
+| 承担者 | 奥迪车机 / DiPlay（测试台） | 本 app |
 | 需要苹果签名身份 | ✅ 是（MFi 证书/芯片，被手机验证） | ❌ 否 |
 | 验证对方身份 | ❌ 否（单向认证，Oligo DEF CON 2025 证实） | 可选（测试台阶段直接跳过） |
 
@@ -108,21 +111,22 @@ pi=<配对ID>  pk=<ed25519公钥hex>
 
 **手机侧**广播 `_carplay-ctrl._tcp`（TXT: `id=<蓝牙MAC>`），车机 resolve 后**反连**该端口
 作为控制通道（即 iAP2 控制会话从蓝牙迁移到 WiFi TCP 的载体）。
-xcertplay 偏好 link-local IPv6，回落 IPv4。
+测试台（DiPlay，沿袭 xcertplay）偏好 link-local IPv6，回落 IPv4——实测 ctrl 探测
+源地址为 `fe80::…%wlan0`。
 
 ## 7. 蓝牙 RFCOMM（✅ xcertplay `CarPlayController.kt:1591,1963`）
 
 - iPhone（发送端）监听 SDP 服务：UUID `00000000-deca-fade-deca-deafdecacafe`
 - 配件端 UUID：`00000000-deca-fade-deca-deafdecacaff`
-- xcertplay 的连接策略：扫描**已配对**的 `PHONE_SMART` 设备 → 逐个连接上述 UUID
-- 测试台因此只需：两台手机系统级配对 → 本 app 监听 → 备用机 xcertplay 回连
+- 测试台（DiPlay）的连接策略：扫描**已配对**的 `PHONE_SMART` 设备 → 逐个连接上述 UUID
+- 测试台因此只需：两台手机系统级配对 → 本 app 监听 → 备用机 DiPlay 回连
 
 ## 8. AirPlay 主会话（Phase 2，仅索引）
 
 - 参考实现：catplay `carplay/catplay_carplay/src/carplay_tx/`（发送端 1959 行）+
   `screen/tx/`（视频发送会话）+ `rtp/record/`（发送侧 RTP）+ `pairing/pairing_helper_tx.rs`
 - 加密：ed25519 PairSetup/PairVerify（HomeKit 风格）+ RTP AES/ChaCha
-  （xcertplay 接收端对应实现在 `airplay/PairSetup.kt`/`PairVerify.kt`/`Srp6a.kt`）
+  （接收端参考实现在 xcertplay/DiPlay `airplay/PairSetup.kt`/`PairVerify.kt`/`Srp6a.kt`）
 - 视频：H.264/H.265，AVCC/AnnexB 封装转换（catplay `video/`）
 - 时钟：NTP 风格 timing 端口 + RTCP（catplay `clock/`）
 - ❓ FairPlay/流加密细节无公开规格，靠 catplay 源码 + ludwig-v 解密固件对照
@@ -133,7 +137,7 @@ xcertplay 偏好 link-local IPv6，回落 IPv4。
    但那是 USB 有线方向；无线方向未知
 2. 用户车机为 MIB3（2020 款后），无公开兼容记录，全新未知
 3. 真车首次配对：需要先有「系统级蓝牙配对」，奥迪车机通常要求先插 USB 才开放无线
-   配对（❓ 关键未知项：能否纯蓝牙触发。xcertplay 测试台无此限制）
+   配对（❓ 关键未知项：能否纯蓝牙触发。DiPlay 测试台无此限制）
 4. WifiNetworkSpecifier 不支持程序化传入密码（系统弹窗输入）——0x5703 拿到密码后
    无法静默入网，需要用户每次确认（❓ Phase 3 实测影响）
 
@@ -157,7 +161,7 @@ xcertplay 偏好 link-local IPv6，回落 IPv4。
 | pair-setup | ❌ 403 | 车机不接受匿名 SRP 配对（iAP2 已完成 MFi 信任） |
 | pair-verify 快路径 | ⏳ | 403 后转「已配对设备」pair-verify，待实测 |
 
-**奥迪与测试台（DiPlay/xcertplay）的差异清单**：
+**奥迪与测试台（DiPlay）的差异清单**：
 1. 车机**不发 0x4301**——识别帧声明可收 `0x4e0c 0x4e09 0x4e0d 0x4e0e 0x5702 0xea00 0xea01`、
    可发 `0x5703 0xea03`；AirPlay 端点只能走 WiFi 的 mDNS `_airplay._tcp`
 2. 车机**主动发 SYN**（测试台等手机发）；会话表 {1,2} 且必须回显
@@ -177,16 +181,20 @@ Shizuku shell 侧读法：`content query --uri content://settings/secure/bluetoo
 
 ## 10. 参考文件速查
 
+> 表中路径均指 `reference/` 下**代码精读来源**（xcertplay 与 DiPlay 同源，
+> 接收端逻辑一致，读哪份都行）；**实际测试台运行的是 DiPlay**（`reference/DiPlay/`）。
+
 | 内容 | 位置 |
 |---|---|
 | 链路层字节格式/校验和 | `reference/carplay-wifi-extractor/example/iap2/link_layer.py` |
-| RFCOMM 传输/UUID | 同上 `transport/bluetooth.py`；xcertplay `CarPlayController.kt` |
+| RFCOMM 传输/UUID | 同上 `transport/bluetooth.py`；xcertplay/DiPlay `CarPlayController.kt` |
 | CSM 分帧/TLV | `reference/xcertplay/.../iap2/wire/Iap2CsmFramer.kt`、`Iap2WireCodec.kt` |
 | 无线控制时序 | `reference/xcertplay/.../transport/Iap2WirelessControlClient.kt` |
 | 0x1D01 身份字段 | `reference/xcertplay/.../transport/Iap2IdentificationClient.kt` |
 | 消息端点目录 | `reference/xcertplay/.../iap2/catalog/Iap2Endpoint.kt`（931行,全部参数布局） |
 | Bonjour 细节 | `reference/xcertplay/.../network/CarPlayBonjour.kt` |
 | 接收端 AirPlay 会话 | `reference/xcertplay/.../airplay/AirPlaySession.kt` + `PairVerify.kt` |
+| 测试台（实际运行版） | `reference/DiPlay/`（含真车诊断/音频等增强；与 xcertplay 同源） |
 | 发送端全套参考 | `reference/catplay/carplay/catplay_carplay/src/carplay_tx/` 等 |
 | MFi 认证（接收端向） | `reference/xcertplay/.../mfi/`；Oligo 博客（单向性证据） |
 | 解密固件(仅查阅) | ludwig-v/wireless-carplay-dongle-reverse-engineering（未克隆） |

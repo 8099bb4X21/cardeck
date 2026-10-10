@@ -5,8 +5,9 @@
 
 ## 结论先行（可行性）
 
-- **方向与 xcertplay/DiPlay 相反**：它们是接收端（车机角色）；本项目是发送端。
-  两者的协议知识在 iAP2/链路层/Bonjour 层共享，但角色逻辑互不包含。
+- **方向与 DiPlay/xcertplay 相反**：它们是接收端（车机角色）；本项目是发送端。
+  **DiPlay 是 xcertplay 的衍生版，也是本项目实际使用的测试台**；`reference/`
+  里两者的源码都留作参考（协议知识在 iAP2/链路层/Bonjour 层共享，角色逻辑互不包含）。
 - **发送端不需要苹果签名身份**：iAP2 认证是单向的（手机验证车机的 MFi 证书，
   车机信任手机自报结果，Oligo Security DEF CON 2025 已公开证实）。
 - **有线 USB 路线已排除**（app 无法控制 USB gadget，荣耀无法解锁 BL），
@@ -24,7 +25,7 @@
 | 兜底 | 买 Tbox 安卓盒子，把同一套自绘 UI 装进盒子 | — | 失败时启用 |
 
 **Phase 3 实车突破（2026-10-09，Audi_MMI_6318 / MHI3_AS_AU_P3801，见 `docs/PROTOCOL-NOTES.md` §9b）**：
-与测试台（DiPlay/xcertplay）相比，奥迪 MIB3 有六处关键差异，逐一修正后 iAP2 全链路首次贯通：
+与测试台（DiPlay）相比，奥迪 MIB3 有六处关键差异，逐一修正后 iAP2 全链路首次贯通：
 1. 车机**主动发 SYN** 声明会话表 `{1:control, 2:EA}`，手机必须 ACK+原样回显，
    之后 CSM 走 **1 号会话**（发 10 号被车机静默丢弃，而链路层照常 ACK——极具迷惑性）
 2. **MFi 挑战必须 20 字节**（32B 车机完全不应答；测试台 DiPlay 反而要 32B → 做成 32/20/16 回退）
@@ -40,7 +41,7 @@
 **Phase 1 真机调试记录（2026-10-08，DiPlay on Redmi K40）**：
 1. `StreamDuplexStream` 读写共享锁导致死锁（读阻塞持锁，写永远等待）→ 读写分离
 2. MFi 挑战 16 字节被拒（Carlinkit EC 身份走 AuthV3，要求**精确 32 字节**）→ 已修
-3. DiPlay 与 xcertplay 时序差异：**DiPlay 不发 0x6800 StartHID**，订阅完直接等 0x5702 → 改为 2 秒可选等待
+3. 参考代码（xcertplay）在订阅后发 0x6800 StartHID；**实际测试台 DiPlay 不发**（订阅完直接等 0x5702）→ 改为 2 秒可选等待
 
 **Phase 2 里程碑 A：AirPlay 配对打通（2026-10-08 22:58）**——蓝牙保持连接状态下一次通过：
 `/info` 前哨 87ms 应答 → pair-setup（SRP 固定码 3939，M1/M3/M5）→ pair-verify（M1/M3，
@@ -66,24 +67,26 @@ hidSendReport 双槽报文解析（u16LE 像素坐标）→ UI 命中测试。�
 
 ## 测试台搭建（Phase 0 使用说明）
 
-1. **备用安卓手机**（Android 9+）：从 [xcertplay releases](https://github.com/shilapi/xcertplay/releases)
-   下载 mobile APK 安装——它是我们的「虚拟车机」（接收端）。
-2. **两台手机系统级蓝牙配对**（设置里直接配对即可，这是 xcertplay 回连的前提）。
+1. **备用安卓手机**（Android 9+）：从 [DiPlay releases](https://github.com/shihabal3amri/DiPlay/releases)
+   下载 APK 安装——它是我们的「虚拟车机」（接收端）。
+   （DiPlay 是 xcertplay 的衍生版，更活跃；`reference/` 里两份源码都留作参考。）
+2. **两台手机系统级蓝牙配对**（设置里直接配对即可，这是 DiPlay 回连的前提）。
 3. **本 app 安装到荣耀手机**：
    ```bash
    ./gradlew assembleDebug
    adb install app/build/outputs/apk/debug/app-debug.apk
    ```
 4. 按界面四步操作：
-   - **③ 启动蓝牙 iAP2 监听**：监听 iPhone UUID，等 xcertplay 回连。
+   - **③ 启动蓝牙 iAP2 监听**：监听 iPhone UUID，等 DiPlay 回连。
      连上后日志会十六进制转储入向字节——看到 `ff 55 02 00 …` 即链路层 SYN，
      Phase 0 的核心验证点；
-   - 备用机 xcertplay 选无线模式（热点/局域网），开启后它会扫描已配对手机并回连；
-   - **① 加入热点**：输入 xcertplay 显示的 SSID（系统弹窗输密码）；
+   - 备用机 DiPlay 选无线模式（热点/局域网），开启后它会扫描已配对手机并回连；
+   - **① 加入热点**：输入 DiPlay 显示的 SSID（系统弹窗输密码）；
    - **② 扫描 _airplay._tcp**：应解析出备用机的 AirPlay 端点 + TXT（deviceid/features/pi/pk）；
-   - **④ 广播 _carplay-ctrl._tcp**：验证 xcertplay 能发现并反连手机控制通道。
-5. xcertplay 需要一个 MFi 身份才能走完认证；它默认用测试合成身份即可继续（我们的
-   发送端跳过校验）。若需真实身份见其 README 的三条途径。
+   - **④ 广播 _carplay-ctrl._tcp**：验证 DiPlay 能发现并反连手机控制通道。
+5. DiPlay 的发布版内置了从 Carlinkit 固件提取的实验性配件身份（其 README 已声明），
+   即可走完 MFi 认证（我们的发送端跳过校验）。若需自备 MFi 身份（芯片/本地证书/
+   远程服务三种途径），见 xcertplay README。
 
 ## 工程结构
 
