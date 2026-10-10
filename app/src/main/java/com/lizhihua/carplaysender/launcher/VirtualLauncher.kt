@@ -363,6 +363,13 @@ object VirtualLauncher {
     /** 拉回失败后的冷却时长。 */
     private const val PULL_FAIL_COOLDOWN_MS = 60_000L
 
+    /**
+     * 拉回执行开关。
+     * false（2026-10-10 起）：仅记录「本应拉回」事件，不执行——实测受信虚拟屏下是否仍需拉回；
+     * true：恢复自动拉回（am start --display 带回/新建）。
+     */
+    private const val PULL_BACK_ENABLED = false
+
     /** 诊断日志限流（每包 10s 一条）。 */
     private val diagAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
@@ -456,6 +463,17 @@ object VirtualLauncher {
                         val currentMainTask = taskIdOnMain[pkg]
                         // 同一主屏残留任务只拉一次（新跳转会产生新 taskId，那时再拉）
                         if (currentMainTask != null && currentMainTask == lastPulledMainTask[pkg]) continue
+                        // ★ 拉回执行开关（2026-10-10 起关闭实测：受信虚拟屏是否已足够，不再需要拉回）
+                        // 关闭时仅记录「本应拉回」事件（限流：同一残留任务只记一次），便于对照实测；
+                        // 实测完成后置 true 即恢复原行为。
+                        if (!PULL_BACK_ENABLED) {
+                            if (currentMainTask != null) lastPulledMainTask[pkg] = currentMainTask
+                            log(
+                                "LAUNCHER: [实测·拉回已禁用] $pkg 逃逸到主屏（inApp=$inApp，" +
+                                    "手机触摸 -${(now - phoneTouchAt) / 1000}s，车机触摸 -${(now - carTouchAt) / 1000}s）",
+                            )
+                            continue
+                        }
                         // 本 ROM 无可靠任务移动（am task move 静默无效）：
                         // 拉回 = 在车机屏新建实例（MULTIPLE_TASK）。
                         // inApp=true（原任务仍在车机屏）：复用带回前台；
