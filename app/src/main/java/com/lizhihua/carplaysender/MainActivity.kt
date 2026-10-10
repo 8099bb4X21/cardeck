@@ -69,6 +69,8 @@ class MainActivity : AppCompatActivity() {
         com.lizhihua.carplaysender.input.TouchRouter.reset()
         currentClient?.close()
         currentClient = null
+        // 解除会话静默：出站探测恢复（下次会话建立时会再次置位）
+        com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = false
     }
 
     private val permissionLauncher =
@@ -443,6 +445,9 @@ class MainActivity : AppCompatActivity() {
                     context = applicationContext,
                 )
                 retirePreviousSession()
+                // 会话静默降噪（2026-10-10）：从交接点起暂停其它接收端的出站连接探测
+                // （典型：连着 DiPlay 测试台时不再噪音式探测 Audi）。会话结束/断开时解除。
+                com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = true
                 // 第一阶段：保持 BT 在位直接配对 + SETUP（协议上正确的形态）
                 var client = newClient()
                 currentClient = client
@@ -513,6 +518,11 @@ class MainActivity : AppCompatActivity() {
                                             width = setup.displayWidth,
                                             height = setup.displayHeight,
                                             log = { line -> log(line) },
+                                            onEnded = {
+                                                // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
+                                                log(">>> CarPlay 会话结束（推流终止）——恢复蓝牙探测")
+                                                com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = false
+                                            },
                                         )
                                         val density = 420
                                         videoSender?.start { surface ->
@@ -542,6 +552,12 @@ class MainActivity : AppCompatActivity() {
                     log("AIRPLAY: 配对线程异常 - ${error.message ?: error.javaClass.simpleName}")
                 } finally {
                     sessionStarting.set(false)
+                    // 配对未成功建立推流（fail/异常/start 失败提前退出）时解除静默降噪，
+                    // 否则 BT-C 会永久停在门闸外、连真车路径失效。
+                    // 推流活跃时保持关闭，由 VideoSender.onEnded（推流终止）负责解除。
+                    if (videoSender?.isRunning != true) {
+                        com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = false
+                    }
                 }
             }, "airplay-pairing").start()
         }

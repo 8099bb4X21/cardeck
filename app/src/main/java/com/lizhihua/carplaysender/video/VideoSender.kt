@@ -31,6 +31,8 @@ class VideoSender(
     private val width: Int,
     private val height: Int,
     private val log: (String) -> Unit,
+    /** 推流自然结束（对端断开等）时回调——CarPlay 会话真实结束的信号。 */
+    private val onEnded: (() -> Unit)? = null,
 ) {
     private var socket: Socket? = null
     private var encoder: MediaCodec? = null
@@ -39,6 +41,9 @@ class VideoSender(
     private var frameCounter = 0L
     private var configSent = false
     private var framesSent = 0L
+
+    /** 推流是否活跃（静默降噪守卫判断用：start 失败时保持 false）。 */
+    val isRunning: Boolean get() = running.get()
 
     /**
      * 启动编码与推流。编码器输入 Surface 通过 [onSurfaceReady] 交给调用方渲染
@@ -126,6 +131,8 @@ class VideoSender(
             log("VIDEO: 推流中止 - ${error.message}（等待接收端恢复后重连）")
         } finally {
             stop()
+            // 会话真实结束信号（静默降噪解除 / 状态收尾）
+            runCatching { onEnded?.invoke() }
         }
     }
 

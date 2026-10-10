@@ -94,9 +94,12 @@ class Iap2BluetoothClient(
         } ?: return
         var lastFailureLogAt = 0L
         while (running) {
-            // 车机正在连我们（入站会话活跃）时不要出站——两条 RFCOMM 会互相踩，
-            // 车机侧表现为双会话混乱（Audi 实测：出站并行时双方都静默）
-            if (BtSessionGate.inboundActive) {
+            // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
+            //  - inboundActive：接收端正在连我们（两条 RFCOMM 会互相踩；Audi 实测双会话混乱）
+            //  - sessionActive：CarPlay 会话已建立（已拿到端点）——与其它接收端的连接尝试全部暂停
+            //    典型场景：连着 Redmi/DiPlay 时不再无脑探测车机 Audi（消除日志噪音与蓝牙churn）；
+            //    会话结束（任一端 BT 会话终结 / 手动断开）时自动恢复。
+            if (BtSessionGate.inboundActive || BtSessionGate.sessionActive) {
                 sleepQuietly(2_000)
                 continue
             }
@@ -234,6 +237,15 @@ class Iap2BluetoothClient(
  * 目的：车机通常只有单条无线 iAP2 上下文，双向同时建链会让双方互相干扰。
  */
 object BtSessionGate {
+    /** 入站（车机主动连入）的 iAP2 会话活跃：出站暂停，避免两条 RFCOMM 互相踩。 */
     @Volatile
     var inboundActive: Boolean = false
+
+    /**
+     * CarPlay 会话已建立（任一路径成功拿到端点后置位，由 MainActivity 维护）：
+     * 暂停一切出站连接尝试（静默降噪）——典型表现为连着 DiPlay 时不再探测 Audi。
+     * 会话结束/手动断开时由 MainActivity 清除。
+     */
+    @Volatile
+    var sessionActive: Boolean = false
 }
