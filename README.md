@@ -97,25 +97,28 @@ hidSendReport 双槽报文解析（u16LE 像素坐标）→ UI 命中测试。�
 
 ```
 app/src/main/java/com/lizhihua/carplaysender/
-├── MainActivity.kt              # 四步验证台 UI
-├── iap2/
-│   ├── Iap2LinkPacket.kt        # 链路层 FF5A/FF55 包编解码（Phase 1 补状态机）
-│   ├── Iap2Csm.kt               # CSM 0x4040 分帧 + TLV 参数体
-│   └── Iap2MessageIds.kt        # 发送端视角消息目录（含完整时序注释）
-├── bt/Iap2BluetoothServer.kt    # RFCOMM 监听（iPhone UUID）+ 字节转储
-├── net/
-│   ├── WifiCarPlayConnector.kt  # WifiNetworkSpecifier app 专属入网
-│   ├── CarPlayServiceBrowser.kt # mDNS 发现 _airplay._tcp
-│   └── CarPlayCtrlAdvertiser.kt # mDNS 广播 _carplay-ctrl._tcp
-└── util/HexDump.kt              # 协议观测
-docs/PROTOCOL-NOTES.md           # 协议知识库（分层格式/时序/参考索引）
-reference/                       # 参考仓库（gitignore，不入库不分发）
+├── MainActivity.kt                 # 操作台 UI（连接/声音/暗幕/日志）
+├── iap2/                           # iAP2 链路层 + CSM + 发送端会话
+├── airplay/                        # AirPlay 配对/控制通道/流协商/流加密
+├── audio/AudioSender.kt            # 音频通道（播放捕获 → RTP/ChaCha20 over UDP）
+├── video/VideoSender.kt            # H.264 编码推流
+├── bt/Iap2BluetoothServer.kt       # RFCOMM 监听（测试台等回连）
+├── bt/Iap2BluetoothClient.kt       # RFCOMM 主动连车机（真车路径）
+├── launcher/                       # 隐形屏启动器（dock + 应用网格双虚拟屏）
+├── render/DualDisplayComposer.kt   # EGL 双屏合成 → 编码 Surface
+├── input/TouchRouter.kt            # 触摸分流（dock/应用屏直注）
+├── capture/HiddenDisplaySource.kt  # 隐形屏画面源
+├── shizuku/                        # Shizuku 桥（shell 权限 / 触摸注入 / 受信虚拟屏）
+├── ui/ScreenDimmer.kt              # 常亮+暗幕（替代息屏）
+└── net/                            # WiFi 入网 / mDNS 发现与广播
+docs/PROTOCOL-NOTES.md              # 协议知识库（分层格式/时序/参考索引）
+reference/                          # 参考仓库（gitignore，不入库不分发）
 ```
 
 ## 边界
 
-- **产品形态是自绘车机桌面**（导航/音乐由 app 自己集成），不是整机镜像——
-  车机触摸只能回传给本 app（注入其他 app 需系统权限）。
+- **产品形态是隐形屏启动器**（受信虚拟屏跑手机应用 + dock 常驻），不是整机镜像；
+  车机触摸经 Shizuku 直注虚拟屏（2026-10-10 起桌面/镜像两种模式已移除）。
 - **许可证**：`reference/` 下 xcertplay/DiPlay 为 GPL-3.0、catplay 各 crate许可证见其仓库；
   本项目为独立实现，仅参考公开协议格式；勿闭源分发对 GPL 代码的衍生品，勿分发固件提取的密钥。
 - 真车验证前请先用可借到的 iPhone 与车机做一次正常无线配对留作对照。

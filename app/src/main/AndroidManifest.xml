@@ -61,20 +61,6 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice|mediaProjection" />
 
-        <!-- 镜像模式：无障碍手势注入（不读内容） -->
-        <service
-            android:name=".input.MirrorTouchService"
-            android:exported="false"
-            android:label="@string/app_name"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_service_config" />
-        </service>
-
         <!-- 虚拟屏桌面（exported：shell am start 需要可从外部拉起） -->
         <activity
             android:name=".launcher.DockActivity"

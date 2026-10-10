@@ -46,9 +46,7 @@ class MainActivity : AppCompatActivity() {
 
     private var videoSender: com.lizhihua.carplaysender.video.VideoSender? = null
     private var audioSender: com.lizhihua.carplaysender.audio.AudioSender? = null
-    private var currentRenderer: com.lizhihua.carplaysender.ui.CarDisplayRenderer? = null
     private var currentClient: com.lizhihua.carplaysender.airplay.AirPlayClient? = null
-    private var currentMirrorSource: com.lizhihua.carplaysender.capture.MirrorScreenSource? = null
     private var currentHiddenSource: com.lizhihua.carplaysender.capture.HiddenDisplaySource? = null
 
     /** 当前会话的共享密钥与接收端地址：投影授权晚于连接时，动态补启音频用。 */
@@ -66,14 +64,8 @@ class MainActivity : AppCompatActivity() {
         audioSender = null
         currentSharedSecret = null
         currentAudioHost = null
-        currentRenderer?.release()
-        currentRenderer = null
-        currentMirrorSource?.release()
-        currentMirrorSource = null
         currentHiddenSource?.release()
         currentHiddenSource = null
-        com.lizhihua.carplaysender.input.TouchRouter.renderer = null
-        com.lizhihua.carplaysender.input.TouchRouter.hiddenSource = null
         com.lizhihua.carplaysender.input.TouchRouter.reset()
         currentClient?.close()
         currentClient = null
@@ -93,7 +85,7 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val data = result.data
             if (result.resultCode != RESULT_OK || data == null) {
-                log("MODE: 投屏权限被拒绝（镜像模式与音频通道不可用）")
+                log("MODE: 投屏权限被拒绝（车机侧声音不可用）")
                 return@registerForActivityResult
             }
             // Android 14+ 顺序：先把结果交给服务，由服务升级 FGS 类型后调 getMediaProjection
@@ -185,25 +177,21 @@ class MainActivity : AppCompatActivity() {
                 permissionLauncher.launch("android.permission.POST_NOTIFICATIONS")
             }
             // 前台保活：连接期间进程不被后台清理杀死
-            // 隐形屏模式：连接时提示 Shizuku 状态（冻结/未授权时触摸注入会失败）
-            if (com.lizhihua.carplaysender.input.TouchRouter.mode ==
-                com.lizhihua.carplaysender.input.TouchRouter.Mode.HIDDEN
-            ) {
-                when (com.lizhihua.carplaysender.shizuku.ShizukuGate.state(this)) {
-                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY ->
-                        log("SHIZUKU: 就绪（触摸注入可用）")
+            // 隐形屏（唯一模式）：连接时提示 Shizuku 状态（冻结/未授权时启动器与触摸注入不可用）
+            when (com.lizhihua.carplaysender.shizuku.ShizukuGate.state(this)) {
+                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY ->
+                    log("SHIZUKU: 就绪（触摸注入可用）")
 
-                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.UNAUTHORIZED -> {
-                        log("SHIZUKU: 未授权本应用——已发起授权请求，请在弹窗点允许后重连")
-                        com.lizhihua.carplaysender.shizuku.ShizukuGate.requestPermission()
-                    }
-
-                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_RUNNING ->
-                        log("SHIZUKU: 服务未运行——打开 Shizuku App 点「启动」")
-
-                    com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_INSTALLED ->
-                        log("SHIZUKU: 未安装（隐形屏模式需要）")
+                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.UNAUTHORIZED -> {
+                    log("SHIZUKU: 未授权本应用——已发起授权请求，请在弹窗点允许后重连")
+                    com.lizhihua.carplaysender.shizuku.ShizukuGate.requestPermission()
                 }
+
+                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_RUNNING ->
+                    log("SHIZUKU: 服务未运行——打开 Shizuku App 点「启动」")
+
+                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_INSTALLED ->
+                    log("SHIZUKU: 未安装（隐形屏模式需要）")
             }
             com.lizhihua.carplaysender.service.CarPlayService.start(this)
             // 真车路径：手机主动连车机（SDP …caff 配件服务）
@@ -479,20 +467,6 @@ class MainActivity : AppCompatActivity() {
                                 // 记录会话凭据：投影授权晚于连接时用于动态补启音频
                                 currentSharedSecret = keys.sharedSecret
                                 currentAudioHost = effectiveEndpoint.ipAddresses.firstOrNull { it.contains('.') }
-                                val mode = com.lizhihua.carplaysender.input.TouchRouter.mode
-                                com.lizhihua.carplaysender.input.TouchRouter.carWidth = setup.displayWidth
-                                com.lizhihua.carplaysender.input.TouchRouter.carHeight = setup.displayHeight
-                                var desktopRenderer: com.lizhihua.carplaysender.ui.CarDisplayRenderer? = null
-                                if (mode == com.lizhihua.carplaysender.input.TouchRouter.Mode.DESKTOP) {
-                                    desktopRenderer = com.lizhihua.carplaysender.ui.CarDisplayRenderer(
-                                        applicationContext,
-                                        width = setup.displayWidth,
-                                        height = setup.displayHeight,
-                                        log = { line -> log(line) },
-                                    )
-                                    currentRenderer = desktopRenderer
-                                    com.lizhihua.carplaysender.input.TouchRouter.renderer = desktopRenderer
-                                }
                                 client.connectEventChannel(keys.sharedSecret, setup) { command ->
                                     when (command["type"]) {
                                         "hidSendReport" -> {
@@ -542,50 +516,22 @@ class MainActivity : AppCompatActivity() {
                                         )
                                         val density = 420
                                         videoSender?.start { surface ->
-                                            when (mode) {
-                                                com.lizhihua.carplaysender.input.TouchRouter.Mode.DESKTOP -> {
-                                                    desktopRenderer?.attach(surface)
-                                                }
-
-                                                com.lizhihua.carplaysender.input.TouchRouter.Mode.MIRROR -> {
-                                                    val projection =
-                                                        com.lizhihua.carplaysender.service.CarPlayService.mediaProjection
-                                                    if (projection == null) {
-                                                        log("MODE: 镜像模式缺少投屏权限——请先点「申请投屏权限」")
-                                                    } else {
-                                                        val source = com.lizhihua.carplaysender.capture.MirrorScreenSource(
-                                                            projection,
-                                                        )
-                                                        currentMirrorSource = source
-                                                        val ok = source.attach(
-                                                            surface,
-                                                            setup.displayWidth,
-                                                            setup.displayHeight,
-                                                            density,
-                                                        )
-                                                        log("MODE: 镜像主屏 ${if (ok) "已启动" else "启动失败"}（注意保持手机亮屏解锁）")
-                                                    }
-                                                }
-
-                                                com.lizhihua.carplaysender.input.TouchRouter.Mode.HIDDEN -> {
-                                                    val source =
-                                                        com.lizhihua.carplaysender.capture.HiddenDisplaySource(
-                                                            applicationContext,
-                                                            log = { line -> log(line) },
-                                                        )
-                                                    currentHiddenSource = source
-                                                    com.lizhihua.carplaysender.input.TouchRouter.hiddenSource = source
-                                                    val ok = source.attach(
-                                                        surface,
-                                                        setup.displayWidth,
-                                                        setup.displayHeight,
-                                                        density,
-                                                    )
-                                                    log(
-                                                        "MODE: 隐形屏 ${if (ok) "已启动（高德车机版优先）display=${source.displayId}" else "启动失败（Shizuku 就绪？）"}",
-                                                    )
-                                                }
-                                            }
+                                            // 唯一模式：隐形屏（双屏启动器：dock + 应用屏）
+                                            val source =
+                                                com.lizhihua.carplaysender.capture.HiddenDisplaySource(
+                                                    applicationContext,
+                                                    log = { line -> log(line) },
+                                                )
+                                            currentHiddenSource = source
+                                            val ok = source.attach(
+                                                surface,
+                                                setup.displayWidth,
+                                                setup.displayHeight,
+                                                density,
+                                            )
+                                            log(
+                                                "MODE: 隐形屏 ${if (ok) "已启动（高德车机版优先）display=${source.displayId}" else "启动失败（Shizuku 就绪？）"}",
+                                            )
                                         }
                                     }
                                 }
@@ -601,45 +547,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** onCreate 的 UI 初始化尾部：模式选择/开关/按钮/日志面板（从原 onCreate 拆出，保持结构清晰）。 */
+    /** onCreate 的 UI 初始化尾部：开关/按钮/日志面板（从原 onCreate 拆出，保持结构清晰）。 */
     private fun setUpUiControls() {
-        // 模式选择（持久化；切换后如已连接，断开当前蓝牙会话触发下一轮按新模式重建）
-        val modeGroup = findViewById<android.widget.RadioGroup>(R.id.modeGroup)
+        // 模式已简化为固定「隐形屏」（桌面/镜像模式已按需移除，2026-10-10）：
+        // 启动器（dock + 应用屏双虚拟屏）即唯一形态。
         val preferences = getSharedPreferences("settings", Context.MODE_PRIVATE)
-        val savedMode = preferences.getString("mode", "DESKTOP") ?: "DESKTOP"
-        val initialMode = com.lizhihua.carplaysender.input.TouchRouter.Mode.valueOf(savedMode)
-        com.lizhihua.carplaysender.input.TouchRouter.mode = initialMode
-        modeGroup.check(
-            when (initialMode) {
-                com.lizhihua.carplaysender.input.TouchRouter.Mode.DESKTOP -> R.id.modeDesktop
-                com.lizhihua.carplaysender.input.TouchRouter.Mode.MIRROR -> R.id.modeMirror
-                com.lizhihua.carplaysender.input.TouchRouter.Mode.HIDDEN -> R.id.modeHidden
-            },
-        )
-        modeGroup.setOnCheckedChangeListener { _, checkedId ->
-            val mode = when (checkedId) {
-                R.id.modeMirror -> com.lizhihua.carplaysender.input.TouchRouter.Mode.MIRROR
-                R.id.modeHidden -> com.lizhihua.carplaysender.input.TouchRouter.Mode.HIDDEN
-                else -> com.lizhihua.carplaysender.input.TouchRouter.Mode.DESKTOP
-            }
-            preferences.edit().putString("mode", mode.name).apply()
-            com.lizhihua.carplaysender.input.TouchRouter.mode = mode
-            when (mode) {
-                com.lizhihua.carplaysender.input.TouchRouter.Mode.DESKTOP ->
-                    log("MODE: 切换到 桌面（自绘 UI），下一轮连接生效")
-
-                com.lizhihua.carplaysender.input.TouchRouter.Mode.MIRROR ->
-                    log("MODE: 切换到 镜像主屏（需先申请投屏权限，保持亮屏），下一轮连接生效")
-
-                com.lizhihua.carplaysender.input.TouchRouter.Mode.HIDDEN -> {
-                    log("MODE: 切换到 隐形屏（启动器：桌面+dock，需 Shizuku 就绪），下一轮连接生效")
-                    if (com.lizhihua.carplaysender.ui.ScreenDimmer.enabled) {
-                        promptOverlayPermission("已切换到「隐形屏」模式且常亮暗幕开启。")
-                    }
-                }
-            }
-            bluetoothServer.detachCurrentSession()
-            bluetoothClient.detachCurrentSession()
+        // 清理旧版本遗留的模式偏好
+        if (preferences.contains("mode")) {
+            preferences.edit().remove("mode").apply()
         }
         val alwaysOn = findViewById<android.widget.CheckBox>(R.id.switchAlwaysOn)
         com.lizhihua.carplaysender.ui.ScreenDimmer.enabled =
@@ -666,7 +581,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<Button>(R.id.btnProjection).setOnClickListener {
-            // 音频通道（播放捕获）也依赖 RECORD_AUDIO：与投屏授权一起请求
+            // 投屏权限的唯一用途现在是「车机侧声音」（播放捕获）：与 RECORD_AUDIO 一起请求。
+            // （镜像模式已移除，投屏不再用于画面。）
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
                 PackageManager.PERMISSION_GRANTED
             ) {
@@ -712,7 +628,7 @@ class MainActivity : AppCompatActivity() {
             if (hadProjection) {
                 // Android 14+：MediaProjection 与保活服务（mediaProjection FGS 类型）绑定，
                 // 停服务会连带失效授权——下次连接需重新点「申请投屏权限」
-                log("已手动断开并停止保活服务（常亮已恢复）；投屏授权已随服务停止失效，下次连接如需音频/镜像请重新申请")
+                log("已手动断开并停止保活服务（常亮已恢复）；投屏授权已随服务停止失效，下次连接如需声音请重新申请")
             } else {
                 log("已手动断开并停止保活服务（常亮已恢复）")
             }

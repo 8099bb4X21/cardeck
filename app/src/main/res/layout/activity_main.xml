@@ -27,40 +27,6 @@
             android:textSize="13sp"
             android:text="idle" />
 
-        <RadioGroup
-            android:id="@+id/modeGroup"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:orientation="horizontal">
-
-            <RadioButton
-                android:id="@+id/modeDesktop"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="桌面"
-                android:textColor="#FFFFFF"
-                android:textSize="14sp" />
-
-            <RadioButton
-                android:id="@+id/modeMirror"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="12dp"
-                android:text="镜像主屏"
-                android:textColor="#FFFFFF"
-                android:textSize="14sp" />
-
-            <RadioButton
-                android:id="@+id/modeHidden"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="12dp"
-                android:text="隐形屏"
-                android:textColor="#FFFFFF"
-                android:textSize="14sp" />
-        </RadioGroup>
-
         <CheckBox
             android:id="@+id/switchAlwaysOn"
             android:layout_width="match_parent"
@@ -75,7 +41,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="申请投屏权限（镜像模式用）"
+            android:text="申请投屏权限（车机侧声音用）"
             android:textSize="13sp" />
 
         <EditText

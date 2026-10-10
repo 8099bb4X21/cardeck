@@ -21,8 +21,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  *  - opcode 0 = VideoFrame：ChaCha20-Poly1305 密封的「4 字节 BE 长度前缀 NAL 序列」，
  *    nonce = nonce64(帧计数)，计数按帧顺序从 0 递增
  *
- * 视频源：MediaCodec Surface 输入（H.264 硬编码），当前画测试画面
- * （彩条 + 帧号文字）——后续替换为正式车机桌面 UI。
+ * 视频源：MediaCodec Surface 输入（H.264 硬编码），内容由画面源渲染
+ * （隐形屏模式的 DualDisplayComposer 输入 Surface）。
  */
 class VideoSender(
     private val host: String,
@@ -42,7 +42,7 @@ class VideoSender(
 
     /**
      * 启动编码与推流。编码器输入 Surface 通过 [onSurfaceReady] 交给调用方渲染
-     * （当前由 CarDisplayRenderer 的虚拟显示器 + Presentation 绘制标准 View 层级）。
+     * （隐形屏模式下由 DualDisplayComposer 的合成画布填充）。
      */
     fun start(onSurfaceReady: (Surface) -> Unit): Boolean {
         if (running.get()) return true

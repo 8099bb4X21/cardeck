@@ -1,15 +1,13 @@
 package com.lizhihua.carplaysender.capture
 
-import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplay
-import android.media.projection.MediaProjection
 import android.view.Surface
 
 /**
- * 车机画面来源抽象：编码器输入 Surface 由各模式的源填充。
- * - DesktopSource：CarDisplayRenderer（自绘桌面，Presentation 私有虚拟屏）
- * - MirrorScreenSource：MediaProjection 镜像手机主屏（AUTO_MIRROR）
- * - HiddenDisplaySource：公共虚拟屏 + Shizuku 把应用启动进去（隐形屏模式）
+ * 车机画面来源抽象：编码器输入 Surface 由画面源填充。
+ * 当前唯一实现：[HiddenDisplaySource]（隐形屏：受信虚拟屏 + Shizuku 把应用启动进去）。
+ *
+ * （原「桌面」（Presentation 自绘）与「镜像主屏」（MediaProjection AUTO_MIRROR）
+ *   两种模式已按需移除，2026-10-10。）
  */
 interface ScreenSource {
     val name: String
@@ -22,35 +20,4 @@ interface ScreenSource {
 
     /** 释放全部资源 */
     fun release()
-}
-
-/** 镜像手机主屏：MediaProjection 直接合成到编码 Surface（零拷贝）。要求保持亮屏解锁。 */
-class MirrorScreenSource(private val projection: MediaProjection) : ScreenSource {
-
-    override val name: String = "镜像主屏"
-
-    private var display: VirtualDisplay? = null
-
-    override fun attach(surface: Surface, width: Int, height: Int, densityDpi: Int): Boolean {
-        detach()
-        display = projection.createVirtualDisplay(
-            "carplaysender-mirror",
-            width,
-            height,
-            densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC,
-            surface,
-            null,
-            null,
-        )
-        return display != null
-    }
-
-    override fun detach() {
-        display?.release()
-        display = null
-    }
-
-    override fun release() = detach()
 }
