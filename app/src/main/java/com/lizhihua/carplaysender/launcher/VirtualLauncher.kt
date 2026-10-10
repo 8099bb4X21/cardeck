@@ -177,9 +177,8 @@ object VirtualLauncher {
             val gridOk = startOn(appDisplayId, "com.lizhihua.carplaysender/.launcher.GridActivity")
             appContextRef = context.applicationContext
             log("LAUNCHER: dock=$dockOk grid=$gridOk appDensity=${appDensity}dpi")
-            startWatchdog(log)
-            // 触摸探针始终挂载：任务看护用「手机侧最近真实触摸」区分
-            // 「用户主动在手机侧打开应用」（跟随到手机）与「车机内跳转」（拉回车机）
+            startShizukuHealer()
+            // 暗幕组件就绪（常亮+暗幕功能；主界面开关控制启停）
             com.lizhihua.carplaysender.ui.ScreenDimmer.attach(context)
             dockOk && gridOk
         } catch (error: IllegalStateException) {
@@ -203,10 +202,6 @@ object VirtualLauncher {
             }
             displaysViaService = false
         }
-        carPackages.clear()
-        userMovedToPhone.clear()
-        pullFailUntil.clear()
-        lastPulledMainTask.clear()
         appContextRef = null
         watchdogActive = false
         runCatching { composer?.stop() }
@@ -273,10 +268,6 @@ object VirtualLauncher {
         )
         if (ok) {
             synchronized(runningApps) { runningApps.add(component) }
-            // 车机侧主动启动：清除「跟随手机」标记，标记该包来过车机屏
-            userMovedToPhone.remove(component.packageName)
-            carPackages.add(component.packageName)
-            pullFailUntil.remove(component.packageName)
             notifyRunningAppsChanged()
         } else {
             Log.w(TAG, "启动失败：${result.output.take(120)}")
@@ -339,7 +330,7 @@ object VirtualLauncher {
         }
     }
 
-    // ---- 任务看护：应用内跳转产生的任务可能落到主屏（AOSP 多显示限制），自动拉回车机屏 ----
+    // ---- Shizuku 自愈 ----
 
     @Volatile
     private var watchdogActive = false
@@ -348,170 +339,27 @@ object VirtualLauncher {
     val taskRegex = Regex("""Task\{[0-9a-f]+ #(\d+) type=standard A=\d+:(\S+)""")
     private val displayRegex = Regex("""Display: mDisplayId=(\d+)""")
 
-    /** 本会话曾在车机屏显示过的包（跟随判定用：不因中途跑到主屏而丢失「来过车机」事实）。 */
-    private val carPackages = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-
-    /** 用户主动从手机侧打开、跟随到手机的包：不再自动拉回，直至回到车机屏。 */
-    private val userMovedToPhone = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-
-    /** 拉回失败后的冷却截止时间（防止「拉不动→每 2 秒重试→任务反复弹前台」死循环）。 */
-    private val pullFailUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
-
-    /** 触摸后多久内视为「正在进行该侧操作」。 */
-    private const val TOUCH_GRACE_MS = 15_000L
-
-    /** 拉回失败后的冷却时长。 */
-    private const val PULL_FAIL_COOLDOWN_MS = 60_000L
-
-    /**
-     * 拉回执行开关。
-     * false（2026-10-10 起）：仅记录「本应拉回」事件，不执行——实测受信虚拟屏下是否仍需拉回；
-     * true：恢复自动拉回（am start --display 带回/新建）。
-     */
-    private const val PULL_BACK_ENABLED = false
-
-    /** 诊断日志限流（每包 10s 一条）。 */
-    private val diagAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
-
-    /** 已为其拉回过的「主屏残留任务 id」：同一残留只拉一次，避免每轮重复抢前台。 */
-    private val lastPulledMainTask = java.util.concurrent.ConcurrentHashMap<String, String>()
-
     /** 诊断日志出口（由 MainActivity 接到文件日志）。 */
     @Volatile
     var logSink: ((String) -> Unit)? = null
 
-    /** 应用上下文（看护循环里的 Shizuku 自愈需要）。 */
+    /** 应用上下文（Shizuku 自愈需要）。 */
     @Volatile
     private var appContextRef: android.content.Context? = null
 
-    /** 车机侧最近一次触摸时间（TouchRouter 更新）。 */
-    @Volatile
-    var lastCarTouchAt: Long = 0L
-        private set
-
-    /** 车机侧发生触摸（HID 事件）时调用。 */
-    fun onCarTouch() {
-        lastCarTouchAt = SystemClock.uptimeMillis()
-    }
-
-    private fun startWatchdog(log: (String) -> Unit) {
+    /**
+     * Shizuku 触摸注入自愈：服务断开时尝试解冻并重绑（每 4s 一次；健康时
+     * service 非空直接跳过、零开销）。解决「必须强行停止 App 重开」问题。
+     *
+     * 注：原「任务看护」（应用逃逸到主屏后自动拉回）已于 2026-10-10 实机验证后移除：
+     * 受信虚拟屏下应用内跳转天然留在车机屏、手机侧打开自然跟随到手机、从车机 dock
+     * 重开又回到车机侧——不再需要任何拉回干预。
+     */
+    private fun startShizukuHealer() {
         if (watchdogActive) return
         watchdogActive = true
         watchdogThread = Thread({
             while (watchdogActive && appDisplayId >= 0) {
-                try {
-                    val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
-                    val runningPackages = synchronized(runningApps) { runningApps.map { it.packageName }.toSet() }
-                    val packagesOnMain = LinkedHashSet<String>()
-                    val packagesOnApp = LinkedHashSet<String>()
-                    val taskIdOnMain = HashMap<String, String>()
-                    var displayId = -1
-                    for (line in dump.lineSequence()) {
-                        displayRegex.find(line)?.let { displayId = it.groupValues[1].toInt() }
-                        val task = taskRegex.find(line) ?: continue
-                        val id = task.groupValues[1]
-                        val pkg = task.groupValues[2]
-                        when (displayId) {
-                            0 -> {
-                                packagesOnMain.add(pkg)
-                                taskIdOnMain.putIfAbsent(pkg, id)
-                            }
-
-                            appDisplayId -> packagesOnApp.add(pkg)
-                        }
-                    }
-                    val now = SystemClock.uptimeMillis()
-                    val phoneTouchAt = com.lizhihua.carplaysender.ui.ScreenDimmer.lastUserTouchAt
-                    val carTouchAt = lastCarTouchAt
-                    val phoneRecent = now - phoneTouchAt < TOUCH_GRACE_MS
-                    val carRecent = now - carTouchAt < TOUCH_GRACE_MS
-                    // 谁摸得更晚，谁就是用户当前所在的一侧；都比较旧时默认车机侧（自动跳转也拉回）
-                    val phoneIsNewer = phoneRecent && (!carRecent || phoneTouchAt > carTouchAt)
-                    for (pkg in runningPackages) {
-                        val inMain = pkg in packagesOnMain
-                        val inApp = pkg in packagesOnApp
-                        if (inApp && !inMain) {
-                            // 干净状态：只在车机屏
-                            carPackages.add(pkg)
-                            lastPulledMainTask.remove(pkg)
-                            if (userMovedToPhone.remove(pkg)) {
-                                log("LAUNCHER: $pkg 已回到车机侧")
-                            }
-                            continue
-                        }
-                        if (!inMain) continue
-                        // —— 以下处理「主屏有任务」：两种场景 ——
-                        // A) inApp=true（双屏并存）：应用内跳转产生的新任务落主屏（原任务仍在车机屏）
-                        // B) inApp=false（整体移动）：用户在手机侧打开该应用（系统把任务移走）
-                        // 关键：A 场景此前被「if (inApp) continue」跳过，永远拉不回（2026-10-09 定位）。
-                        if (pkg in userMovedToPhone) continue
-                        if (phoneIsNewer && pkg in carPackages && !inApp) {
-                            // B 场景 + 手机操作更新：跟随到手机，不再拉回
-                            userMovedToPhone.add(pkg)
-                            log(
-                                "LAUNCHER: $pkg 跟随到手机侧（手机触摸 -${(now - phoneTouchAt) / 1000}s，" +
-                                    "车机触摸 -${(now - carTouchAt) / 1000}s）",
-                            )
-                            continue
-                        }
-                        if (phoneIsNewer && inApp) {
-                            // A 场景 + 用户正拿着手机操作：本轮不拉，等车机侧触摸更新再拉
-                            continue
-                        }
-                        val until = pullFailUntil[pkg] ?: 0L
-                        if (now < until) continue
-                        val currentMainTask = taskIdOnMain[pkg]
-                        // 同一主屏残留任务只拉一次（新跳转会产生新 taskId，那时再拉）
-                        if (currentMainTask != null && currentMainTask == lastPulledMainTask[pkg]) continue
-                        // ★ 拉回执行开关（2026-10-10 起关闭实测：受信虚拟屏是否已足够，不再需要拉回）
-                        // 关闭时仅记录「本应拉回」事件（限流：同一残留任务只记一次），便于对照实测；
-                        // 实测完成后置 true 即恢复原行为。
-                        if (!PULL_BACK_ENABLED) {
-                            if (currentMainTask != null) lastPulledMainTask[pkg] = currentMainTask
-                            log(
-                                "LAUNCHER: [实测·拉回已禁用] $pkg 逃逸到主屏（inApp=$inApp，" +
-                                    "手机触摸 -${(now - phoneTouchAt) / 1000}s，车机触摸 -${(now - carTouchAt) / 1000}s）",
-                            )
-                            continue
-                        }
-                        // 本 ROM 无可靠任务移动（am task move 静默无效）：
-                        // 拉回 = 在车机屏新建实例（MULTIPLE_TASK）。
-                        // inApp=true（原任务仍在车机屏）：复用带回前台；
-                        // inApp=false：直接新建。
-                        val resolve = Shell.exec(
-                            "cmd package resolve-activity --brief $pkg | tail -n 1",
-                            timeoutMs = 4000,
-                        ).output.trim()
-                        if (resolve.isEmpty()) continue
-                        val cmd = if (inApp) {
-                            "am start -n $resolve --display $appDisplayId"
-                        } else {
-                            "am start -n $resolve --display $appDisplayId -f 0x18000000"
-                        }
-                        val r = Shell.exec(cmd, timeoutMs = 8000)
-                        val ok = r.ok && r.output.contains("Starting:", ignoreCase = true)
-                        Thread.sleep(1200)
-                        if (ok && packagesOnDisplay(pkg, appDisplayId)) {
-                            if (currentMainTask != null) lastPulledMainTask[pkg] = currentMainTask
-                            log(
-                                "LAUNCHER: 应用拉回车机 ($pkg inApp=$inApp)（手机触摸 -${(now - phoneTouchAt) / 1000}s，" +
-                                    "车机触摸 -${(now - carTouchAt) / 1000}s）",
-                            )
-                        } else {
-                            pullFailUntil[pkg] = SystemClock.uptimeMillis() + PULL_FAIL_COOLDOWN_MS
-                            log(
-                                "LAUNCHER: 拉回 $pkg 未生效（inApp=$inApp ok=$ok out=${r.output.take(60)}），" +
-                                    "${PULL_FAIL_COOLDOWN_MS / 1000}s 后重试",
-                            )
-                        }
-                        break // 每轮最多一个拉回操作，避免密集 shell 调用
-                    }
-                } catch (_: InterruptedException) {
-                    break
-                } catch (_: Exception) {
-                }
-                // Shizuku 触摸注入自愈：服务断开时尝试解冻 Shizuku 并重绑（每周期一次；
-                // 健康时 service 非空直接跳过，零开销）。解决"必须强行停止 App 重开"问题。
                 try {
                     val ctx = appContextRef
                     if (ctx != null && com.lizhihua.carplaysender.shizuku.CarInputClient.service == null) {
@@ -523,12 +371,12 @@ object VirtualLauncher {
                 } catch (_: Exception) {
                 }
                 try {
-                    Thread.sleep(4000) // 降频：dumpsys+移动命令较重，减少系统负载
+                    Thread.sleep(4000)
                 } catch (_: InterruptedException) {
                     break
                 }
             }
-        }, "vd-watchdog").apply {
+        }, "shizuku-healer").apply {
             isDaemon = true
             start()
         }

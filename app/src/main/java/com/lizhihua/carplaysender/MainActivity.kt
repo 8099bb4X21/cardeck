@@ -571,7 +571,7 @@ class MainActivity : AppCompatActivity() {
                 }
             } else {
                 if (com.lizhihua.carplaysender.launcher.VirtualLauncher.appDisplayId >= 0) {
-                    // 会话中：仅关闭常亮/暗幕，保留触摸探针（任务看护需要）
+                    // 会话中：仅关闭常亮/暗幕（投屏探针等资源留待会话结束统一释放）
                     com.lizhihua.carplaysender.ui.ScreenDimmer.disableDim()
                 } else {
                     com.lizhihua.carplaysender.ui.ScreenDimmer.detach()

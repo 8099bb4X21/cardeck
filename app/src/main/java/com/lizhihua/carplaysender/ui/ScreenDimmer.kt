@@ -33,11 +33,6 @@ object ScreenDimmer {
     @Volatile
     var enabled: Boolean = true
 
-    /** 手机侧最近一次真实触摸时间（uptimeMillis）；任务看护用它区分「用户主动在手机上操作」与「车机内跳转」。 */
-    @Volatile
-    var lastUserTouchAt: Long = 0L
-        private set
-
     private var appContext: Context? = null
     private var windowManager: WindowManager? = null
     private var handler: Handler? = null
@@ -76,11 +71,11 @@ object ScreenDimmer {
         if (enabled) {
             Log.i("CarPlaySender", "DIMMER: 已启动（常亮 + ${IDLE_TIMEOUT_MS / 1000}s 无操作后暗幕，点击恢复）")
         } else {
-            Log.i("CarPlaySender", "DIMMER: 触摸探针已启动（常亮/暗幕关闭，仅用于任务看护）")
+            Log.i("CarPlaySender", "DIMMER: 触摸探针已启动（常亮/暗幕关闭）")
         }
     }
 
-    /** 关闭常亮/暗幕但保留触摸探针（会话中任务看护仍需手机触摸信号）。 */
+    /** 关闭常亮/暗幕但保留触摸探针（重新开启时无需重建窗口）。 */
     fun disableDim() {
         enabled = false
         val ctx = appContext ?: return
@@ -127,9 +122,8 @@ object ScreenDimmer {
         h.post { showDim() }
     }
 
-    /** 物理触摸（任意 app/界面）或暗幕点击时调用。 */
+    /** 物理触摸（任意 app/界面）或暗幕点击时调用：重置自动暗幕计时。 */
     fun onUserInteraction() {
-        lastUserTouchAt = android.os.SystemClock.uptimeMillis()
         val h = handler ?: return
         if (dimShown) hideDim()
         if (enabled) schedule()

@@ -35,8 +35,6 @@ object TouchRouter {
     fun onContact(context: Context, contact: Contact) {
         // 空闲槽占位（未按下且 0,0）忽略
         if (!contact.down && contact.xPixels == 0 && contact.yPixels == 0) return
-        // 车机侧触摸踪迹：任务看护用它区分「车机操作」与「手机操作」
-        com.lizhihua.carplaysender.launcher.VirtualLauncher.onCarTouch()
 
         val launcher = com.lizhihua.carplaysender.launcher.VirtualLauncher
         val dockW = launcher.dockWidthPx
