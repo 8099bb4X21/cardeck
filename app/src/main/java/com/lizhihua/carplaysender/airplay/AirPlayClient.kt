@@ -252,6 +252,10 @@ class AirPlayClient(
     private val eventCommandLock = Any()
     private var eventCseq = 0
 
+    /** 未知请求（非 /command 的合法请求）累计数：前 10 条留痕后静默。 */
+    @Volatile
+    private var unknownEventRequests = 0
+
     /** 事件通道建立后由 connectEventChannel 调用。 */
     private fun registerEventCommandChannel(socket: Socket, cipher: ControlCipher) {
         eventCommandSocket = socket
@@ -284,15 +288,20 @@ class AirPlayClient(
     }
 
     /**
-     * 事件通道请求应答：对每条车机请求回 RTSP/1.0 200 OK（DiPlay runEventRead 同款）。
+     * 事件通道请求应答：只对**车机的请求**回 RTSP/1.0 200 OK，并 echo 其 CSeq
+     * （DiPlay buildResponse 同款，对照 RtspMessage.kt:76）。踩坑记录（2026-10-11）：
+     * 此前对一切入向消息都回 200——对"应答"回应答与 DiPlay 形成乒乓：DiPlay 把我们的
+     * 多余应答解析成请求（"RTSP/1.0" 当 method 剥掉后 protocol 取到第三 token），
+     * 回出畸形行 "OK 200 OK"；我们再回 → 无限回声，日志雪崩且空耗加密通道。
      * 通道写与 postEventCommand 共用一把锁，避免两线程加密帧交叉。
      */
-    private fun respondEventRequest() {
+    private fun respondEventRequest(cseq: String?) {
         val socket = eventCommandSocket ?: return
         val cipher = eventCommandCipher ?: return
         try {
             synchronized(eventCommandLock) {
-                val head = "RTSP/1.0 200 OK\r\nContent-Length: 0\r\nCSeq: \$eventCseq\r\n\r\n"
+                val head = "RTSP/1.0 200 OK\r\nContent-Length: 0\r\n" +
+                    (cseq?.let { "CSeq: $it\r\n" } ?: "") + "\r\n"
                 socket.getOutputStream().apply {
                     write(cipher.encrypt(head.toByteArray(Charsets.US_ASCII)))
                     flush()
@@ -1128,29 +1137,34 @@ class AirPlayClient(
                         val decrypted = cipher.decrypt(pending)
                         pending = decrypted.rest
                         var eventOtherLogged = 0
-                        for ((firstLine, body) in accumulator.offer(decrypted.data)) {
-                            // 每条车机请求都要立即回 RTSP 200（DiPlay runEventRead 同款；
-                            // 不应答时车机请求管道塞满后判通道死亡关闭——2026-10-11 实测
-                            // 触摸 3 个事件后 EOF 断通道的根因）
-                            respondEventRequest()
+                        for (message in accumulator.offer(decrypted.data)) {
+                            val firstLine = message.firstLine
+                            // (a) 状态行（"RTSP/1.0 200 OK" 等）= 车机对**我们命令**的应答：
+                            //     静默跳过——不回、不记录（回应答会触发乒乓回声，见 respondEventRequest）
+                            if (firstLine.startsWith("RTSP/") || firstLine.startsWith("HTTP/")) continue
+                            // (b) 请求判定：方法 token + "/"-开头路径。畸形行（如 "OK 200 OK"：
+                            //     第 2 token 是数字）判为非请求 → 静默丢弃，不回不记
+                            val tokens = firstLine.split(" ")
+                            val isRequest = tokens.size >= 2 && tokens[1].startsWith("/")
+                            if (!isRequest) continue
+                            // 车机请求：立即回 200（echo 请求 CSeq）；/command 走分发，其余节流留痕
+                            val cseq = Regex("CSeq:\\s*(\\d+)", RegexOption.IGNORE_CASE)
+                                .find(message.head)?.groupValues?.get(1)
+                            respondEventRequest(cseq)
                             if (!firstLine.contains("/command")) {
-                                // 事件通道上的非 /command 消息留痕（其他路径的数据不漏掉）
-                                if (eventOtherLogged < 20) {
-                                    eventOtherLogged++
-                                    log(
-                                        "EVENT: 非 /command 消息 [$firstLine] body=${body.size}B " +
-                                            body.joinToString(" ") { "%02x".format(it) }.take(160),
-                                    )
+                                unknownEventRequests++
+                                if (unknownEventRequests <= 10) {
+                                    log("EVENT: 未知请求 [$firstLine] body=${message.body.size}B")
                                 }
                                 continue
                             }
                             val command = try {
-                                BinaryPlist.parse(body) as? Map<*, *>
+                                BinaryPlist.parse(message.body) as? Map<*, *>
                             } catch (_: IllegalArgumentException) {
                                 null
                             }
                             if (command == null) {
-                                log("EVENT: 命令 plist 解析失败 [$firstLine] body=${body.size}B")
+                                log("EVENT: 命令 plist 解析失败 [$firstLine] body=${message.body.size}B")
                                 continue
                             }
                             try {
@@ -1174,12 +1188,15 @@ class AirPlayClient(
 
     /** 流式 RTSP 报文重组器：喂入任意分片明文，弹出完整消息（首行 + body）。 */
     private class RtspAccumulator {
+        /** 完整报文：首行（分类用）、头部全文（提取 CSeq）、body。 */
+        class Message(val firstLine: String, val head: String, val body: ByteArray)
+
         private var buffer = ByteArray(0)
 
-        fun offer(bytes: ByteArray): List<Pair<String, ByteArray>> {
+        fun offer(bytes: ByteArray): List<Message> {
             if (bytes.isEmpty()) return emptyList()
             buffer += bytes
-            val messages = ArrayList<Pair<String, ByteArray>>()
+            val messages = ArrayList<Message>()
             val separator = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
             while (true) {
                 val index = indexOf(buffer, separator)
@@ -1190,7 +1207,11 @@ class AirPlayClient(
                 val bodyStart = index + separator.size
                 if (buffer.size - bodyStart < contentLength) break
                 val firstLine = headText.lineSequence().firstOrNull() ?: ""
-                messages += firstLine to buffer.copyOfRange(bodyStart, bodyStart + contentLength)
+                messages += Message(
+                    firstLine,
+                    headText,
+                    buffer.copyOfRange(bodyStart, bodyStart + contentLength),
+                )
                 buffer = buffer.copyOfRange(bodyStart + contentLength, buffer.size)
             }
             return messages
