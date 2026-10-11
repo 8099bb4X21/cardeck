@@ -39,25 +39,17 @@ class GridActivity : AppCompatActivity() {
     private var cells: List<Cell> = emptyList()
     private var columns = 4
     private var perPage = 12
+    private var cellWidthPx = 0
+    private var cellHeightPx = 0
 
     // ---- UI 句柄 ----
     private var pager: ViewPager2? = null
     private var dotsRow: LinearLayout? = null
     private var navBar: LinearLayout? = null
     private var bubble: TextView? = null
-    private var clockView: TextView? = null
 
     private var letters: List<String> = emptyList() // 去重后的分区字母（flat 顺序）
     private val letterFirstIndex = HashMap<String, Int>() // 字母 → flat 下标（跳页用）
-
-    // 秒级时钟（链路活性证据）：1s 刷新
-    private val clockHandler = Handler(Looper.getMainLooper())
-    private val clockTicker = object : Runnable {
-        override fun run() {
-            clockView?.text = DateFormat.format("HH:mm:ss", System.currentTimeMillis())
-            clockHandler.postDelayed(this, 1_000)
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -78,28 +70,20 @@ class GridActivity : AppCompatActivity() {
         val root = FrameLayout(this).apply { setBackgroundColor(0xFF000000.toInt()) }
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
-        // 状态栏：时钟（等宽走秒）
-        val status = FrameLayout(this).apply {
-            setPadding(dp(28), dp(14), dp(28), dp(6))
-        }
-        status.addView(
-            TextView(this).apply {
-                setTextColor(0xFFFFFFFF.toInt())
-                textSize = 24f
-                letterSpacing = 0.08f
-                setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD)
-            }.also { clockView = it },
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER_VERTICAL or Gravity.START,
-            ),
-        )
-        content.addView(status)
-
-        // 页面区：ViewPager + 右侧字母条浮层
-        columns = if (resources.displayMetrics.widthPixels >= 1100) 4 else 3
+        // 页面区：ViewPager + 右侧字母条浮层。
+        // 格子尺寸按「状态栏/页点占用后的真实可用区域」精确计算， GridLayout 显式
+        // 指定格子宽高——否则按内容 packing 会挤在左上角、右侧大片留白
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+        val statusPx = dp(60)
+        val dotsPx = dp(35)
+        val navPx = dp(40)
+        val pagerW = screenW - navPx
+        val pagerH = screenH - statusPx - dotsPx
+        columns = if (pagerW / 4 >= dp(170)) 4 else 3
         perPage = columns * 3
+        cellWidthPx = pagerW / columns
+        cellHeightPx = pagerH / 3
         val pagerArea = FrameLayout(this)
 
         val viewPager = ViewPager2(this).apply {
@@ -198,16 +182,6 @@ class GridActivity : AppCompatActivity() {
         highlightLetter(letterForPage(0))
     }
 
-    override fun onResume() {
-        super.onResume()
-        clockHandler.post(clockTicker)
-    }
-
-    override fun onPause() {
-        super.onPause()
-        clockHandler.removeCallbacks(clockTicker)
-    }
-
     // ---- 分页 ----
 
     private inner class PageAdapter : RecyclerView.Adapter<PageHolder>() {
@@ -227,17 +201,26 @@ class GridActivity : AppCompatActivity() {
         }
 
         override fun onBindViewHolder(holder: PageHolder, position: Int) {
-            holder.bind(position)
+            holder.bind(position, cellWidthPx, cellHeightPx)
         }
     }
 
     private inner class PageHolder(private val grid: GridLayout) : RecyclerView.ViewHolder(grid) {
-        fun bind(page: Int) {
+        fun bind(page: Int, cellW: Int, cellH: Int) {
             grid.removeAllViews()
             val from = page * perPage
             val to = minOf(from + perPage, cells.size)
             for (index in from until to) {
-                grid.addView(buildCell(cells[index]))
+                grid.addView(
+                    buildCell(cells[index]),
+                    GridLayout.LayoutParams(
+                        GridLayout.spec(GridLayout.UNDEFINED),
+                        GridLayout.spec(GridLayout.UNDEFINED),
+                    ).apply {
+                        width = cellW
+                        height = cellH
+                    },
+                )
             }
         }
     }
@@ -250,7 +233,7 @@ class GridActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
             setPadding(dp(6), dp(10), dp(6), dp(10))
         }
-        val iconSize = dp(92)
+        val iconSize = (cellHeightPx * 0.55f).toInt().coerceAtMost((cellWidthPx * 0.62f).toInt())
         layout.addView(
             ImageView(this).apply {
                 setImageBitmap(roundedIcon(cell.entry.icon, iconSize))

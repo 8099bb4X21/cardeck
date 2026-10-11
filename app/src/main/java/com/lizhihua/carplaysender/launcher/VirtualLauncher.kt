@@ -27,8 +27,8 @@ object VirtualLauncher {
 
     private const val TAG = "VirtualLauncher"
 
-    /** dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。2026-10-11 用户实测 88dp 偏宽，改 2/3。 */
-    const val DOCK_WIDTH_DP = 58
+    /** dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。CarPlay 化后含时钟/电量，54dp。 */
+    const val DOCK_WIDTH_DP = 54
 
     val runningApps = LinkedHashSet<ComponentName>()
 
@@ -117,6 +117,16 @@ object VirtualLauncher {
             var viaService = false
             if (useTrusted) {
                 runCatching {
+                    // 残留清理：进程重启/上轮会话遗留的同名虚拟屏不释放会一直占位
+                    // （新宽度/新 surface 不生效——2026-10-11 dock 改宽后视觉无变化的根因）
+                    val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                    dm.displays
+                        .filter { it.name == "CarPlayDock" || it.name == "CarPlayApp" }
+                        .forEach { stale ->
+                            runCatching { svc!!.releaseDisplay(stale.displayId) }
+                                .onSuccess { log("LAUNCHER: 已释放残留虚拟屏 ${stale.name}#${stale.displayId}") }
+                        }
+                    Thread.sleep(150) // 等系统完成注销
                     val dockId = svc!!.createDisplay("CarPlayDock", dockWidthPx, totalHeight, densityDpi, dockSurface)
                     val appId = svc!!.createDisplay("CarPlayApp", appWidth, totalHeight, appDensity, appSurface)
                     if (dockId >= 0 && appId >= 0) {
