@@ -70,8 +70,10 @@ object TouchRouter {
         } else {
             inDock = contact.xPixels < dockW
             targetDisplay = if (inDock) launcher.dockDisplayId else launcher.appDisplayId
-            localX = if (inDock) contact.xPixels else contact.xPixels - dockW
-            localY = contact.yPixels
+            // 应用屏可能超采样（appScale>1）：注入坐标是应用虚显的物理像素，需按倍率换算
+            val scale = if (inDock) 1f else launcher.appScale.coerceAtLeast(1f)
+            localX = if (inDock) contact.xPixels else ((contact.xPixels - dockW) * scale).toInt()
+            localY = (contact.yPixels * scale).toInt()
         }
         if (targetDisplay < 0) {
             diag("目标屏无效 dock=${launcher.dockDisplayId} app=${launcher.appDisplayId}")

@@ -39,6 +39,16 @@ object VirtualLauncher {
     /** letterbox 窗口的目标逻辑宽度（dp）：≈ 手机屏宽，触发电商类应用的紧凑手机布局。 */
     private const val LETTERBOX_TARGET_DP = 410f
 
+    /**
+     * 横屏应用屏超采样倍率（固定像素占位缩小的唯一杠杆，见 attach 注释）。
+     * 2.0 时像素开销 4x（用户实测明显变卡）；1.5 时 2.25x，顶部固定区占比
+     * 12%（原始 18%）——画质/流畅的折中点（2026-10-11 用户反馈调参）。
+     */
+    private const val APP_SUPERSAMPLE = 1.5f
+
+    /** 超采样后的应用屏高度上限（px；控制 GPU/内存开销）。 */
+    private const val SUPERSAMPLE_MAX_HEIGHT = 1620
+
     val runningApps = LinkedHashSet<ComponentName>()
 
     private val runningAppsListeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
@@ -87,6 +97,14 @@ object VirtualLauncher {
     var appHeightPx: Int = 0
         private set
 
+    /**
+     * 应用屏超采样倍率（1=不超采样）。TouchRouter 注入坐标按此换算
+     * （注入坐标必须是应用虚显的物理像素）。
+     */
+    @Volatile
+    var appScale: Float = 1f
+        private set
+
     private var dockDisplay: VirtualDisplay? = null
     private var appDisplay: VirtualDisplay? = null
     private var composer: DualDisplayComposer? = null
@@ -126,9 +144,22 @@ object VirtualLauncher {
         // = 屏高px/letterbox宽高比，再由屏幕密度换算 dp。密度偏高 → 窗口只有 ~343dp，
         // 应用呈现「大字大搜索框」的窄屏布局；密度 ~200 → 窗口 ~411dp ≈ 手机宽度，
         // 应用呈现紧凑手机布局（截图验证）。目标：letterbox 窗口 ≈ LETTERBOX_TARGET_DP。
-        val appDensity = if (appWidth > appHeightPx && !dockAtBottom) {
-            val letterboxWindowPx = appHeightPx / LETTERBOX_ASPECT_RATIO
-            (letterboxWindowPx / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(180, densityDpi)
+        val landscapeApp = appWidth > appHeightPx && !dockAtBottom
+        // 超采样：部分应用（头条实测）按「手机状态栏物理像素」预留顶部区域
+        // （28dp@560dpi=98px 原始像素，与显示密度无关），在 540px 高的流里占 18%、
+        // 手机上仅 3.5%——无法去除（应用内部绘制），只能靠「渲染更多像素再缩回」
+        // 把固定像素的占比压小。×2：98px→49px（9%）；超采样高度上限 1620px。
+        val appScaleFactor = if (landscapeApp) {
+            minOf(APP_SUPERSAMPLE, SUPERSAMPLE_MAX_HEIGHT.toFloat() / appHeightPx)
+        } else {
+            1f
+        }
+        val appDisplayWidth = (appWidth * appScaleFactor).toInt()
+        val appDisplayHeight = (appHeightPx * appScaleFactor).toInt()
+        this.appScale = appScaleFactor
+        val appDensity = if (landscapeApp) {
+            val letterboxWindowPx = appDisplayHeight / LETTERBOX_ASPECT_RATIO
+            (letterboxWindowPx / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(180, 640)
         } else {
             densityDpi
         }
@@ -169,7 +200,9 @@ object VirtualLauncher {
                         }
                     Thread.sleep(150) // 等系统完成注销
                     val dockId = svc!!.createDisplay("CarPlayDock", dockWidthPx, dockHeightPx, densityDpi, dockSurface)
-                    val appId = svc!!.createDisplay("CarPlayApp", appWidth, appHeightPx, appDensity, appSurface)
+                    val appId = svc!!.createDisplay(
+                        "CarPlayApp", appDisplayWidth, appDisplayHeight, appDensity, appSurface,
+                    )
                     if (dockId >= 0 && appId >= 0) {
                         dockDisplayId = dockId
                         appDisplayId = appId
@@ -183,7 +216,7 @@ object VirtualLauncher {
             }
             if (viaService) {
                 displaysViaService = true
-                log("LAUNCHER: 双屏创建(受信) dock=$dockDisplayId(${dockWidthPx}px) app=$appDisplayId(${appWidth}px)")
+                log("LAUNCHER: 双屏创建(受信) dock=$dockDisplayId(${dockWidthPx}px) app=$appDisplayId(${appDisplayWidth}x$appDisplayHeight scale=x$appScaleFactor @${appDensity}dpi)")
             } else {
                 // 回退：应用侧 PUBLIC 屏（应用内跳转任务会逃逸到手机主屏，尽量可用的降级形态）
                 val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -200,8 +233,8 @@ object VirtualLauncher {
                 )
                 appDisplay = dm.createVirtualDisplay(
                     "CarPlayApp",
-                    appWidth,
-                    appHeightPx,
+                    appDisplayWidth,
+                    appDisplayHeight,
                     appDensity,
                     appSurface,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
@@ -211,12 +244,12 @@ object VirtualLauncher {
                 )
                 dockDisplayId = dockDisplay?.display?.displayId ?: -1
                 appDisplayId = appDisplay?.display?.displayId ?: -1
-                log("LAUNCHER: 双屏创建(回退) dock=$dockDisplayId(${dockWidthPx}px) app=$appDisplayId(${appWidth}px)")
+                log("LAUNCHER: 双屏创建(回退) dock=$dockDisplayId(${dockWidthPx}px) app=$appDisplayId(${appDisplayWidth}x$appDisplayHeight scale=x$appScaleFactor @${appDensity}dpi)")
             }
             displaysCreated[0] = dockDisplayId >= 0 && appDisplayId >= 0
         }
         return try {
-            composer.start(dockWidthPx, dockHeightPx, appWidth, appHeightPx)
+            composer.start(dockWidthPx, dockHeightPx, appDisplayWidth, appDisplayHeight)
             if (!displaysCreated[0]) {
                 log("LAUNCHER: 虚拟屏创建失败")
                 detach()
@@ -272,6 +305,7 @@ object VirtualLauncher {
         dockHeightPx = 0
         appHeightPx = 0
         dockAtBottom = false
+        appScale = 1f
     }
 
     private fun startOn(displayId: Int, component: String): Boolean {

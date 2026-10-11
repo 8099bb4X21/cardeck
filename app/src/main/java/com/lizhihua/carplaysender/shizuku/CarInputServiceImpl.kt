@@ -196,7 +196,11 @@ class CarInputServiceImpl(private val context: Context) : ICarInput.Stub() {
             }
             fileLog("ctx package=${shellContext.packageName}")
             val dm = shellContext.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+            // VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6（@hide）：
+            // 不声明时应用看到 "-touch" 配置（无触摸设备）→ 部分应用（如头条）
+            // 切 TV/桌面式大头部布局（2026-10-11 实测：搜索区占满半屏的根因）。
             val flags = FLAG_TRUSTED or
+                FLAG_SUPPORTS_TOUCH or
                 android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
             fileLog("flags=0x${flags.toString(16)}")
             val vd = dm.createVirtualDisplay(name, width, height, dpi, surface, flags, null, null)
@@ -240,5 +244,8 @@ class CarInputServiceImpl(private val context: Context) : ICarInput.Stub() {
 
         /** VIRTUAL_DISPLAY_FLAG_TRUSTED（@hide；AOSP 定义 = 1 << 10 = 0x400）。 */
         private const val FLAG_TRUSTED = 1 shl 10
+
+        /** VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH（@hide；AOSP 定义 = 1 << 6 = 0x40）。 */
+        private const val FLAG_SUPPORTS_TOUCH = 1 shl 6
     }
 }
