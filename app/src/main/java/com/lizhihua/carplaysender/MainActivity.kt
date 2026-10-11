@@ -532,6 +532,18 @@ class MainActivity : AppCompatActivity() {
                                             }
                                         }
 
+                                        "iAPSendMessage" -> {
+                                            // type-130 iAP 隧道（车机 ↔ 手机 EA 消息经事件通道转发）。
+                                            // 先留证据：payload 内容决定后续是否要实现隧道转发。
+                                            val payload = command["iAPData"]
+                                            val streamId = command["streamID"]
+                                            log(
+                                                "EVENT: iAPSendMessage streamID=$streamId " +
+                                                    "payload=${payload?.javaClass?.simpleName ?: "null"} " +
+                                                    (payload as? ByteArray)?.joinToString(" ") { "%02x".format(it) }?.take(200) ?: "",
+                                            )
+                                        }
+
                                         "changeModes" -> {
                                             // 车机请求资源仲裁（如用户在 MMI 上点了手机）：
                                             // 回 modesChanged 声明手机持有主屏/主音频
@@ -547,6 +559,13 @@ class MainActivity : AppCompatActivity() {
                                 val screen = client.runScreenStream(keys.sharedSecret, setup.displayUuid)
                                 if (screen != null) {
                                     val host = effectiveEndpoint.ipAddresses.firstOrNull { it.contains('.') }
+                                    // 心跳双保险（缺失任一都会被车机 ~10s 看门狗拆会话，2026-10-11 实测）：
+                                    //   keepAlive UDP ping（车机 SETUP 返回的 keepAlivePort，10s 周期）
+                                    //   + RTSP POST /feedback（1s 周期，catplay FEEDBACK_INTERVAL）
+                                    if (host != null && setup.keepAlivePort != null) {
+                                        client.startKeepAlive(host, setup.keepAlivePort!!)
+                                    }
+                                    client.startFeedbackLoop()
                                     // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
                                     // 协议顺序：全部 SETUP 完成后再 RECORD 激活会话；失败不影响主链路。
                                     startAudioChannel(client, keys.sharedSecret, host)

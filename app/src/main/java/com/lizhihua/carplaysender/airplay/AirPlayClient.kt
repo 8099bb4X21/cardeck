@@ -139,6 +139,71 @@ class AirPlayClient(
         }
     }
 
+    /**
+     * KeepAlive UDP 心跳（对照 catplay KeepAliveClient）：向车机 keepAlivePort 每 10s
+     * 发 4 字节随机 UDP；协议无应答。**缺失时车机 10s 看门狗拆整轮会话**
+     * （2026-10-11 实测：视频推流 10.6s 后被拆，时序严丝合缝）。
+     * socket 关闭（会话结束）后线程自行退出。
+     */
+    fun startKeepAlive(host: String, port: Int) {
+        if (port <= 0) return
+        Thread({
+            var udp: java.net.DatagramSocket? = null
+            try {
+                udp = java.net.DatagramSocket()
+                val address = java.net.InetAddress.getByName(host)
+                var sent = 0
+                while (isSessionAlive() && udp?.isClosed == false) {
+                    val payload = ByteArray(4).also(java.security.SecureRandom()::nextBytes)
+                    udp.send(java.net.DatagramPacket(payload, payload.size, address, port))
+                    sent++
+                    if (sent <= 3 || sent % 30 == 0) log("AIRPLAY: keepAlive ping #$sent → $host:$port")
+                    Thread.sleep(10_000)
+                }
+            } catch (_: InterruptedException) {
+            } catch (error: IOException) {
+                log("AIRPLAY: keepAlive 结束 - ${error.message}")
+            } finally {
+                udp?.close()
+            }
+        }, "airplay-keepalive").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    /**
+     * RTSP /feedback 心跳（对照 catplay FEEDBACK_INTERVAL=1000ms）：每秒 POST 空体
+     * /feedback——接收端的活动看门狗。RTSP 事务由 [rtspLock] 串行化。
+     */
+    fun startFeedbackLoop() {
+        Thread({
+            var sent = 0
+            while (isSessionAlive()) {
+                try {
+                    val (status, body) = request("POST", "/feedback", ByteArray(0))
+                    sent++
+                    if (sent <= 3 || sent % 30 == 0) {
+                        log("AIRPLAY: feedback #$sent [$status]${if (body.isNotEmpty()) " body=${body.size}B" else ""}")
+                    }
+                } catch (_: IOException) {
+                    break // 连接已断（会话结束）
+                }
+                try {
+                    Thread.sleep(1_000)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+        }, "airplay-feedback").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    /** 心跳线程的存活判据：RTSP socket 仍连着。 */
+    private fun isSessionAlive(): Boolean = socket?.isClosed == false
+
     fun close() {
         runCatching { socket?.close() }
         socket = null
@@ -741,6 +806,20 @@ class AirPlayClient(
         timeoutMillis: Int = 10_000,
         contentType: String = "application/octet-stream",
         extraHeaders: List<Pair<String, String>> = emptyList(),
+    ): Pair<String, ByteArray> = synchronized(rtspLock) {
+        requestLocked(method, path, body, timeoutMillis, contentType, extraHeaders)
+    }
+
+    /** RTSP 事务锁：feedback 心跳线程与配对/事件线程共用同一条连接，必须串行。 */
+    private val rtspLock = Any()
+
+    private fun requestLocked(
+        method: String,
+        path: String,
+        body: ByteArray,
+        timeoutMillis: Int,
+        contentType: String,
+        extraHeaders: List<Pair<String, String>>,
     ): Pair<String, ByteArray> {
         val client = socket ?: throw IOException("未连接")
         client.soTimeout = timeoutMillis
