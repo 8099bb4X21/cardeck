@@ -61,6 +61,21 @@ class Iap2SenderSession(
 
         /** 等 0x4301 的短窗口（真车不发该消息，走 mDNS；测试台毫秒级应答）。 */
         const val START_SESSION_WAIT_NANOS = 10_000_000_000L
+
+        /**
+         * MFi 挑战「被拒档位」进程级记忆：只记录**导致链路被拆**的挑战长度
+         * （观察到车机对某个长度不容忍；静默超时不记，属可重试的正常失败）。
+         * 2026-10-11 奥迪实测新增：车机在 32B 挑战后 ~0.4s 直接拆链
+         * （10-09 观察到的是「静默不断链」，两种行为都出现过）——若无记忆，
+         * 每次会话都从 32B 撞起、反复断链；有记忆则本次进程内后续会话直接
+         * 从下一档开始（DiPlay 在 32B 秒答，不受 32 被阴影观察影响；
+         * 若两档都被拒则清空重来，避免永久卡死）。
+         */
+        @Volatile
+        private var mfiRejectedLengths: Set<Int> = emptySet()
+
+        /** 挑战档位（长度, 等待窗口）：顺序与窗口由 DiPlay/Audi 双端实测决定。 */
+        private val MFI_ATTEMPTS = listOf(32 to 3_000L, 20 to 6_000L, 16 to 3_000L)
     }
 
     fun run(timeoutMillis: Long = 60_000L): CarPlayEndpoint {
@@ -205,23 +220,34 @@ class Iap2SenderSession(
     // ---- 帧收发 ----
 
     /**
-     * MFi 挑战应答：按「对端可接受的长度」依次尝试，每次失败（0xAA04 / 静默超时）换下一档。
-     * 顺序与窗口由两端实测决定（2026-10-09/10，缺一不可）：
+     * MFi 挑战应答：按「对端可接受的长度」依次尝试，每次失败（0xAA04 / 静默超时 / 断链）换下一档。
+     * 基础顺序与窗口由两端实测决定（2026-10-09/10，缺一不可）：
      *  - **32B 优先**：测试台 DiPlay（Carlinkit AuthV3 EC 身份）**只接受精确 32B**，
      *    长度不对会直接断开链路（实测 70~350ms 内断链）；其应答快（~0.2s），3s 窗口足够。
-     *  - **20B 次之**：真车 Audi MIB3 对 32B 静默（不断链）、对 20B 秒答；
-     *    catplay/extractor 的真车实录同款。
+     *  - **20B 次之**：真车 Audi MIB3 对 20B 秒答（catplay/extractor 真车实录同款）；
+     *    对 32B 的处置两种都出现过——10-09 静默不断链、10-11 拆链。
      *  - **16B 兜底**：部分旧配件。
+     * 「导致拆链」的档位由 [mfiRejectedLengths] 跨会话记忆（避免反复撞同一堵墙）；
      * 全部无应答时不抛异常直接返回——我们跳过签名校验，由后续 0x5702 是否获得应答
      * 判定对端是否放行（真车实测无应答后 0xaa05 仍可推进）。
      */
     private fun runMfiChallenge(deadline: Long) {
-        val attempts = listOf(32 to 3_000L, 20 to 6_000L, 16 to 3_000L)
-        for ((index, attempt) in attempts.withIndex()) {
+        var attempts = MFI_ATTEMPTS.filter { it.first !in mfiRejectedLengths }
+        if (attempts.isEmpty()) {
+            // 所有档位都被拒过：清空重来，避免永久卡死
+            mfiRejectedLengths = emptySet()
+            attempts = MFI_ATTEMPTS
+        } else if (attempts.size < MFI_ATTEMPTS.size) {
+            log(
+                "iap2 MFi 跳过被拒档位（本进程记忆：${mfiRejectedLengths.sorted().joinToString("B/")}B）" +
+                    "——从 ${attempts.first().first}B 开始",
+            )
+        }
+        for ((position, attempt) in attempts.withIndex()) {
             val size = attempt.first
             val challenge = ByteArray(size).also(random::nextBytes)
             send(Iap2MessageIds.MFI_REQUEST_CHALLENGE, Iap2Csm.param(0, challenge))
-            log("iap2 tx=0xaa02 challenge=${size}B（第 ${index + 1} 次）")
+            log("iap2 tx=0xaa02 challenge=${size}B（第 ${position + 1} 次）")
             val window = minOf(System.nanoTime() + attempt.second * 1_000_000L, deadline)
             var gotResponse = false
             var gotFailure = false
@@ -231,7 +257,8 @@ class Iap2SenderSession(
                 val frame = recvFrame(remaining)
                 if (frame == null) {
                     if (!channel.isAlive) {
-                        log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）")
+                        log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）——记入本进程被拒档位")
+                        mfiRejectedLengths = mfiRejectedLengths + size
                         return
                     }
                     continue
@@ -255,8 +282,8 @@ class Iap2SenderSession(
                 if (gotResponse || gotFailure) break
             }
             if (gotResponse) return
-            if (index < attempts.size - 1) {
-                log("iap2 MFi ${size}B 无应答，改用 ${attempts[index + 1].first}B 重试")
+            if (position < attempts.size - 1) {
+                log("iap2 MFi ${size}B 无应答，改用 ${attempts[position + 1].first}B 重试")
             } else {
                 log("iap2 MFi 挑战全部无应答——跳过校验直接发 0xaa05（由 0x5702 判定车机是否放行）")
             }

@@ -48,6 +48,14 @@ class Iap2BluetoothClient(
     private var thread: Thread? = null
     private val currentSocket = AtomicReference<BluetoothSocket?>(null)
 
+    /**
+     * 客户端线程世代号：start()/stop() 都会递增。卡在阻塞 connect() 里的线程被
+     * stop() 解除阻塞后（关闭 connecting socket），会因世代不符直接退出——
+     * 防止「stop 后线程残活、用户再次启动时新旧两代并发连车机」
+     * （2026-10-11 实测：多个僵尸线程并发 RFCOMM 会让车机频繁拆链）。
+     */
+    private val generation = java.util.concurrent.atomic.AtomicLong(0)
+
     @Volatile
     private var activeChannel: Iap2LinkChannel? = null
 
@@ -76,8 +84,9 @@ class Iap2BluetoothClient(
             return false
         }
         running = true
+        val myGeneration = generation.incrementAndGet()
         log("BT-C: 启动——将主动连入车机的无线 iAP2 服务（…caff）")
-        Thread(::connectLoop, "iap2-bt-client").apply {
+        Thread({ connectLoop(myGeneration) }, "iap2-bt-client").apply {
             isDaemon = true
             thread = this
             start()
@@ -86,14 +95,14 @@ class Iap2BluetoothClient(
     }
 
     @SuppressLint("MissingPermission")
-    private fun connectLoop() {
+    private fun connectLoop(myGeneration: Long) {
         val adapter = try {
             context.getSystemService(BluetoothManager::class.java)?.adapter
         } catch (_: Exception) {
             null
         } ?: return
         var lastFailureLogAt = 0L
-        while (running) {
+        while (running && generation.get() == myGeneration) {
             // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
             //  - inboundActive：接收端正在连我们（两条 RFCOMM 会互相踩；Audi 实测双会话混乱）
             //  - sessionActive：CarPlay 会话已建立（已拿到端点）——与其它接收端的连接尝试全部暂停
@@ -111,7 +120,7 @@ class Iap2BluetoothClient(
             }
             var connected: BluetoothSocket? = null
             for (device in candidates) {
-                if (!running) return
+                if (!running || generation.get() != myGeneration) return
                 val name = try {
                     device.name
                 } catch (_: SecurityException) {
@@ -134,6 +143,11 @@ class Iap2BluetoothClient(
             if (connected == null) {
                 sleepQuietly(RETRY_DELAY_MILLIS)
                 continue
+            }
+            if (generation.get() != myGeneration) {
+                // stop() 与 connect() 成功竞争：本线程已过期，不建会话
+                currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
+                return
             }
             runSession(connected)
             sleepQuietly(RETRY_DELAY_MILLIS)
@@ -165,11 +179,14 @@ class Iap2BluetoothClient(
         } catch (error: IOException) {
             return null
         }
+        // 连接前就登记：connect() 是阻塞调用（SDP 查询 + 建链最长可达数十秒），
+        // stop() 只有能拿到 socket 引用才能 close() 打断它，否则线程会滞留。
+        currentSocket.set(socket)
         return try {
             socket.connect()
-            currentSocket.set(socket)
             socket
         } catch (error: IOException) {
+            currentSocket.compareAndSet(socket, null)
             runCatching { socket.close() }
             null
         }
@@ -217,6 +234,8 @@ class Iap2BluetoothClient(
 
     fun stop() {
         running = false
+        // 递增世代：即便有线程卡在 connect()，事后也会因世代不符自杀，不会在下次启动时复活
+        generation.incrementAndGet()
         currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
         activeChannel?.let { runCatching { it.close() } }
         thread?.interrupt()
