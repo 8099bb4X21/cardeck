@@ -47,6 +47,24 @@ class WifiCarPlayConnector(
         }
     }
 
+    /**
+     * 本机在当前绑定网络上的 IPv4 地址（如 10.174.189.57）。
+     * 用于 mDNS 结果过滤：手机双归属（连车机热点 + 自己开热点共享给电脑）时，
+     * mDNS 会跨网发现电脑的 AirPlay 接收器——非本网段地址一律不是车机。
+     */
+    fun localIpv4Address(): String? {
+        val network = boundNetwork.get() ?: return null
+        return try {
+            connectivityManager.getLinkProperties(network)
+                ?.linkAddresses
+                ?.mapNotNull { it.address.hostAddress }
+                ?.firstOrNull { it.contains('.') && !it.contains(':') }
+                ?.substringBefore('/')
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun request(ssid: String) {
         release()
         val specifier = WifiNetworkSpecifier.Builder()

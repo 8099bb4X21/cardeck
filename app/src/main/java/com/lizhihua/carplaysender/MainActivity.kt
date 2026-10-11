@@ -358,12 +358,25 @@ class MainActivity : AppCompatActivity() {
         if (!needHost && !needPort) return effective
 
         log(">>> [$source] 0x4301 端点不完整（port=${effective.airPlayPort} ips=${effective.ipAddresses}），mDNS 解析车机 _airplay._tcp…")
+        // 车机网段前缀（本机 IP 前 3 段）：手机若同时开热点共享（如给电脑），mDNS 会跨网
+        // 发现电脑的 AirPlay 接收器（macOS 自带）——2026-10-11 实测把 MacBook 10.180.48.59
+        // 当成车机连了 120s。非本网段的一律跳过。
+        val carSubnetPrefix = wifiConnector.localIpv4Address()?.substringBeforeLast('.')?.plus(".")
         val latch = java.util.concurrent.CountDownLatch(1)
         val found = java.util.concurrent.atomic.AtomicReference<android.net.nsd.NsdServiceInfo?>(null)
         val browser = com.lizhihua.carplaysender.net.CarPlayServiceBrowser(
             this,
             log = { line -> log(line) },
         ) { info ->
+            if (found.get() != null) return@CarPlayServiceBrowser
+            val ip = info.host?.hostAddress
+            if (ip == null || !ip.contains('.') || ip.contains(':')) return@CarPlayServiceBrowser
+            if (carSubnetPrefix != null && !ip.startsWith(carSubnetPrefix)) {
+                val txtId = info.attributes["deviceid"]?.toString(Charsets.UTF_8)?.trimEnd { it.code == 0 }
+                log(">>> [$source] 跳过非车机 _airplay 服务 ${info.serviceName}: $ip" +
+                    (txtId?.let { "（deviceid=$it）" } ?: "") + "——不在车机网段 $carSubnetPrefix x")
+                return@CarPlayServiceBrowser
+            }
             if (found.compareAndSet(null, info)) latch.countDown()
         }
         browser.start()
