@@ -105,17 +105,9 @@ class Iap2SenderSession(
         send(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
         log("iap2 tx=0x1d02 identification-accepted")
 
-        // ---- EA 会话启动（车机可收清单明确列有 0xEA00；奥迪 0x1D01 声明了
-        // de.audi.mmicconnectdatatransfer / com.audi.cpp.eadata0/1 三个 EA 协议——
-        // 触摸 HID 的高概率载体。此前从未启动过 EA 会话，车机因此从不发 EA 数据）----
+        // EA 协议解析（启动时机见下方 MFi 完成后——2026-10-11 DiPlay 实测：
+        // 认证前发 0xEA00 会让测试台状态机停摆，不再回 0xAA01；奥迪对此不敏感）
         val eaProtocols = parseEaProtocols(identification)
-        for ((protocolId, name) in eaProtocols) {
-            sendFireAndForget(
-                Iap2MessageIds.EA_OPEN_SESSION,
-                Iap2Csm.u8(0, protocolId) + Iap2Csm.u16(1, protocolId),
-            )
-            log("iap2 tx=0xea00 startEASession protocol=$protocolId name=$name")
-        }
 
         // ---- MFi（跳过校验：0xAA05 自报成功）----
         val identityText = identityText(identification)
@@ -136,6 +128,17 @@ class Iap2SenderSession(
         runMfiChallenge(deadline, prefer20First = legacyCar)
         send(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
         log("iap2 tx=0xaa05 authentication-succeeded（自报）")
+
+        // ---- EA 会话启动（MFi 认证完成后）----
+        // 奥迪 0x1D01 声明 de.audi.mmicconnectdatatransfer / com.audi.cpp.eadata0/1
+        // 三个 EA 协议；触摸 HID 相关数据经 EA 会话。认证前发送会噎死 DiPlay（见上）。
+        for ((protocolId, name) in eaProtocols) {
+            sendFireAndForget(
+                Iap2MessageIds.EA_OPEN_SESSION,
+                Iap2Csm.u8(0, protocolId) + Iap2Csm.u16(1, protocolId),
+            )
+            log("iap2 tx=0xea00 startEASession protocol=$protocolId name=$name")
+        }
 
         // ---- 订阅与 HID：0x6800 是可选步骤 ----
         // xcertplay 在订阅后发 StartHID；DiPlay 删掉了这一步（订阅完直接等 0x5702）。
