@@ -1,16 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- CarPlay 侧栏（左侧竖条）：顶部时间+电量，中部运行中应用，底部回桌面。
-     宽屏车机（横屏 composite）时 dock 在左侧使用本布局；对照 CarPlay 截图左侧栏。 -->
+     尺寸用 px 与设计原型（design/launcher-proto.html）1:1 对应——dock 虚拟屏
+     126×540@420dpi 与视频流 1:1 合成，px 即最终车机画面像素。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:gravity="center_horizontal"
     android:background="#000000"
-    android:paddingLeft="2dp"
-    android:paddingRight="2dp"
-    android:paddingTop="8dp"
-    android:paddingBottom="6dp">
+    android:paddingLeft="8px"
+    android:paddingRight="8px"
+    android:paddingTop="12px"
+    android:paddingBottom="12px">
 
     <TextView
         android:id="@+id/dockClock"
@@ -18,30 +19,28 @@
         android:layout_height="wrap_content"
         android:gravity="center"
         android:maxLines="1"
+        android:letterSpacing="0.03"
         android:textColor="#FFFFFF"
         android:textStyle="bold"
-        android:autoSizeTextType="uniform"
-        android:autoSizeMinTextSize="5sp"
-        android:autoSizeMaxTextSize="14sp"
+        android:textSize="22px"
         android:includeFontPadding="false" />
 
     <TextView
         android:id="@+id/dockBatteryText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="3dp"
+        android:layout_marginTop="6px"
         android:gravity="center"
+        android:maxLines="1"
         android:textColor="#B0B0B8"
-        android:autoSizeTextType="uniform"
-        android:autoSizeMinTextSize="6sp"
-        android:autoSizeMaxTextSize="10sp"
+        android:textSize="13px"
         android:includeFontPadding="false" />
 
     <FrameLayout
         android:id="@+id/dockBatteryBar"
-        android:layout_width="30dp"
-        android:layout_height="3dp"
-        android:layout_marginTop="4dp"
+        android:layout_width="46px"
+        android:layout_height="4px"
+        android:layout_marginTop="5px"
         android:background="#3A3A3C">
 
         <View
@@ -55,7 +54,7 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="21px"
         android:scrollbars="none">
 
         <LinearLayout
@@ -69,17 +68,17 @@
     <View
         android:layout_width="match_parent"
         android:layout_height="1px"
-        android:layout_marginBottom="4dp"
+        android:layout_marginBottom="4px"
         android:background="#3A3A3C" />
 
-    <TextView
+    <ImageView
         android:id="@+id/dockHome"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center"
-        android:paddingTop="6dp"
-        android:paddingBottom="6dp"
-        android:text="⌂"
-        android:textColor="#FFFFFF"
-        android:textSize="22sp" />
+        android:layout_width="56px"
+        android:layout_height="56px"
+        android:layout_gravity="center_horizontal"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="回到桌面"
+        android:padding="8px"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_dock_home" />
 </LinearLayout>

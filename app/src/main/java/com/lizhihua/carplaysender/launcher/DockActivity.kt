@@ -47,10 +47,11 @@ class DockActivity : AppCompatActivity() {
     private val clockHandler = Handler(Looper.getMainLooper())
     private val clockTicker = object : Runnable {
         override fun run() {
-            // 秒级刷新：车机屏上走秒 = 视频链路活着的直观证据
-            clockView?.text = android.text.format.DateFormat.format("HH:mm:ss", System.currentTimeMillis())
+            // 无秒显示（用户要求）：对齐到下一分钟边界刷新，秒内不做无用重绘
+            clockView?.text = android.text.format.DateFormat.format("HH:mm", System.currentTimeMillis())
             clockView?.let { fitClockText(it) }
-            clockHandler.postDelayed(this, 1_000)
+            val now = System.currentTimeMillis()
+            clockHandler.postDelayed(this, 60_000L - now % 60_000L + 80L)
         }
     }
 
@@ -69,15 +70,15 @@ class DockActivity : AppCompatActivity() {
         batteryBar = findViewById(R.id.dockBatteryBar)
         batteryFill = findViewById(R.id.dockBatteryFill)
         appsContainer = findViewById(R.id.dockApps)
-        findViewById<TextView>(R.id.dockHome).setOnClickListener {
+        findViewById<ImageView>(R.id.dockHome).setOnClickListener {
             Thread { VirtualLauncher.goGrid() }.start()
         }
 
         VirtualLauncher.addRunningAppsListener(refreshListener)
         pollHandler.postDelayed(pollRunnable, 3_000)
         clockHandler.post(clockTicker)
-        // 荣耀 ROM 上 XML autoSize 对窄 dock 不生效（时钟被 ellipsize 成 "18:0…"）：
-        // 布局完成后按实测宽度手工缩字号，保证 HH:mm:ss 完整显示
+        // dock 虚拟屏与视频流 1:1 合成：字号按物理像素收紧（荣耀 ROM 上 XML autoSize
+        // 对窄 dock 不生效，必须布局完成后按实测宽度手工缩字号；起点 22px 对照原型）
         clockView?.post { fitClockText(clockView!!) }
         // 系统受保护广播：ACTION_BATTERY_CHANGED 为 sticky，注册即回填当前电量
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -96,16 +97,16 @@ class DockActivity : AppCompatActivity() {
         refresh()
     }
 
-    /** 逐级缩小字号直至文本宽度放得下（下限 6sp）。 */
+    /** 逐级缩小字号直至文本宽度放得下（px 单位；行程 22→12px，对照设计原型）。 */
     private fun fitClockText(view: TextView) {
         val available = view.width - view.paddingLeft - view.paddingRight
         if (available <= 0) return
-        var size = 14f
-        view.textSize = size
+        var size = 22f
+        view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, size)
         val paint = view.paint
-        while (size > 6f && paint.measureText(view.text.toString()) > available) {
+        while (size > 12f && paint.measureText(view.text.toString()) > available) {
             size -= 0.5f
-            view.textSize = size
+            view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, size)
         }
     }
 
@@ -152,10 +153,14 @@ class DockActivity : AppCompatActivity() {
         val apps = synchronized(VirtualLauncher.runningApps) { VirtualLauncher.runningApps.toList() }
         val iconCache = VirtualLauncher.iconCache
         apps.forEach { component ->
-            val icon = iconCache[component] ?: packageManager.defaultActivityIcon
+            val drawable = iconCache[component] ?: packageManager.defaultActivityIcon
+            // 位图化渲染（与桌面网格同一路径）：直接 setImageDrawable 会让 ImageView
+            // 长期持有共享 Drawable 实例，其 bounds 被网格重绑改写后渲染错位
+            // （实机故障：点 home 后 dock 图标变小且偏左）
+            val bitmap = AppIcons.rounded(drawable, iconPx)
             container.addView(
                 ImageView(this).apply {
-                    setImageDrawable(icon)
+                    setImageBitmap(bitmap)
                     setPadding(pad, pad, pad, pad)
                     contentDescription = component.shortClassName
                     setOnClickListener {

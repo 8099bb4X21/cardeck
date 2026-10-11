@@ -2,10 +2,7 @@ package com.lizhihua.carplaysender.launcher
 
 import com.lizhihua.carplaysender.R
 
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Path
-import android.graphics.drawable.Drawable
+import android.content.Intent
 import android.os.Bundle
 import android.view.ViewGroup
 import android.widget.GridLayout
@@ -21,30 +18,31 @@ import androidx.viewpager2.widget.ViewPager2
  * CarPlay 主区桌面：纯黑背景 + 4×3 图标分页网格 + 底部页点。
  * 布局声明在 res/layout（activity_grid / item_grid_page / item_app_cell），
  * 代码只做动态格子尺寸计算与数据绑定。无字母导航（对照 CarPlay 主屏）。
+ *
+ * 默认只显示地图类应用（DesktopApps 默认选择），第一格固定「车机设置」入口；
+ * 用户可在设置页勾选要显示的应用，返回桌面（onResume）即时刷新。
  */
 class GridActivity : AppCompatActivity() {
 
-    private var pages: List<List<VirtualLauncher.AppEntry>> = emptyList()
+    /** 桌面格子：固定设置入口 / 普通应用。 */
+    private sealed interface Cell {
+        object Pinned : Cell
+        data class App(val entry: VirtualLauncher.AppEntry) : Cell
+    }
+
+    private var pages: List<List<Cell>> = emptyList()
     private var pager: ViewPager2? = null
     private var dotsRow: LinearLayout? = null
     private var cellWidthPx = 0
     private var cellHeightPx = 0
     private var iconSizePx = 0
 
+    /** 应用清单缓存（每次 resume 重扫 packageManager 会拖慢回桌面——仅在首次载入时扫描）。 */
+    private var appsCache: List<VirtualLauncher.AppEntry>? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_grid)
-
-        val apps = VirtualLauncher.launchableApps(this)
-        synchronized(VirtualLauncher.runningApps) { VirtualLauncher.iconCache.clear() }
-        apps.forEach { VirtualLauncher.iconCache[it.component] = it.icon }
-
-        // 排序：按首字母分组（数字组在前、汉字转拼音首字母），组内保持系统返回顺序
-        val grouped = LinkedHashMap<String, MutableList<VirtualLauncher.AppEntry>>()
-        apps.forEach { entry ->
-            grouped.getOrPut(VirtualLauncher.indexLetterOf(entry.label)) { mutableListOf() }.add(entry)
-        }
-        pages = grouped.values.flatten().chunked(COLUMNS * ROWS)
 
         // 格子尺寸按屏幕动态计算（布局关系在 XML，尺寸测量在代码）
         val dm = resources.displayMetrics
@@ -60,10 +58,40 @@ class GridActivity : AppCompatActivity() {
             adapter = PageAdapter()
         }
         dotsRow = findViewById(R.id.dotsRow)
-        rebuildDots()
         pager?.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) = updateDots(position)
         })
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 也覆盖从设置页返回：勾选变化即时反映
+        reload()
+    }
+
+    /** 重新读取应用清单与桌面选择（首帧与每次回到桌面时调用）。 */
+    private fun reload() {
+        val apps = appsCache ?: run {
+            val scanned = VirtualLauncher.launchableApps(this)
+            // iconCache 供 dock 运行中图标使用（每次重扫时同步刷新）
+            synchronized(VirtualLauncher.runningApps) { VirtualLauncher.iconCache.clear() }
+            scanned.forEach { VirtualLauncher.iconCache[it.component] = it.icon }
+            appsCache = scanned
+            scanned
+        }
+
+        val selected = DesktopApps.selected(this, apps)
+        val cells = buildList {
+            add(Cell.Pinned) // 第一格：车机设置（固定，不可取消）
+            apps.filter { it.component.flattenToString() in selected }.forEach { add(Cell.App(it)) }
+        }
+        pages = cells.chunked(COLUMNS * ROWS)
+
+        val current = pager?.currentItem ?: 0
+        pager?.adapter?.notifyDataSetChanged()
+        rebuildDots()
+        if (current >= pages.size) pager?.setCurrentItem(pages.size - 1, false)
+        updateDots(pager?.currentItem ?: 0)
     }
 
     private inner class PageAdapter : RecyclerView.Adapter<PageHolder>() {
@@ -81,19 +109,30 @@ class GridActivity : AppCompatActivity() {
     private inner class PageHolder(private val grid: GridLayout) : RecyclerView.ViewHolder(grid) {
         fun bind(page: Int) {
             grid.removeAllViews()
-            pages[page].forEach { entry ->
-                val cell = layoutInflater.inflate(R.layout.item_app_cell, grid, false)
-                cell.findViewById<ImageView>(R.id.cellIcon).apply {
+            pages[page].forEach { cell ->
+                val view = layoutInflater.inflate(R.layout.item_app_cell, grid, false)
+                val icon = view.findViewById<ImageView>(R.id.cellIcon).apply {
                     layoutParams = LinearLayout.LayoutParams(iconSizePx, iconSizePx)
-                    setImageBitmap(roundedIcon(entry.icon, iconSizePx))
                 }
-                cell.findViewById<TextView>(R.id.cellLabel).text = entry.label
-                cell.setOnClickListener {
-                    Toast.makeText(this@GridActivity, "启动 ${entry.label}", Toast.LENGTH_SHORT).show()
-                    Thread { VirtualLauncher.launchApp(entry.component) }.start()
+                val label = view.findViewById<TextView>(R.id.cellLabel)
+                when (cell) {
+                    is Cell.Pinned -> {
+                        icon.setImageResource(R.drawable.ic_app_settings)
+                        label.text = getString(R.string.car_settings)
+                        view.setOnClickListener { openSettings() }
+                    }
+
+                    is Cell.App -> {
+                        icon.setImageBitmap(AppIcons.rounded(cell.entry.icon, iconSizePx))
+                        label.text = cell.entry.label
+                        view.setOnClickListener {
+                            Toast.makeText(this@GridActivity, "启动 ${cell.entry.label}", Toast.LENGTH_SHORT).show()
+                            Thread { VirtualLauncher.launchApp(cell.entry.component) }.start()
+                        }
+                    }
                 }
                 grid.addView(
-                    cell,
+                    view,
                     GridLayout.LayoutParams().apply {
                         width = cellWidthPx
                         height = cellHeightPx
@@ -103,25 +142,15 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
-    /** App 图标 → 圆角位图（iOS 风格 ~22% 圆角）。 */
-    private fun roundedIcon(drawable: Drawable, size: Int): Bitmap {
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        val radius = size * 0.22f
-        val path = Path().apply {
-            addRoundRect(0f, 0f, size.toFloat(), size.toFloat(), radius, radius, Path.Direction.CW)
-        }
-        canvas.save()
-        canvas.clipPath(path)
-        drawable.setBounds(0, 0, size, size)
-        drawable.draw(canvas)
-        canvas.restore()
-        return bitmap
+    private fun openSettings() {
+        // 滑动转场由 SettingsActivity 主题的 windowAnimationStyle 提供
+        startActivity(Intent(this, SettingsActivity::class.java))
     }
 
     private fun rebuildDots() {
         val row = dotsRow ?: return
         row.removeAllViews()
+        if (pages.size < 2) return // 单页不显示页点（对照原型）
         val density = resources.displayMetrics.density
         repeat(pages.size) {
             row.addView(
@@ -144,7 +173,7 @@ class GridActivity : AppCompatActivity() {
         val row = dotsRow ?: return
         for (i in 0 until row.childCount) {
             (row.getChildAt(i).background as? android.graphics.drawable.GradientDrawable)
-                ?.setColor(if (i == selected) 0xFFFFFFFF.toInt() else 0x66FFFFFF)
+                ?.setColor(if (i == selected) 0xFFFFFFFF.toInt() else 0x66FFFFFF.toInt())
         }
     }
 

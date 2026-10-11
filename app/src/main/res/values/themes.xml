@@ -5,4 +5,23 @@
         <item name="android:colorBackground">#101418</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
+
+    <!-- 车机桌面（dock/网格/设置）：纯黑窗口底，转场动画期间不露浅色 -->
+    <style name="Theme.CarPlaySender.Launcher">
+        <item name="android:windowBackground">#FF000000</item>
+        <item name="android:colorBackground">#FF000000</item>
+    </style>
+
+    <!-- 车机设置：进入/退出用滑动转场（windowAnimationStyle 全版本可用，
+         不依赖 API 34 已废弃的 overridePendingTransition） -->
+    <style name="Theme.CarPlaySender.Settings" parent="Theme.CarPlaySender.Launcher">
+        <item name="android:windowAnimationStyle">@style/CarPlaySettingsAnimation</item>
+    </style>
+
+    <style name="CarPlaySettingsAnimation" parent="">
+        <item name="android:activityOpenEnterAnimation">@anim/settings_in</item>
+        <item name="android:activityOpenExitAnimation">@anim/stay</item>
+        <item name="android:activityCloseEnterAnimation">@anim/stay</item>
+        <item name="android:activityCloseExitAnimation">@anim/settings_out</item>
+    </style>
 </resources>

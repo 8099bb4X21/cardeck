@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>CarPlay 车机桌面 · 交互原型</title>
+<!--
+  设计方向：CarPlay 真机保真 —— 纯黑画布、SF/苹方字体、克制动效；
+  设置页沿用 iOS「设置」列表气质（深色分组行 + 蓝色勾选）。
+  画布按真机流规格 1160×540（奥迪 MIB3），dock 为左侧 126px 独立屏。
+  交互：点「车机设置」→ 双栏设置页；勾选应用 → 实时出现在桌面；Esc / ⌂ 返回。
+-->
+<style>
+:root{
+  --w: 1160px; --h: 540px; --dock-w: 126px;
+  --text: #F5F5F7;
+  --dim: #8E8E93;
+  --dim-2: #636366;
+  --sep: #1E1E21;
+  --row: #121215;
+  --row-hover: #1B1B1F;
+  --row-active: #1C1C1F;
+  --accent: #0A84FF;          /* iOS 蓝：勾选框 */
+  --green: #34C759;           /* 电量 */
+  --ease-out: cubic-bezier(.22,.61,.36,1);
+  --ease-spring: cubic-bezier(.34,1.56,.64,1);
+}
+*{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html,body{ height:100%; }
+body{
+  margin:0; min-height:100vh; background:#0B0B0D; color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","PingFang SC","Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px;
+}
+.caption{ color:#5A5A5F; font-size:12.5px; letter-spacing:.02em; display:flex; align-items:center; gap:8px; }
+.caption b{ color:#8E8E93; font-weight:600; }
+.caption kbd{
+  font:inherit; font-size:11.5px; color:#9A9AA0; background:#1A1A1E;
+  border:1px solid #2A2A2F; border-radius:5px; padding:1px 6px;
+}
+
+/* ===================== 屏幕画布 ===================== */
+.stage{
+  position:relative; width:var(--w); height:var(--h);
+  background:#000; border-radius:22px; overflow:hidden;
+  box-shadow:0 30px 90px rgba(0,0,0,.65), 0 0 0 1px #1E1E22;
+  display:flex;
+}
+
+/* ===================== 左侧 dock（独立虚拟屏） ===================== */
+.dock{
+  flex:0 0 var(--dock-w); width:var(--dock-w);
+  display:flex; flex-direction:column; align-items:center;
+  padding:12px 8px 12px; gap:4px;
+  border-right:1px solid var(--sep);
+}
+.dock-clock{
+  font-size:22px; font-weight:600; letter-spacing:.03em; line-height:1.05;
+  font-variant-numeric:tabular-nums; color:#fff;
+}
+.dock-batt{
+  display:flex; flex-direction:column; align-items:center; gap:5px; margin-top:6px;
+  color:#B0B0B8; font-size:11px; font-weight:500; font-variant-numeric:tabular-nums;
+}
+.dock-batt .bar{ width:46px; height:4px; border-radius:2.5px; background:#2C2C2E; overflow:hidden; }
+.dock-batt .bar i{ display:block; height:100%; width:88%; background:var(--green); border-radius:3px; }
+.dock-apps{
+  flex:1; width:100%; display:flex; flex-direction:column; align-items:center;
+  gap:16px; padding-top:22px; overflow-y:auto; scrollbar-width:none;
+}
+.dock-apps::-webkit-scrollbar{ display:none; }
+.dock-apps .app-icon{ width:66px; height:66px; border-radius:17px; cursor:pointer; transition:transform .16s var(--ease-out); }
+.dock-apps .app-icon:active{ transform:scale(.92); }
+.dock-divider{ width:100%; height:1px; background:var(--sep); }
+.dock-home{
+  width:100%; padding:12px 0 8px; display:flex; align-items:center; justify-content:center;
+  border:0; background:none; cursor:pointer; color:#fff;
+  opacity:.94; transition:opacity .15s, transform .15s var(--ease-out);
+}
+.dock-home svg{ width:40px; height:40px; }
+.dock-home:active{ transform:scale(.88); opacity:1; }
+
+/* ===================== 应用区（两块屏叠放：桌面 / 设置） ===================== */
+.app-area{ position:relative; flex:1; overflow:hidden; }
+.screen{ position:absolute; inset:0; }
+
+/* ---- 桌面 ---- */
+#desktopScreen{ transition:transform .3s var(--ease-out), opacity .3s var(--ease-out); }
+#desktopScreen.pushed{ transform:translateX(-30px); opacity:.2; pointer-events:none; }
+.grid-pages{
+  height:100%; display:flex; overflow-x:auto; scroll-snap-type:x mandatory;
+  scrollbar-width:none;
+}
+.grid-pages::-webkit-scrollbar{ display:none; }
+.page{
+  flex:0 0 100%; scroll-snap-align:start;
+  display:grid; grid-template-columns:repeat(4,1fr); grid-template-rows:repeat(3,1fr);
+  padding:14px 14px 54px; gap:2px;
+}
+.cell{
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:9px;
+  border:0; background:none; color:inherit; font:inherit; cursor:pointer;
+  border-radius:20px; transition:transform .16s var(--ease-out);
+  animation:cellIn .34s var(--ease-out) both; animation-delay:calc(var(--i,0) * 26ms);
+}
+.cell:active{ transform:scale(.92); }
+@keyframes cellIn{ from{ opacity:0; transform:scale(.86) translateY(6px); } to{ opacity:1; transform:none; } }
+.cell .app-icon{ width:86px; height:86px; border-radius:21px; }
+.cell .label{
+  max-width:96%; padding:2px 9px 2.5px; border-radius:7px;
+  background:rgba(255,255,255,.93); color:#0B0B0D;
+  font-size:13px; font-weight:600; letter-spacing:.01em; line-height:1.25;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.dots{
+  position:absolute; left:0; right:0; bottom:16px;
+  display:flex; justify-content:center; gap:8px; pointer-events:none;
+}
+.dot{ width:7px; height:7px; border-radius:50%; background:rgba(255,255,255,.32); transition:background .2s; }
+.dot.active{ background:#fff; }
+
+/* ---- 通用应用图标（squircle + 白色图形） ---- */
+.app-icon{
+  display:flex; align-items:center; justify-content:center; flex:0 0 auto;
+  overflow:hidden; border-radius:22%;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.07), 0 5px 14px rgba(0,0,0,.5);
+}
+.app-icon svg{ width:76%; height:76%; display:block; }
+
+/* ---- 车机设置（双栏） ---- */
+#settingsScreen{
+  display:flex; background:#000;
+  transform:translateX(46px); opacity:0; pointer-events:none;
+  transition:transform .3s var(--ease-out), opacity .3s var(--ease-out);
+}
+#settingsScreen.open{ transform:none; opacity:1; pointer-events:auto; }
+
+.settings-menu{
+  flex:0 0 262px; display:flex; flex-direction:column; gap:2px;
+  padding:12px 12px 14px; border-right:1px solid var(--sep);
+}
+.back-btn{
+  align-self:flex-start; display:flex; align-items:center; gap:5px;
+  border:0; background:none; cursor:pointer; color:var(--accent);
+  font-size:14.5px; font-weight:500; padding:7px 10px 7px 4px; border-radius:10px;
+  transition:background .15s;
+}
+.back-btn:active{ background:var(--row-active); }
+.back-btn svg{ width:15px; height:15px; }
+.menu-title{
+  margin:16px 10px 8px; font-size:12px; font-weight:700; letter-spacing:.14em;
+  color:var(--dim-2);
+}
+.menu-item{
+  display:flex; align-items:center; gap:12px; width:100%; text-align:left;
+  border:0; cursor:pointer; border-radius:12px; padding:11px 11px;
+  background:none; color:var(--dim); font-size:15px; font-weight:500;
+  transition:background .15s, color .15s;
+}
+.menu-item .mi-icon{
+  width:29px; height:29px; border-radius:8.5px; display:flex; align-items:center; justify-content:center;
+  background:#2C2C2E; flex:0 0 auto; transition:background .15s;
+}
+.menu-item .mi-icon svg{ width:17px; height:17px; }
+.menu-item.active{ background:var(--row-active); color:var(--text); }
+.menu-item.active .mi-icon{ background:var(--accent); }
+
+.settings-content{ flex:1; min-width:0; display:flex; flex-direction:column; padding:18px 24px 12px; }
+.content-head{ display:flex; align-items:baseline; gap:12px; }
+.content-head h2{ margin:0; font-size:20px; font-weight:700; letter-spacing:.01em; }
+.content-head .count{ color:var(--dim); font-size:13px; font-variant-numeric:tabular-nums; }
+.content-sub{ margin:7px 0 14px; color:var(--dim); font-size:13px; }
+.app-list{
+  flex:1; overflow-y:auto; display:grid; grid-template-columns:1fr 1fr;
+  gap:10px; align-content:start; padding:2px 6px 8px 2px;
+  -webkit-mask-image:linear-gradient(180deg,#000 calc(100% - 16px),transparent);
+  mask-image:linear-gradient(180deg,#000 calc(100% - 16px),transparent);
+}
+.app-list::-webkit-scrollbar{ width:8px; }
+.app-list::-webkit-scrollbar-thumb{ background:#2A2A2E; border-radius:4px; }
+.app-list::-webkit-scrollbar-track{ background:transparent; }
+.app-row{
+  display:flex; align-items:center; gap:12px; width:100%; text-align:left;
+  border:0; cursor:pointer; border-radius:13px; padding:10px 12px;
+  background:var(--row); color:inherit; font:inherit;
+  transition:background .15s, transform .12s var(--ease-out);
+}
+.app-row:active{ transform:scale(.985); }
+.app-row:hover{ background:var(--row-hover); }
+.app-row .app-icon{ width:38px; height:38px; border-radius:10px; }
+.app-row .name{ flex:1; min-width:0; font-size:14.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cb{
+  width:25px; height:25px; border-radius:8px; flex:0 0 auto;
+  border:2px solid #48484A;
+  display:flex; align-items:center; justify-content:center;
+  transition:background .18s, border-color .18s, transform .2s var(--ease-spring);
+}
+.cb svg{ width:13px; height:13px; }
+.cb path{
+  fill:none; stroke:#fff; stroke-width:3.2; stroke-linecap:round; stroke-linejoin:round;
+  stroke-dasharray:24; stroke-dashoffset:24; transition:stroke-dashoffset .16s ease .04s;
+}
+.app-row.checked .cb{ background:var(--accent); border-color:var(--accent); transform:scale(1.06); }
+.app-row.checked .cb path{ stroke-dashoffset:0; }
+
+/* ---- 轻提示 ---- */
+.toast{
+  position:absolute; left:50%; bottom:56px; transform:translate(-50%, 8px);
+  background:rgba(28,28,31,.94); color:#E5E5EA; font-size:13.5px;
+  padding:9px 16px; border-radius:10px; opacity:0; pointer-events:none;
+  transition:opacity .2s, transform .2s var(--ease-out);
+}
+.toast.show{ opacity:1; transform:translate(-50%, 0); }
+
+@media (prefers-reduced-motion: reduce){
+  *{ animation:none !important; transition:none !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="caption"><b>CarPlay 车机桌面 · 交互原型</b> · 1160 × 540 · 奥迪 MIB3 投屏画布</div>
+
+<div class="stage">
+  <!-- dock（左侧独立屏）：时间（去秒）· 电量 · 运行中应用 · ⌂ -->
+  <div class="dock">
+    <div class="dock-clock" id="clock">20:26</div>
+    <div class="dock-batt"><span>⚡88%</span><div class="bar"><i></i></div></div>
+    <div class="dock-apps" id="dockApps"></div>
+    <div class="dock-divider"></div>
+    <button class="dock-home" id="dockHome" title="回到桌面">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3.5 11.2 12 4.2l8.5 7"/>
+        <path d="M5.6 9.6V19a1.6 1.6 0 0 0 1.6 1.6h9.6A1.6 1.6 0 0 0 18.4 19V9.6"/>
+        <path d="M9.6 20.6v-5.4h4.8v5.4"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="app-area">
+    <!-- 桌面：4×3 分页网格 + 页点 -->
+    <section class="screen" id="desktopScreen">
+      <div class="grid-pages" id="gridPages"></div>
+      <div class="dots" id="dots"></div>
+    </section>
+
+    <!-- 车机设置：双栏（左菜单 / 右内容） -->
+    <section class="screen" id="settingsScreen">
+      <div class="settings-menu">
+        <button class="back-btn" id="backBtn">
+          <svg viewBox="0 0 16 16"><path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          桌面
+        </button>
+        <div class="menu-title">车机设置</div>
+        <button class="menu-item active">
+          <span class="mi-icon" id="menuIconGrid"></span>
+          管理桌面应用
+        </button>
+      </div>
+      <div class="settings-content">
+        <div class="content-head">
+          <h2>管理桌面应用</h2>
+          <span class="count" id="selectedCount">已选 2 个</span>
+        </div>
+        <p class="content-sub">勾选的应用将显示在桌面；「车机设置」固定在第一格。</p>
+        <div class="app-list" id="appList"></div>
+      </div>
+    </section>
+
+    <div class="toast" id="toast"></div>
+  </div>
+</div>
+
+<div class="caption">点击「车机设置」进入设置页 · 勾选应用会实时出现在桌面 · <kbd>Esc</kbd> 返回桌面</div>
+
+<script>
+/* ===================== 图标（squircle 底 + 白色图形，离线自绘） ===================== */
+const ICONS = {
+  settings: { bg:'linear-gradient(180deg,#9A9AA0,#5E5E63)', glyph:`
+    <g fill="#fff" transform="scale(2.6667)"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></g>` },
+  grid: { bg:'none', glyph:`
+    <g fill="#fff">
+      <rect x="10" y="10" width="18" height="18" rx="5"/>
+      <rect x="36" y="10" width="18" height="18" rx="5"/>
+      <rect x="10" y="36" width="18" height="18" rx="5"/>
+      <rect x="36" y="36" width="18" height="18" rx="5"/>
+    </g>` },
+  amap: { bg:'linear-gradient(180deg,#2F80FF,#1653D6)', glyph:`
+    <path fill="#fff" fill-rule="evenodd" d="M32 10.5c-8 0-14.5 6.5-14.5 14.5C17.5 36.5 32 53.5 32 53.5S46.5 36.5 46.5 25c0-8-6.5-14.5-14.5-14.5zm0 20.6a6.1 6.1 0 1 1 0-12.2 6.1 6.1 0 0 1 0 12.2z"/>` },
+  baidu: { bg:'linear-gradient(180deg,#63A8FF,#2F6FE0)', glyph:`
+    <path fill="#fff" d="M32 10.5c-8 0-14.5 6.5-14.5 14.5C17.5 36.5 32 53.5 32 53.5S46.5 36.5 46.5 25c0-8-6.5-14.5-14.5-14.5z"/>
+    <circle cx="32" cy="25" r="5.9" fill="#F5444B"/>` },
+  tencent: { bg:'linear-gradient(180deg,#3ECFAE,#0E9C80)', glyph:`
+    <path fill="#fff" fill-rule="evenodd" d="M32 10.5c-8 0-14.5 6.5-14.5 14.5C17.5 36.5 32 53.5 32 53.5S46.5 36.5 46.5 25c0-8-6.5-14.5-14.5-14.5zm0 20.6a6.1 6.1 0 1 1 0-12.2 6.1 6.1 0 0 1 0 12.2z"/>` },
+  netease: { bg:'linear-gradient(180deg,#F44B4A,#C22423)', glyph:`
+    <g fill="#fff">
+      <circle cx="25" cy="44" r="8"/>
+      <rect x="30" y="14" width="5" height="30" rx="2.5"/>
+      <path d="M30 14c9.5 1.8 16 7.4 16 16.5-2.5-7-7.7-10.8-16-12.3z"/>
+    </g>` },
+  qqmusic: { bg:'linear-gradient(180deg,#3AD07F,#149E57)', glyph:`
+    <g fill="#fff">
+      <circle cx="21" cy="44" r="7.6"/>
+      <circle cx="41" cy="40" r="7.6"/>
+      <rect x="26" y="17" width="4.8" height="27" rx="2.4"/>
+      <rect x="46" y="13" width="4.8" height="27" rx="2.4"/>
+      <polygon points="26,17 50.8,12 50.8,18 26,23"/>
+    </g>` },
+  kugou: { bg:'linear-gradient(180deg,#3D9BFF,#1266D6)', glyph:`
+    <g fill="#fff">
+      <path d="M14 39v-6a18 18 0 0 1 36 0v6" fill="none" stroke="#fff" stroke-width="5.5" stroke-linecap="round"/>
+      <rect x="10" y="35" width="10.5" height="17" rx="5"/>
+      <rect x="43.5" y="35" width="10.5" height="17" rx="5"/>
+    </g>` },
+  ximalaya: { bg:'linear-gradient(180deg,#FF8A4C,#F25419)', glyph:`
+    <g fill="#fff">
+      <rect x="11" y="26" width="5.4" height="12" rx="2.7"/>
+      <rect x="20.5" y="21" width="5.4" height="22" rx="2.7"/>
+      <rect x="30" y="15" width="5.4" height="34" rx="2.7"/>
+      <rect x="39.5" y="21" width="5.4" height="22" rx="2.7"/>
+      <rect x="49" y="26" width="5.4" height="12" rx="2.7"/>
+    </g>` },
+  wechat: { bg:'linear-gradient(180deg,#21C86B,#0FA84D)', glyph:`
+    <g fill="#fff">
+      <path d="M25 15.5C15.6 15.5 8 21.7 8 29.4c0 4.4 2.6 8.4 6.7 11l-1.7 5.6 6.1-3.1c1.9.5 3.9.8 5.9.8h1a16 16 0 0 1-.9-4.7c0-7.3 6.9-13.1 15.4-13.1h1c-2.5-5.9-9.2-10.4-17.5-10.4z"/>
+      <path d="M53.9 39c0-6.2-6.1-11.2-13.6-11.2S26.7 32.8 26.7 39c0 6.1 6.1 11.1 13.6 11.1 1.6 0 3.2-.2 4.6-.7l4.9 2.6-1.4-4.7c3.4-2 5.5-5 5.5-8.3z"/>
+    </g>` },
+  phone: { bg:'linear-gradient(180deg,#4CD964,#2CB148)', glyph:`
+    <path fill="#fff" d="M18.6 12.8c2.3 0 6.9 6.4 6.9 8.6 0 2-3.3 3.3-3.3 5.4 0 2.9 7.6 10.9 10.6 10.9 2.1 0 3.4-3.3 5.5-3.3 2.2 0 8.7 4.5 8.7 6.8 0 3-4.4 6.6-8.4 6.6C26.4 47.8 12 32.4 12 20.2c0-4 3.7-7.4 6.6-7.4z"/>` },
+  weather: { bg:'linear-gradient(180deg,#4DA8FF,#1F6FE0)', glyph:`
+    <g fill="#fff">
+      <circle cx="41.5" cy="21.5" r="8.6" fill="#FFD60A"/>
+      <path d="M23 46.5h21.5a8.8 8.8 0 0 0 1.1-17.5 12.6 12.6 0 0 0-24-3.6A9.6 9.6 0 0 0 23 46.5z"/>
+    </g>` },
+  clock: { bg:'linear-gradient(180deg,#FFFFFF,#E6E6EC)', glyph:`
+    <g fill="none" stroke="#111" stroke-width="4.5" stroke-linecap="round">
+      <circle cx="32" cy="32" r="16"/>
+      <path d="M32 22.5v9.5l6.5 4.5"/>
+    </g>` },
+  calc: { bg:'linear-gradient(180deg,#2B2B2F,#161618)', glyph:`
+    <g>
+      <rect x="14" y="10" width="36" height="13" rx="4" fill="#fff"/>
+      <g fill="#FF9F0A">
+        <circle cx="20.5" cy="34" r="4.7"/><circle cx="32" cy="34" r="4.7"/><circle cx="43.5" cy="34" r="4.7"/>
+        <circle cx="20.5" cy="47.5" r="4.7"/><circle cx="32" cy="47.5" r="4.7"/><circle cx="43.5" cy="47.5" r="4.7"/>
+      </g>
+    </g>` },
+  browser: { bg:'linear-gradient(180deg,#4CA6FF,#1E6FE8)', glyph:`
+    <g>
+      <circle cx="32" cy="32" r="17.5" fill="none" stroke="#fff" stroke-width="4.5"/>
+      <path fill="#fff" d="M40.5 23.5l-5.2 11.3L24 40l5.2-11.3z"/>
+    </g>` },
+  bilibili: { bg:'linear-gradient(180deg,#FB7BA2,#E85D8A)', glyph:`
+    <g>
+      <rect x="11" y="21" width="42" height="27" rx="7" fill="none" stroke="#fff" stroke-width="4.5"/>
+      <path d="M22 13.5l6.5 7.5M42 13.5l-6.5 7.5" fill="none" stroke="#fff" stroke-width="4.5" stroke-linecap="round"/>
+      <circle cx="25" cy="33.5" r="2.9" fill="#fff"/>
+      <circle cx="39" cy="33.5" r="2.9" fill="#fff"/>
+    </g>` },
+};
+
+/* ===================== 数据 ===================== */
+const APPS = [
+  { id:'amap',     name:'高德地图' },
+  { id:'baidu',    name:'百度地图' },
+  { id:'tencent',  name:'腾讯地图' },
+  { id:'netease',  name:'网易云音乐' },
+  { id:'qqmusic',  name:'QQ音乐' },
+  { id:'kugou',    name:'酷狗音乐' },
+  { id:'ximalaya', name:'喜马拉雅' },
+  { id:'wechat',   name:'微信' },
+  { id:'phone',    name:'电话' },
+  { id:'weather',  name:'天气' },
+  { id:'clock',    name:'时钟' },
+  { id:'bilibili', name:'哔哩哔哩' },
+  { id:'browser',  name:'浏览器' },
+  { id:'calc',     name:'计算器' },
+];
+/* 默认勾选：地图类（真机上按已安装的地图应用自动选中） */
+const DEFAULT_SELECTED = ['amap', 'baidu'];
+/* 固定第一位：车机设置（不可取消） */
+const PINNED = { id:'settings', name:'车机设置', pinned:true };
+
+let selected = new Set(DEFAULT_SELECTED);
+
+const $ = (id) => document.getElementById(id);
+const iconHTML = (id) => {
+  const i = ICONS[id];
+  return `<span class="app-icon" style="background:${i.bg}"><svg viewBox="0 0 64 64">${i.glyph}</svg></span>`;
+};
+
+/* ===================== dock ===================== */
+let toastTimer = null;
+function toast(text){
+  const t = $('toast');
+  t.textContent = text;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 1300);
+}
+
+/* 时钟（无秒）：随分钟刷新 */
+function tickClock(){
+  const d = new Date();
+  $('clock').textContent =
+    String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+tickClock();
+setInterval(tickClock, 15000);
+
+/* dock 运行中应用（原型示意：高德在运行） */
+function renderDock(){
+  const box = $('dockApps');
+  box.innerHTML = '';
+  [{ id:'amap', name:'高德地图' }].forEach(app => {
+    const el = document.createElement('span');
+    el.innerHTML = iconHTML(app.id);
+    el.firstElementChild.title = app.name + '（运行中）';
+    el.firstElementChild.onclick = () => toast(`切换回「${app.name}」（原型示意）`);
+    box.appendChild(el.firstElementChild);
+  });
+}
+
+/* ===================== 桌面网格 ===================== */
+const PER_PAGE = 12;
+
+function desktopEntries(){
+  return [PINNED, ...APPS.filter(a => selected.has(a.id))];
+}
+
+function renderDesktop(){
+  const pagesBox = $('gridPages');
+  const entries = desktopEntries();
+  const pages = [];
+  for (let i = 0; i < entries.length; i += PER_PAGE) pages.push(entries.slice(i, i + PER_PAGE));
+  if (pages.length === 0) pages.push([]);
+
+  pagesBox.innerHTML = '';
+  pages.forEach((page, pi) => {
+    const pageEl = document.createElement('div');
+    pageEl.className = 'page';
+    page.forEach((entry, ci) => {
+      const cell = document.createElement('button');
+      cell.className = 'cell';
+      cell.style.setProperty('--i', ci + pi * 4);
+      cell.innerHTML = iconHTML(entry.id) + `<span class="label">${entry.name}</span>`;
+      cell.onclick = () => {
+        if (entry.pinned) openSettings();
+        else toast(`启动「${entry.name}」（原型示意）`);
+      };
+      pageEl.appendChild(cell);
+    });
+    pagesBox.appendChild(pageEl);
+  });
+
+  renderDots(pages.length);
+  pagesBox.scrollLeft = 0;
+  updateActiveDot(0);
+}
+
+function renderDots(count){
+  const dots = $('dots');
+  dots.innerHTML = '';
+  if (count < 2) return;
+  for (let i = 0; i < count; i++){
+    const d = document.createElement('span');
+    d.className = 'dot';
+    dots.appendChild(d);
+  }
+}
+
+function updateActiveDot(index){
+  document.querySelectorAll('#dots .dot').forEach((d, i) => {
+    d.classList.toggle('active', i === index);
+  });
+}
+
+$('gridPages').addEventListener('scroll', () => {
+  const box = $('gridPages');
+  const index = Math.round(box.scrollLeft / box.clientWidth);
+  updateActiveDot(index);
+}, { passive:true });
+
+/* ===================== 设置页 ===================== */
+function openSettings(){
+  $('settingsScreen').classList.add('open');
+  $('desktopScreen').classList.add('pushed');
+}
+function closeSettings(){
+  $('settingsScreen').classList.remove('open');
+  $('desktopScreen').classList.remove('pushed');
+}
+
+function renderAppList(){
+  const list = $('appList');
+  list.innerHTML = '';
+  APPS.forEach(app => {
+    const row = document.createElement('button');
+    row.className = 'app-row' + (selected.has(app.id) ? ' checked' : '');
+    row.setAttribute('role', 'checkbox');
+    row.setAttribute('aria-checked', selected.has(app.id) ? 'true' : 'false');
+    row.innerHTML = iconHTML(app.id) +
+      `<span class="name">${app.name}</span>` +
+      `<span class="cb"><svg viewBox="0 0 16 16"><path d="M3 8.5 6.5 12 13 4.5"/></svg></span>`;
+    row.onclick = () => {
+      if (selected.has(app.id)){
+        selected.delete(app.id);
+        toast(`「${app.name}」已从桌面移除`);
+      } else {
+        selected.add(app.id);
+        toast(`「${app.name}」已显示到桌面`);
+      }
+      row.classList.toggle('checked', selected.has(app.id));
+      row.setAttribute('aria-checked', selected.has(app.id) ? 'true' : 'false');
+      updateCount();
+      renderDesktop();
+    };
+    list.appendChild(row);
+  });
+  updateCount();
+}
+
+function updateCount(){
+  $('selectedCount').textContent = `已选 ${selected.size} 个`;
+}
+
+/* ===================== 接线 ===================== */
+$('backBtn').onclick = closeSettings;
+$('dockHome').onclick = () => { closeSettings(); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
+
+$('menuIconGrid').innerHTML = `<svg viewBox="0 0 64 64">${ICONS.grid.glyph}</svg>`;
+
+renderDock();
+renderDesktop();
+renderAppList();
+
+/* 截图/直达：?view=settings 直接打开设置页 */
+if (new URLSearchParams(location.search).get('view') === 'settings'){
+  openSettings();
+}
+</script>
+</body>
+</html>
