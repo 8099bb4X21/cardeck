@@ -561,10 +561,10 @@ class MainActivity : AppCompatActivity() {
                                 }
                                 // 资源声明（must）：真车对未声明资源的屏幕流 SETUP 直接 400
                                 client.assertModes()
-                                // HID 输入模式武装：/info hidDevices（0=触摸、1=旋钮）逐个启用。
+                                // HID 输入模式武装：/info hidDevices（奥迪字符串 "0"/"1"，触摸="1"）。
                                 // display features=0x08（高保真触摸）已声明，缺这步车机不发 hidSendReport。
                                 setup.hidDeviceUuids.forEach { uuid ->
-                                    client.sendHidSetInputMode(uuid.toString(16), mode = 0)
+                                    client.sendHidSetInputMode(uuid, mode = 0)
                                 }
                                 val screen = client.runScreenStream(keys.sharedSecret, setup.displayUuid)
                                 if (screen != null) {

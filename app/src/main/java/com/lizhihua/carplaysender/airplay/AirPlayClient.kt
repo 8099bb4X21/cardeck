@@ -348,7 +348,8 @@ class AirPlayClient(
         }
         // /info 全量转储：找奥迪私有的数据流 UUID（type-130 的 clientTypeUUID 候选）、
         // HID 设备描述（触摸）、以及任何我们没实现的能力声明
-        val hidDevices = ArrayList<Int>() // uuid 列表（0=触摸，1=旋钮，见 hidDevices[].uuid）
+        // uuid 原样保留（奥迪发字符串 "0"/"1"，DiPlay 用整数——hidSetInputMode 原样回传）
+        val parsedHidUuids = ArrayList<String>()
         infoRoot?.let { root ->
             val skipped = setOf("displays")
             val summary = root.entries.joinToString("; ") { (key, value) ->
@@ -362,9 +363,14 @@ class AirPlayClient(
                 (root[hidKey] as? List<*>)?.forEachIndexed { index, h ->
                     log("AIRPLAY: /info $hidKey[$index]=$h")
                     if (h is Map<*, *>) {
-                        // uuid 通配 Number（bplist 整数一律 Long，防御其他实现）
-                        val uuid = (h["uuid"] as? Number)?.toInt() ?: -1
-                        if (uuid >= 0) hidDevices += uuid
+                        // 奥迪实测：uuid 是字符串 "0"/"1"（13:38 诊断 uuidClass=String）；
+                        // DiPlay 是整数。统一转字符串，hidSetInputMode/hidSendReport 原样回传
+                        val uuid = when (val raw = h["uuid"]) {
+                            is Number -> raw.toString()
+                            is String -> raw
+                            else -> null
+                        }
+                        if (uuid != null) parsedHidUuids += uuid
                         (h["hidDescriptor"] as? ByteArray)?.let { descriptor ->
                             log(
                                 "AIRPLAY: hidDescriptor[$index] ${descriptor.size}B hex=" +
@@ -375,7 +381,7 @@ class AirPlayClient(
                 }
             }
         }
-        log("AIRPLAY: hidDevices 解析结果 uuids=$hidDevices")
+        log("AIRPLAY: hidDevices 解析结果 uuids=$parsedHidUuids")
         val info = SetupInfo(
             eventPort = portOf(root["eventPort"]),
             timingPort = portOf(root["timingPort"]),
@@ -387,7 +393,7 @@ class AirPlayClient(
             // 键名以小写 "uuid" 为准，大写 "UUID" 兜底）
             displayUuid = (display?.get("uuid") ?: display?.get("UUID"))?.toString(),
             maxFps = ((display?.get("maxFPS") as? Long) ?: 30L).toInt(),
-            hidDeviceUuids = hidDevices,
+            hidDeviceUuids = parsedHidUuids,
         )
         log(
             "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
@@ -409,7 +415,7 @@ class AirPlayClient(
         val displayUuid: String?,
         val maxFps: Int,
         /** /info hidDevices[].uuid 列表（0=触摸、1=旋钮；DiPlay 同款编号）。 */
-        val hidDeviceUuids: List<Int> = emptyList(),
+        val hidDeviceUuids: List<String> = emptyList(),
     )
 
     /** 屏幕流协商结果。 */
