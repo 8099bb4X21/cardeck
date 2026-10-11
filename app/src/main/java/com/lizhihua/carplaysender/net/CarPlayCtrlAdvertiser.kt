@@ -31,9 +31,46 @@ class CarPlayCtrlAdvertiser(
 
     private var serverSocket: ServerSocket? = null
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+
+    @Volatile
     private var registered = false
 
+    /** 注册时的 WiFi SSID：换网（2.4G→5G 或车机热点切换）后旧注册不可见，需重新注册。 */
+    private var registeredSsid: String? = null
+
+    /** 当前生效的注册监听器（每次 start 换新实例，避免 already-in-use）。 */
+    private var activeListener: NsdManager.RegistrationListener? = null
+
     val port: Int get() = serverSocket?.localPort ?: -1
+
+    /**
+     * 确保广播在指定 SSID 的网络上可见（每次会话拿到 0x5703 时调用）。
+     * 真车实测（2026-10-11）：手机从 2.4G 换到 5G 热点后，旧 mDNS 注册
+     * 不再被车机看到（车机不再发 ctrl-int 探测 → 不开 AirPlay 窗口）。
+     * SSID 变化时先注销再重新注册，让广播落到当前网络。
+     *
+     * @param force true = 无条件重新注册（用于「绑定进程网络后」的时机修正：
+     *   mDNS 组播跟随 bindProcessToNetwork 的网络，注册必须发生在绑定之后）。
+     */
+    fun ensureForNetwork(ssid: String, force: Boolean = false): Boolean {
+        if (registered && registeredSsid == ssid && !force) return true
+        if (registered) {
+            log("$TAG: 重新注册 mDNS 广播（${registeredSsid ?: "?"}${if (force) "，绑定后时机修正" else " → $ssid"}）")
+            stop()
+        }
+        registeredSsid = ssid
+        var ok = start()
+        if (!ok) {
+            // 注销是异步的：极端情况下 registerService 会遇到 "listener already in use"，
+            // 稍候重试一次（真车实测 10-11：300ms 不够，需要更长）
+            try {
+                Thread.sleep(1_200)
+            } catch (_: InterruptedException) {
+            }
+            ok = start()
+        }
+        return ok
+    }
 
     fun start(): Boolean {
         if (registered) return true
@@ -50,7 +87,11 @@ class CarPlayCtrlAdvertiser(
                 setAttribute("id", mac)
                 setAttribute("srcvers", "950.7.1")
             }
-            nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, registrationListener)
+            // 每次注册用全新 listener：unregisterService 是异步的，复用同一个 listener
+            // 会撞上 "listener already in use"（真车实测 10-11 卡住 ctrl 广播）
+            val freshListener = createListener()
+            activeListener = freshListener
+            nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, freshListener)
             registered = true
             log("$TAG: 已监听 :${socket.localPort}，广播 $SERVICE_TYPE")
             Thread(::acceptLoop, "ctrl-accept").apply {
@@ -160,19 +201,24 @@ class CarPlayCtrlAdvertiser(
 
     fun stop() {
         registered = false
-        runCatching { nsdManager.unregisterService(registrationListener) }
+        registeredSsid = null
+        activeListener?.let { runCatching { nsdManager.unregisterService(it) } }
+        activeListener = null
         runCatching { serverSocket?.close() }
         serverSocket = null
         log("$TAG: 已停止")
     }
 
-    private val registrationListener = object : NsdManager.RegistrationListener {
+    /** 每次注册新建 listener（见 start() 注释；复用同一实例会触发 already in use）。 */
+    private fun createListener(): NsdManager.RegistrationListener = object : NsdManager.RegistrationListener {
         override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
             log("$TAG: mDNS 注册成功 ${serviceInfo.serviceName}")
         }
 
         override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-            log("$TAG: mDNS 注册失败 code=$errorCode")
+            // 重置状态：下一次 ensureForNetwork（新会话的 0x5703）会重新注册
+            registered = false
+            log("$TAG: mDNS 注册失败 code=$errorCode（下次会话自动重试）")
         }
 
         override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit

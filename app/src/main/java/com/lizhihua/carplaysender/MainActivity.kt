@@ -275,12 +275,16 @@ class MainActivity : AppCompatActivity() {
     ) {
         runOnUiThread { ssidInput.setText(wifi.ssid) }
         log(">>> 拿到车机热点凭据（0x5703）——立即绑定 WiFi + 广播 _carplay-ctrl")
-        ctrlAdvertiser.start()
+        // 先占位注册（此时可能尚未绑定到目标网络）；绑定成功后再 force 重注册，
+        // 保证 mDNS 组播落在车机所在网络（真车实测必需：注册早于绑定会广播到错误网络）
+        ctrlAdvertiser.ensureForNetwork(wifi.ssid)
         wifiConnector.bindCurrentWifi { bound ->
             if (!bound) {
                 log(">>> 手机不在车机热点 \"${wifi.ssid}\" —— 请到 系统设置>WLAN 加入后重新连接")
             } else {
-                log(">>> WiFi 已绑定车机热点，等待车机 ctrl 邀请（随后才回 0x4301）")
+                // 关键时机：bindProcessToNetwork 完成后再注册，车机才能看到 ctrl 广播
+                ctrlAdvertiser.ensureForNetwork(wifi.ssid, force = true)
+                log(">>> WiFi 已绑定车机热点，ctrl 广播已重新注册，等待车机 ctrl 邀请（随后才回 0x4301）")
             }
         }
     }
@@ -375,6 +379,17 @@ class MainActivity : AppCompatActivity() {
         }
         browser.stop()
         val info = found.get() ?: run {
+            // 兜底：热点场景车机 IP = 网关（Audi 实测 .1，但取网关更通用）。
+            // mDNS 在部分网络/机型上不稳定（2026-10-11 实测车机 mDNS 时有时无）；
+            // 网关地址 + 默认端口 7000 直接连，AirPlay 端口是固定约定。
+            val gateway = wifiConnector.gatewayAddress()
+            if (gateway != null && gateway.contains('.') && !gateway.contains(':')) {
+                log(">>> [$source] mDNS 未发现，兜底使用网关地址 $gateway:7000（车机热点网关=车机）")
+                return effective.copy(
+                    ipAddresses = listOf(gateway) + effective.ipAddresses,
+                    airPlayPort = if (needPort) 7000 else effective.airPlayPort,
+                )
+            }
             log(">>> [$source] mDNS 未发现车机 AirPlay 服务（车机可能尚未启动无线会话）")
             return effective
         }
@@ -424,7 +439,8 @@ class MainActivity : AppCompatActivity() {
         )
         runOnUiThread { ssidInput.setText(endpoint.ssid) }
         // ctrl 广播已在 onWifiCredentials（0x5703 到达时）启动；这里兜底再确保一次
-        ctrlAdvertiser.start()
+        // （SSID 变化会触发重新注册，见 ensureForNetwork）
+        ctrlAdvertiser.ensureForNetwork(endpoint.ssid)
         // 真车兜底：0x4301 可能不带 IPv4（只有 IPv6 或空）——按真 iPhone 行为用 mDNS
         // 解析车机 _airplay._tcp 拿地址（车机热点已在连就必须能发现，否则说明不在车机网络）
         val effectiveEndpoint = resolveEndpointHost(endpoint, source)
@@ -452,10 +468,13 @@ class MainActivity : AppCompatActivity() {
                 var client = newClient()
                 currentClient = client
                 var keys = client.runPairing()
-                if (keys == null && !client.pairSetupRejected) {
+                if (keys == null && !client.pairSetupRejected && client.attemptedPairing) {
                     // 第二阶段（仅测试台 DiPlay）：复现「BT 控制已结束」状态再试一次。
-                    // 真车（pair-setup 被 403）绝不断 BT——真无线 CarPlay 的 BT 控制通道
-                    // 全程保活，断开会让车机拆掉整轮会话（Audi 实测）。
+                    // 真车（Audi）绝不能断 BT——真无线 CarPlay 的 BT 控制通道全程保活，
+                    // 断开会让车机拆掉整轮 AirPlay 窗口（实车实测）。
+                    // 门槛：仅当本轮真的连上过接收端 RTSP（attemptedPairing）才用此 hack；
+                    // 端点未解析（无 IP）/端口未开时绝不值得断 BT（2026-10-11 踩过：
+                    // mDNS 失败也触发 detach，白白拆掉车机窗口）。
                     detachActiveBtSessions()
                     client = newClient()
                     currentClient = client
@@ -500,10 +519,19 @@ class MainActivity : AppCompatActivity() {
                                             }
                                         }
 
+                                        "changeModes" -> {
+                                            // 车机请求资源仲裁（如用户在 MMI 上点了手机）：
+                                            // 回 modesChanged 声明手机持有主屏/主音频
+                                            log("EVENT: 车机请求 changeModes → 回 modesChanged 接管资源")
+                                            client.assertModes()
+                                        }
+
                                         else -> log("EVENT: 命令 type=${command["type"]}")
                                     }
                                 }
-                                val screen = client.runScreenStream(keys.sharedSecret)
+                                // 资源声明（must）：真车对未声明资源的屏幕流 SETUP 直接 400
+                                client.assertModes()
+                                val screen = client.runScreenStream(keys.sharedSecret, setup.displayUuid)
                                 if (screen != null) {
                                     val host = effectiveEndpoint.ipAddresses.firstOrNull { it.contains('.') }
                                     // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。

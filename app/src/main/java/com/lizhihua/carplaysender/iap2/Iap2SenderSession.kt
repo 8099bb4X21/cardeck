@@ -76,6 +76,19 @@ class Iap2SenderSession(
 
         /** 挑战档位（长度, 等待窗口）：顺序与窗口由 DiPlay/Audi 双端实测决定。 */
         private val MFI_ATTEMPTS = listOf(32 to 3_000L, 20 to 6_000L, 16 to 3_000L)
+
+        /** 真车系接收端特征（0x1D01 name/model/manufacturer 子串，小写比对）。 */
+        private val LEGACY_RECEIVER_MARKERS = listOf("audi", "delphi", "mib", "harman", "porsche")
+    }
+
+    /** 从 0x1D01 提取接收端身份文本（name/model/manufacturer 小写拼接）——MFi 挑战长度选择用。 */
+    private fun identityText(frame: Iap2Csm.Frame): String {
+        val params = Iap2Csm.parseParams(frame.body).associateBy { it.id }
+        return listOfNotNull(
+            params[0]?.value?.asStringOrEmpty(),
+            params[1]?.value?.asStringOrEmpty(),
+            params[2]?.value?.asStringOrEmpty(),
+        ).joinToString(" ").lowercase()
     }
 
     fun run(timeoutMillis: Long = 60_000L): CarPlayEndpoint {
@@ -93,15 +106,22 @@ class Iap2SenderSession(
         log("iap2 tx=0x1d02 identification-accepted")
 
         // ---- MFi（跳过校验：0xAA05 自报成功）----
+        val identityText = identityText(identification)
+        val legacyCar = LEGACY_RECEIVER_MARKERS.any { identityText.contains(it) }
+        if (legacyCar) {
+            log("iap2 识别为真车系（$identityText）——MFi 首选 20B（真 iPhone 实录长度；32B 对真车处置不稳定）")
+        }
         send(Iap2MessageIds.MFI_REQUEST_CERTIFICATE)
         val certificate = expect(Iap2MessageIds.MFI_CERTIFICATE, deadline)
         log("iap2 rx=0xaa01 certificate bytes=${certificate.body.size}（跳过校验）")
-        // 挑战长度：EC 密钥身份（AuthV3，Carlinkit 系）要求精确 32 字节；RSA（AuthV2）
-        // 接受 1..128 —— 32 两者通吃（测试台 DiPlay 实测）。真车实录
-        // （carplay-wifi-extractor client）用的是 20 字节。Audi MIB3 实测对 32B 静默，
-        // 因此依次 32→20→16 回退；全部无应答也不中止——我们不校验签名（0xAA05 自报），
-        // 车机若不在乎挑战可直接接受 0xAA05（由后续 0x5702 是否获得应答来判定）。
-        runMfiChallenge(deadline)
+        // 挑战长度按接收端身份选择（2026-10-11 奥迪字节级实测修正）：
+        //  - 真车系（Audi/Delphi MIB 等）：**20B 首试**。真 iPhone 实录（carplay-wifi-extractor
+        //    client）与 catplay 发送端都用 20B；奥迪对 20B 秒答。32B 先行会导致车机
+        //    ACK 挑战帧后**整段静默**（不回 ACK、不回应答，会话变僵尸）——本日多轮实测，
+        //    32B→20B 的会话全部卡死，20B→（记忆命中）的会话全部秒通。
+        //  - 测试台 DiPlay（Carlinkit AuthV3 EC 身份）：**只接受精确 32B**，长度不符直接断链。
+        // 全部无应答也不中止——我们不校验签名（0xAA05 自报），由 0x5702 是否应答判定放行。
+        runMfiChallenge(deadline, prefer20First = legacyCar)
         send(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
         log("iap2 tx=0xaa05 authentication-succeeded（自报）")
 
@@ -231,13 +251,18 @@ class Iap2SenderSession(
      * 全部无应答时不抛异常直接返回——我们跳过签名校验，由后续 0x5702 是否获得应答
      * 判定对端是否放行（真车实测无应答后 0xaa05 仍可推进）。
      */
-    private fun runMfiChallenge(deadline: Long) {
-        var attempts = MFI_ATTEMPTS.filter { it.first !in mfiRejectedLengths }
+    private fun runMfiChallenge(deadline: Long, prefer20First: Boolean = false) {
+        val ordered = if (prefer20First) {
+            listOf(MFI_ATTEMPTS[1], MFI_ATTEMPTS[0], MFI_ATTEMPTS[2])
+        } else {
+            MFI_ATTEMPTS
+        }
+        var attempts = ordered.filter { it.first !in mfiRejectedLengths }
         if (attempts.isEmpty()) {
             // 所有档位都被拒过：清空重来，避免永久卡死
             mfiRejectedLengths = emptySet()
-            attempts = MFI_ATTEMPTS
-        } else if (attempts.size < MFI_ATTEMPTS.size) {
+            attempts = ordered
+        } else if (attempts.size < ordered.size) {
             log(
                 "iap2 MFi 跳过被拒档位（本进程记忆：${mfiRejectedLengths.sorted().joinToString("B/")}B）" +
                     "——从 ${attempts.first().first}B 开始",

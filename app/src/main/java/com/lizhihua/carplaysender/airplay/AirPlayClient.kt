@@ -35,32 +35,41 @@ class AirPlayClient(
     var pairSetupRejected: Boolean = false
         private set
 
+    /** 本轮是否真正开始过配对（TCP 连上过接收端）。DiPlay 断链 hack 的启用条件。 */
+    @Volatile
+    var attemptedPairing: Boolean = false
+        private set
+
     /**
      * 配对：先试 pair-setup（注册长期公钥）→ pair-verify（派生控制密钥）；
      * 若 pair-setup 被 **403** 拒绝（真车 Audi MIB3 实测：iAP2 阶段已完成 MFi 信任，
      * 不接受匿名 SRP 配对窗口），则改走「已配对设备快路径」直接 pair-verify。
      * 每次重试都换全新 TCP 连接（部分接收端按连接维护状态机）。
+     *
+     * 不预热 /info：真车实测（2026-10-11）车机对未配对连接上的 /info 应答 455
+     * 且此后同连接上的 pair-setup 被 403；Apple 客户端与 catplay 均直接进配对。
+     * 配对请求头按 catplay PairingHelperTx 逐字对齐（X-Apple-HKP / X-Apple-PD）。
      */
     fun runPairing(): PairVerifyClient.ControlKeys? {
         val identity = loadOrCreateIdentity()
         log("AIRPLAY: 控制器身份 pairingId=${identity.pairingId}")
-        for (attempt in 1..4) {
+        // 车机 AirPlay 窗口是「用户点车机上的手机图标 / 收到 ctrl 邀请后才开」的
+        // （Audi 实测：端口从 Connection refused 变为开放）。因此重试采用时限制：
+        // 默认 120s 内每 2s 试一次——用户在车机上点一下的等待不会被提前放弃。
+        val deadline = System.currentTimeMillis() + PAIRING_WINDOW_MILLIS
+        var attempt = 0
+        while (System.currentTimeMillis() < deadline) {
+            attempt++
             close()
-            if (!ensureConnected(2_000)) continue
-            // 前哨：快速判定 RTSP 是否处于服务态（不服务就立刻放弃本轮，避免干等）
-            val canary = try {
-                val (statusLine, _) = request("GET", "/info", ByteArray(0), 2_000)
-                log("AIRPLAY: 前哨 /info [$statusLine] —— RTSP 在线，立即配对")
-                true
-            } catch (error: IOException) {
-                log("AIRPLAY: 前哨 /info 无应答（第 $attempt 轮放弃，等下一轮 BT 会话）")
-                false
+            if (!ensureConnected(2_000)) {
+                if (attempt == 1 || attempt % 5 == 0) {
+                    log("AIRPLAY: 车机 AirPlay 端口未开（等待你点车机上的手机图标 / 车机发 ctrl 邀请）…第 ${attempt} 次重试")
+                }
+                Thread.sleep(2_000)
+                continue
             }
-            if (!canary) {
-                close()
-                return null
-            }
-            val transport = TlvTransport { path, body -> post(path, body) }
+            attemptedPairing = true
+            val transport = TlvTransport { path, body -> postPairing(path, body) }
             try {
                 val setupRejected = try {
                     PairSetupClient(identity, transport, log).run()
@@ -82,7 +91,7 @@ class AirPlayClient(
                 if (setupRejected) {
                     close()
                     if (!ensureConnected(2_000)) continue
-                    val fastPathTransport = TlvTransport { path, body -> post(path, body) }
+                    val fastPathTransport = TlvTransport { path, body -> postPairing(path, body) }
                     val receiverStaticKey = endpoint.publicKey?.let(::hexToBytes)
                     val keys = PairVerifyClient(identity, fastPathTransport, log).run(receiverStaticKey)
                     cipher = ControlCipher(keys.phoneReadKey, keys.phoneWriteKey)
@@ -131,7 +140,53 @@ class AirPlayClient(
         cipherPending = ByteArray(0)
     }
 
-    /** SETUP #1：发送会话信息，接收 eventPort/timingPort/enabledFeatures。 */
+    /**
+     * 声明资源归属（modesChanged）：手机持有主屏 + 主音频（对照 catplay assert_modes）。
+     * 真车验证的顺序：modesChanged → 屏幕流 SETUP。跳过此声明时 Audi MIB3 对
+     * 屏幕流 SETUP 直接 400（资源仲裁未通过）。appStates：话机/导航归 None（0）、
+     * 语音 None（-1）；resources：主屏(1)/主音频(2)，entity=permanent=Controller(1)。
+     */
+    fun assertModes(): Boolean {
+        val body = BinaryPlist.encode(
+            linkedMapOf(
+                "type" to "modesChanged",
+                "params" to linkedMapOf(
+                    "appStates" to listOf(
+                        linkedMapOf<String, Any?>("appStateID" to 2L, "entity" to 0L),
+                        linkedMapOf<String, Any?>("appStateID" to 3L, "entity" to 0L),
+                        linkedMapOf<String, Any?>("appStateID" to 1L, "entity" to 0L, "speechMode" to -1L),
+                    ),
+                    "resources" to listOf(
+                        linkedMapOf<String, Any?>("resourceID" to 1L, "entity" to 1L, "permanentEntity" to 1L),
+                        linkedMapOf<String, Any?>("resourceID" to 2L, "entity" to 1L, "permanentEntity" to 1L),
+                    ),
+                ),
+            ),
+        )
+        return try {
+            val (statusLine, _) = request(
+                "POST",
+                "/command",
+                body,
+                contentType = "application/x-apple-binary-plist",
+            )
+            log("AIRPLAY: modesChanged（声明持有主屏/主音频资源）[$statusLine]")
+            statusLine.contains("200")
+        } catch (error: IOException) {
+            log("AIRPLAY: modesChanged 失败 - ${error.message}")
+            false
+        }
+    }
+
+    /**
+     * SETUP #1：发送会话信息，接收 eventPort/timingPort/enabledFeatures。
+     *
+     * features 必须发「完整 iPhone 能力清单」：接收端计算
+     * enabledFeatures = 车机支持 ∩ 手机提议，**不在提议里的能力一律不启用**。
+     * 2026-10-11 奥迪实测教训：只提议 ["videoPlayback"] 时车机返回
+     * enabledFeatures=[]（视频管线未启用），随后的屏幕流 SETUP 被 400。
+     * 清单对照 catplay（真车验证的发送端，含 viewAreas/uiContext 等视频必需项）。
+     */
     fun runSetup(): SetupInfo? {
         val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
         val body = BinaryPlist.encode(
@@ -141,7 +196,8 @@ class AirPlayClient(
                 "model" to "iPhone14,2",
                 "sourceVersion" to (endpoint.sourceVersion ?: "950.7.1"),
                 "timingPort" to 0L,
-                "features" to listOf("videoPlayback"),
+                "sessionUUID" to java.util.UUID.randomUUID().toString().uppercase(),
+                "features" to CONTROLLER_FEATURES,
             ),
         )
         val (statusLine, responseBody) = try {
@@ -185,13 +241,16 @@ class AirPlayClient(
             enabledFeatures = (root["enabledFeatures"] as? List<*>)?.map { it.toString() }.orEmpty(),
             displayWidth = ((display?.get("widthPixels") as? Long) ?: 1080L).toInt(),
             displayHeight = ((display?.get("heightPixels") as? Long) ?: 2320L).toInt(),
-            displayUuid = display?.get("UUID")?.toString(),
+            // /info displays[0] 的显示屏 UUID（真实 iPhone 会把它回填进屏幕流 SETUP；
+            // 键名以小写 "uuid" 为准，大写 "UUID" 兜底）
+            displayUuid = (display?.get("uuid") ?: display?.get("UUID"))?.toString(),
             maxFps = ((display?.get("maxFPS") as? Long) ?: 30L).toInt(),
         )
         log(
             "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
                 "keepAlive=${info.keepAlivePort ?: "无"} features=${info.enabledFeatures} " +
-                "display=${info.displayWidth}x${info.displayHeight}@${info.maxFps}",
+                "display=${info.displayWidth}x${info.displayHeight}@${info.maxFps} " +
+                "displayUuid=${info.displayUuid}",
         )
         return info
     }
@@ -238,6 +297,31 @@ class AirPlayClient(
 
         /** AAC-LC 48000Hz 立体声（1<<23），/info 偏好时使用；当前仅记录。 */
         const val AUDIO_FORMAT_AAC_48K_STEREO = 1L shl 23
+
+        /**
+         * SETUP 里的 iPhone 能力清单（接收端按「车机支持 ∩ 提议」计算 enabledFeatures，
+         * 缺失的能力整个功能被关——2026-10-11 奥迪实测：videoPlayback 单独提议时
+         * 视频管线未启用、屏幕流 400）。清单对照 catplay 真车发送端。
+         */
+        val CONTROLLER_FEATURES = listOf(
+            "uiContext",
+            "viewAreas",
+            "cornerMasks",
+            "focusTransfer",
+            "h.264Level5.1",
+            "mainBuffered",
+            "altScreen",
+            "enhancedSiri",
+            "hevc",
+            "sessionManagement",
+            "logTransfer",
+            "iAPChannel",
+            "vehicleStateProtocol",
+            "videoPlayback",
+        )
+
+        /** 等车机打开 AirPlay 窗口的总时长（用户在车机上点手机图标的等待窗口）。 */
+        private const val PAIRING_WINDOW_MILLIS = 120_000L
     }
 
     /**
@@ -351,24 +435,30 @@ class AirPlayClient(
      * 两端各自用 HKDF(共享密钥, "DataStream-Salt<id>", "DataStream-Output-Encryption-Key")
      * 推导同一把流密钥；接收端开 TCP 数据端口并在应答里返回。
      */
-    fun runScreenStream(sharedSecret: ByteArray): ScreenStreamInfo? {
-        val connectionId = System.currentTimeMillis() % 100_000L + 1L
+    fun runScreenStream(sharedSecret: ByteArray, displayUuid: String? = null): ScreenStreamInfo? {
+        // 对照 catplay（真车验证）：streamConnectionID = 随机 u64（+1 保证非零）
+        val connectionId = java.security.SecureRandom().nextLong() and Long.MAX_VALUE or 1L
         val body = BinaryPlist.encode(
             linkedMapOf(
                 "streams" to listOf(
                     linkedMapOf<String, Any?>(
                         "type" to SCREEN_STREAM_TYPE, // 110 = 主屏（100 是音频，DiPlay 会开 UDP 端口）
                         "streamConnectionID" to connectionId,
-                        "uuid" to java.util.UUID.randomUUID().toString(),
+                        // 真实 iPhone / catplay 发送端：uuid 与 latencyMs 都必带。
+                        // uuid 必须是接收端 /info displays[] 声明的显示屏 UUID（真车会校验；
+                        // 随机值曾致 Audi 直接 400 拆会话）。latencyMs=50 为镜像常规值。
+                        "uuid" to (displayUuid ?: java.util.UUID.randomUUID().toString()),
+                        "latencyMs" to 50L,
                     ),
                 ),
             ),
         )
-        val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
+        // 请求路径与 catplay 完全一致：流 SETUP 走 "/"（初始 SETUP 走 "/setup"）。
+        // 部分接收端（Audi 固件）对路径敏感，路径不符会整包 400。
         val (statusLine, responseBody) = try {
             request(
                 "SETUP",
-                "rtsp://$host:${endpoint.airPlayPort}/",
+                "/",
                 body,
                 contentType = "application/x-apple-binary-plist",
             )
@@ -377,7 +467,7 @@ class AirPlayClient(
             return null
         }
         if (!statusLine.contains("200")) {
-            log("AIRPLAY: 流协商应答 [$statusLine]")
+            log("AIRPLAY: 流协商应答 [$statusLine]（响应头：${lastResponseHead.replace("\r\n", " | ")}）")
             return null
         }
         val root = try {
@@ -582,12 +672,46 @@ class AirPlayClient(
         return responseBody
     }
 
+    /**
+     * 配对请求（pair-setup / pair-verify）：Apple 客户端与 catplay PairingHelperTx 同款头。
+     * carplay 真车实测（catplay TX 方向工作于真实车机）：
+     *  - Content-Type: application/pairing+tlv8
+     *  - X-Apple-HKP: 2（HomeKit 配对 v2，Apple 客户端的标识头）
+     *  - X-Apple-PD: 1（Pair-Derive，pair-verify 专用）
+     * 2026-10-11：此前发默认 application/octet-stream 且无这两个头，奥迪对
+     * pair-setup/pair-verify 全部回 403（HTTP 层拒绝，未进入 TLV 解析）。
+     */
+    private fun postPairing(path: String, body: ByteArray): ByteArray {
+        val extra = buildList {
+            add("X-Apple-HKP" to "2")
+            if (path.endsWith("pair-verify")) add("X-Apple-PD" to "1")
+        }
+        val (statusLine, responseBody) = request(
+            "POST",
+            path,
+            body,
+            contentType = "application/pairing+tlv8",
+            extraHeaders = extra,
+        )
+        // 诊断（真车 403 排查）：请求长度 + 应答状态行/长度/头部字节
+        val headHex = responseBody.take(16).joinToString(" ") { "%02x".format(it) }
+        log(
+            "AIRPLAY: $path req=${body.size}B -> [$statusLine] resp=${responseBody.size}B" +
+                if (responseBody.isNotEmpty()) " head=[$headHex]" else "",
+        )
+        if (!statusLine.contains("200")) {
+            throw IOException("POST $path 应答 [$statusLine]")
+        }
+        return responseBody
+    }
+
     private fun request(
         method: String,
         path: String,
         body: ByteArray,
         timeoutMillis: Int = 10_000,
         contentType: String = "application/octet-stream",
+        extraHeaders: List<Pair<String, String>> = emptyList(),
     ): Pair<String, ByteArray> {
         val client = socket ?: throw IOException("未连接")
         client.soTimeout = timeoutMillis
@@ -595,6 +719,7 @@ class AirPlayClient(
             "CSeq: ${++cSeq}\r\n" +
             "User-Agent: AirPlay/${endpoint.sourceVersion ?: "950.7.1"}\r\n" +
             "Content-Type: $contentType\r\n" +
+            extraHeaders.joinToString("") { "${it.first}: ${it.second}\r\n" } +
             "Content-Length: ${body.size}\r\n" +
             "\r\n"
         val plaintext = head.toByteArray(Charsets.US_ASCII) + body
@@ -634,12 +759,16 @@ class AirPlayClient(
         }
     }
 
+    /** 最近一次 RTSP 响应头（失败诊断：真车 400 时可能有说明字段）。 */
+    private var lastResponseHead: String = ""
+
     /** 完整 RTSP 报文（头 + Content-Length body）才返回；残留部分写入 leftover。 */
     private fun parseCompleteMessage(buffer: ByteArray): Pair<String, ByteArray>? {
         val separator = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
         val separatorIndex = indexOfSeparator(buffer, separator)
         if (separatorIndex < 0) return null
         val headText = String(buffer, 0, separatorIndex, Charsets.ISO_8859_1)
+        lastResponseHead = headText
         val contentLength = Regex("Content-Length:\\s*(\\d+)", RegexOption.IGNORE_CASE)
             .find(headText)?.groupValues?.get(1)?.toIntOrNull() ?: 0
         val bodyStart = separatorIndex + separator.size

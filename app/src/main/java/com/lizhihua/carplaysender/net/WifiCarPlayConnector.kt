@@ -32,6 +32,21 @@ class WifiCarPlayConnector(
     val currentNetwork: Network? get() = boundNetwork.get()
     private val boundNetwork = AtomicReference<Network?>(null)
 
+    /**
+     * 当前绑定网络的网关地址（车机热点场景 = 车机 IP）。
+     * mDNS 发现失败时的兜底路径：Audi 的 AirPlay 服务在网关 10.174.189.1:7000。
+     */
+    fun gatewayAddress(): String? {
+        val network = boundNetwork.get() ?: return null
+        return try {
+            connectivityManager.getLinkProperties(network)
+                ?.routes?.firstOrNull { it.isDefaultRoute }
+                ?.gateway?.hostAddress
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun request(ssid: String) {
         release()
         val specifier = WifiNetworkSpecifier.Builder()

@@ -26,11 +26,16 @@ class PairSetupClient(
 ) {
     /** 完成后接收端已保存我们的长期公钥；返回接收端静态身份（来自 M6，可选用）。 */
     fun run(): ReceiverIdentity? {
-        // M1: 请求 SRP 参数
+        // M1: 请求 SRP 参数（Method=None + State=1，对照 catplay PairSetup::start）
         val m2 = Tlv8.decode(
             transport.exchange(
                 "/pair-setup",
-                Tlv8.encode(listOf(Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(1)))),
+                Tlv8.encode(
+                    listOf(
+                        Tlv8.Item(Tlv8.TYPE_METHOD, byteArrayOf(0)),
+                        Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(1)),
+                    ),
+                ),
             ),
         )
         val salt = m2[Tlv8.TYPE_SALT] ?: throw IOException("pair-setup M2 缺少 salt")
