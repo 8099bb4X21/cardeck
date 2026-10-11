@@ -358,11 +358,12 @@ class AirPlayClient(
             (root["displays"] as? List<*>)?.forEachIndexed { index, d ->
                 log("AIRPLAY: /info displays[$index]=$d")
             }
-            for (hidKey in listOf("hids", "hidDevices", "hid")) {
+            for (hidKey in listOf("hidDevices", "hids", "hid")) {
                 (root[hidKey] as? List<*>)?.forEachIndexed { index, h ->
                     log("AIRPLAY: /info $hidKey[$index]=$h")
-                    if (h is Map<*, *> && hidKey == "hidDevices") {
-                        val uuid = (h["uuid"] as? Long)?.toInt() ?: -1
+                    if (h is Map<*, *>) {
+                        // uuid 通配 Number（bplist 整数一律 Long，防御其他实现）
+                        val uuid = (h["uuid"] as? Number)?.toInt() ?: -1
                         if (uuid >= 0) hidDevices += uuid
                         (h["hidDescriptor"] as? ByteArray)?.let { descriptor ->
                             log(
@@ -374,6 +375,7 @@ class AirPlayClient(
                 }
             }
         }
+        log("AIRPLAY: hidDevices 解析结果 uuids=$hidDevices")
         val info = SetupInfo(
             eventPort = portOf(root["eventPort"]),
             timingPort = portOf(root["timingPort"]),
@@ -688,10 +690,11 @@ class AirPlayClient(
 
         fun onCarBytes(bytes: ByteArray) {
             synchronized(lock) {
-                // 车机重发的 DETECT：一问一答回 marker（上限 3 次防意外洪泛）
+                // 车机 DETECT：一问一答（catplay server 角色：收到即回、绝不主动）。
+                // 引擎处于 NEGOTIATING（尚未见 SYN）时的裸 marker 都按 DETECT 对待
                 if (bytes.size == 6 &&
                     bytes[0] == 0xFF.toByte() && bytes[1] == 0x55.toByte() &&
-                    detectReplies < 3
+                    engine.state == com.lizhihua.carplaysender.iap2.Iap2LinkEngine.State.NEGOTIATING
                 ) {
                     detectReplies++
                     log("IAPLINK: 回 DETECT #$detectReplies")
