@@ -27,8 +27,8 @@ object VirtualLauncher {
 
     private const val TAG = "VirtualLauncher"
 
-    /** dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。 */
-    const val DOCK_WIDTH_DP = 88
+    /** dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。2026-10-11 用户实测 88dp 偏宽，改 2/3。 */
+    const val DOCK_WIDTH_DP = 58
 
     val runningApps = LinkedHashSet<ComponentName>()
 
@@ -82,7 +82,7 @@ object VirtualLauncher {
     ): Boolean {
         detach()
         val density = densityDpi / 160f
-        dockWidthPx = (DOCK_WIDTH_DP * density).toInt().coerceAtLeast(120)
+        dockWidthPx = (DOCK_WIDTH_DP * density).toInt().coerceAtLeast(80)
         val appWidth = (totalWidth - dockWidthPx).coerceAtLeast(200)        // 横屏应用屏用「手机密度」：竖屏锁定应用被 letterbox 的窗口 ≈ 390dp 宽（正常手机布局），
         // 字号/间距不再是「平板放大版」；竖屏应用屏（本就手机比例）保持原密度
         val appDensity = if (appWidth > totalHeight) {
