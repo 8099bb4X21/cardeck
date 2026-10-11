@@ -557,6 +557,123 @@ class AirPlayClient(
         false
     }
 
+    // ---- 事件通道上的虚拟 iAP2 链路 ----
+    //
+    // 奥迪实测（2026-10-11）：车机通过 iAPSendMessage 发来 iAP2 链路层 marker
+    // （ff 55 02 00 ee 10）——它在事件通道上开了一条虚拟 iAP2 链路（type-130 TCP
+    // 被车机拒绝：200 但无 dataPort）。EA 数据（触摸 HID）走这条链路。
+    // 复用 [com.lizhihua.carplaysender.iap2.Iap2LinkEngine] 完成握手与帧收发。
+
+    @Volatile
+    private var iapLink: IapLinkOverEvent? = null
+
+    /** 车机 iAPSendMessage 字节入口（MainActivity 事件命令处理器调用）。 */
+    fun onIapEventBytes(data: ByteArray) {
+        val link = iapLink ?: synchronized(this) {
+            iapLink ?: IapLinkOverEvent().also {
+                it.begin()
+                iapLink = it
+            }
+        }
+        link.onCarBytes(data)
+    }
+
+    inner class IapLinkOverEvent {
+        private val lock = Any()
+        private val engine = com.lizhihua.carplaysender.iap2.Iap2LinkEngine()
+        private val parser = com.lizhihua.carplaysender.iap2.Iap2Csm.Parser()
+        private var frameCount = 0
+        private var eaCount = 0
+        private var started = false
+
+        init {
+            engine.onEaData = { bytes -> handleEaData(bytes) }
+            // 节拍线程：驱动引擎计时器（marker/SYN 重发、重传）
+            Thread({
+                while (socket?.isClosed == false) {
+                    try {
+                        Thread.sleep(200)
+                    } catch (_: InterruptedException) {
+                        return@Thread
+                    }
+                    synchronized(lock) {
+                        engine.advanceTime(System.nanoTime() / 1_000_000L)
+                        drainLocked()
+                    }
+                }
+            }, "iap-link-pacer").apply {
+                isDaemon = true
+                start()
+            }
+        }
+
+        fun begin() {
+            synchronized(lock) {
+                if (started) return
+                started = true
+                log("IAPLINK: 车机发来链路 marker——在事件通道上启动虚拟 iAP2 链路（marker+SYN）")
+                engine.start(System.nanoTime() / 1_000_000L)
+                drainLocked()
+            }
+        }
+
+        fun onCarBytes(bytes: ByteArray) {
+            synchronized(lock) {
+                engine.feed(bytes, System.nanoTime() / 1_000_000L)
+                drainLocked()
+            }
+        }
+
+        private fun drainLocked() {
+            while (true) {
+                when (val event = engine.pollEvent()) {
+                    null -> break
+                    is com.lizhihua.carplaysender.iap2.Iap2LinkEngine.Event.Control ->
+                        handleFrameLocked(event.bytes)
+
+                    is com.lizhihua.carplaysender.iap2.Iap2LinkEngine.Event.Dead -> {
+                        log("IAPLINK: 虚拟链路终止 - ${event.reason ?: "EOF"}")
+                        return
+                    }
+                }
+            }
+            val out = engine.takeOutput()
+            if (out.isNotEmpty()) {
+                sendIap(out)
+            }
+        }
+
+        private fun handleFrameLocked(bytes: ByteArray) {
+            frameCount++
+            val frames = parser.offer(bytes)
+            for (frame in frames) {
+                val hex = frame.body.joinToString(" ") { "%02x".format(it) }
+                if (frameCount <= 30 || frameCount % 100 == 0) {
+                    log(
+                        "IAPLINK: rx 0x${frame.messageId.toString(16)} " +
+                            "(${com.lizhihua.carplaysender.iap2.Iap2MessageIds.nameOf(frame.messageId)}) " +
+                            "${frame.body.size}B hex=${hex.take(160)}",
+                    )
+                }
+            }
+            if (frames.isEmpty() && frameCount <= 10) {
+                log("IAPLINK: rx ${bytes.size}B（非 CSM）hex=" + bytes.joinToString(" ") { "%02x".format(it) }.take(160))
+            }
+        }
+
+        /** 引擎回调：EA 会话（2 号）数据帧——触摸 HID 的高概率载体。 */
+        var onEaData: ((ByteArray) -> Unit)? = null
+
+        fun handleEaData(bytes: ByteArray) {
+            eaCount++
+            val hex = bytes.joinToString(" ") { "%02x".format(it) }
+            if (eaCount <= 30 || eaCount % 100 == 0) {
+                log("IAPLINK: EA 数据 #$eaCount ${bytes.size}B hex=${hex.take(200)}")
+            }
+            onEaData?.invoke(bytes)
+        }
+    }
+
     /** 音频流协商结果（RTP over UDP；密钥同视频流规则，盐用音频连接 ID）。 */
     class AudioStreamInfo(
         val streamConnectionId: Long,

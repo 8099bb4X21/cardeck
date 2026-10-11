@@ -535,19 +535,15 @@ class MainActivity : AppCompatActivity() {
                                         }
 
                                         "iAPSendMessage" -> {
-                                            // 事件通道上的 iAP2 消息（catplay CommandIApSendMessage：
-                                            // params 信封 + data 字节）。隧道未建时车机走这条路。
+                                            // 事件通道上的 iAP2 虚拟链路字节（车机先发 marker 开场）。
+                                            // 喂给链路引擎：握手 → EA 会话 → 触摸 HID。
                                             val params = command["params"] as? Map<*, *>
                                             val data = params?.get("data") as? ByteArray
                                             if (data == null) {
                                                 log("EVENT: iAPSendMessage 无 data（params=$params）")
                                             } else {
                                                 iapEventMessageCount++
-                                                val hex = data.joinToString(" ") { "%02x".format(it) }
-                                                log(
-                                                    "EVENT: iAPSendMessage #${iapEventMessageCount} ${data.size}B" +
-                                                        if (iapEventMessageCount <= 10) " hex=${hex.take(200)}" else "",
-                                                )
+                                                client.onIapEventBytes(data)
                                             }
                                         }
 
