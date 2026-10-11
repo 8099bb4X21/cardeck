@@ -217,6 +217,11 @@ class GridActivity : AppCompatActivity() {
             val grid = GridLayout(parent.context).apply {
                 columnCount = columns
                 useDefaultMargins = false
+                // ViewPager2 硬性要求：页面根布局必须 match_parent（否则 IllegalStateException 崩溃）
+                layoutParams = RecyclerView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                )
             }
             return PageHolder(grid)
         }
