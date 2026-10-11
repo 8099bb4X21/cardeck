@@ -1,6 +1,14 @@
 package com.lizhihua.carplaysender.launcher
 
+import android.content.ComponentName
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Path
+import android.graphics.drawable.Drawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.text.format.DateFormat
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -9,34 +17,44 @@ import android.widget.FrameLayout
 import android.widget.GridLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.RecyclerView
+import androidx.viewpager2.widget.ViewPager2
 
 /**
- * 应用桌面（跑在主应用虚拟屏上）：应用图标网格 + 右侧字母导航条。
+ * 应用桌面（跑在主应用虚拟屏上）—— CarPlay 车机版样式。
  *
- * 排序：数字组（#）在前，随后 A-Z；汉字经 ICU 转写归入其拼音首字母组，
- * 组内用 zh Collator（拼音级）排序。点击图标 → 应用启动到本屏。
+ * 纯黑背景 + 顶部状态栏时钟（走秒=视频链路活性的直观证据）+ 大圆角图标
+ * 分页网格（4×3/页，左右滑动翻页）+ 底部页点；右侧半透明窄字母条可快速
+ * 跳到目标字母所在页（车机上找中文 App 的效率件，CarPlay 本体没有）。
+ * 排序：数字组（#）在前，随后 A-Z；汉字经 ICU 转写归入拼音首字母组。
  */
 class GridActivity : AppCompatActivity() {
 
-    private var scroll: ScrollView? = null
-    private var bubble: TextView? = null
+    // ---- 数据（onCreate 一次装载）----
+    private data class Cell(val entry: VirtualLauncher.AppEntry, val letter: String)
+
+    private var cells: List<Cell> = emptyList()
+    private var columns = 4
+    private var perPage = 12
+
+    // ---- UI 句柄 ----
+    private var pager: ViewPager2? = null
+    private var dotsRow: LinearLayout? = null
     private var navBar: LinearLayout? = null
-    private var letters: List<String> = emptyList()
-    private val sectionOffsets = HashMap<String, Int>()
-
-    /** 导航条拖动中：抑制「滚动同步高亮」回写，避免与手指位置打架。 */
-    private var navDragging = false
-
-    // 秒级时钟：右上角实时走秒——车机屏上它若在动即证明视频链路活着的直观证据
-    private val clockHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var bubble: TextView? = null
     private var clockView: TextView? = null
+
+    private var letters: List<String> = emptyList() // 去重后的分区字母（flat 顺序）
+    private val letterFirstIndex = HashMap<String, Int>() // 字母 → flat 下标（跳页用）
+
+    // 秒级时钟（链路活性证据）：1s 刷新
+    private val clockHandler = Handler(Looper.getMainLooper())
     private val clockTicker = object : Runnable {
         override fun run() {
-            clockView?.text = android.text.format.DateFormat.format("HH:mm:ss", System.currentTimeMillis())
+            clockView?.text = DateFormat.format("HH:mm:ss", System.currentTimeMillis())
             clockHandler.postDelayed(this, 1_000)
         }
     }
@@ -46,139 +64,88 @@ class GridActivity : AppCompatActivity() {
         val density = resources.displayMetrics.density
         val dp = { v: Int -> (v * density).toInt() }
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xFF0D1117.toInt())
-        }
-        val headerRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(20), dp(16), dp(20), dp(10))
-        }
-        val titleBlock = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        titleBlock.addView(
-            TextView(this).apply {
-                text = "CarPlay Sender"
-                setTextColor(0xFFE6EDF3.toInt())
-                textSize = 22f
-            },
-        )
-        titleBlock.addView(
-            TextView(this).apply {
-                text = "点击应用在车机屏运行；右栏字母条可快速定位"
-                setTextColor(0xFF5A6B7A.toInt())
-                textSize = 12f
-                setPadding(0, dp(4), 0, 0)
-            },
-        )
-        headerRow.addView(
-            titleBlock,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-        )
-        val clock = TextView(this).apply {
-            setTextColor(0xFF7EE3A0.toInt())
-            textSize = 30f
-            setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD)
-        }
-        clockView = clock
-        headerRow.addView(clock)
-        root.addView(headerRow)
-
+        // ---- 应用列表（字母分组顺序拍平；CarPlay 无分区头，纯图标流）----
         val apps = VirtualLauncher.launchableApps(this)
-        synchronized(VirtualLauncher.runningApps) {
-            VirtualLauncher.iconCache.clear()
-        }
+        synchronized(VirtualLauncher.runningApps) { VirtualLauncher.iconCache.clear() }
         apps.forEach { VirtualLauncher.iconCache[it.component] = it.icon }
-
-        val screenWidthDp = resources.displayMetrics.widthPixels / resources.displayMetrics.density
-        val contentWidthDp = screenWidthDp - 48f // 扣除右侧字母导航条
-        val columns = (contentWidthDp / 200f).toInt().coerceAtLeast(3)
-        val cellDp = (contentWidthDp / columns).toInt()
-
-        val grid = GridLayout(this).apply {
-            columnCount = columns
-            setPadding(dp(12), 0, dp(12), dp(16))
-        }
-        val grouped = LinkedHashMap<String, MutableList<VirtualLauncher.AppEntry>>()
-        apps.forEach { entry ->
-            grouped.getOrPut(VirtualLauncher.indexLetterOf(entry.label)) { mutableListOf() }.add(entry)
-        }
-        letters = grouped.keys.toList()
-
-        val headerViews = LinkedHashMap<String, View>()
-        grouped.forEach { (letter, entries) ->
-            val header = TextView(this).apply {
-                text = letter
-                setTextColor(0xFF7EE3A0.toInt())
-                textSize = 16f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                setPadding(dp(6), dp(14), 0, dp(6))
-            }
-            grid.addView(
-                header,
-                GridLayout.LayoutParams().apply {
-                    columnSpec = GridLayout.spec(0, columns, 1f)
-                    width = 0
-                    height = ViewGroup.LayoutParams.WRAP_CONTENT
-                },
-            )
-            headerViews[letter] = header
-            entries.forEach { entry ->
-                grid.addView(
-                    buildCell(entry, dp, cellDp, columns),
-                    GridLayout.LayoutParams().apply {
-                        width = dp(cellDp)
-                        height = dp(168)
-                    },
-                )
-            }
+        cells = apps.map { Cell(it, VirtualLauncher.indexLetterOf(it.label)) }
+        letters = cells.map { it.letter }.distinct()
+        letters.forEachIndexed { index, letter ->
+            letterFirstIndex.putIfAbsent(letter, index)
         }
 
-        val scrollView = ScrollView(this).apply { addView(grid) }
-        scroll = scrollView
-        // 滚动跟随：用户滚动网格时，右侧导航条高亮当前所在分区字母（问题 1 修复）。
-        // 拖动导航条期间抑制（navDragging），否则高亮会与手指位置来回抢。
-        scrollView.setOnScrollChangeListener { _, _, scrollY, _, _ ->
-            if (navDragging) return@setOnScrollChangeListener
-            val letter = letterForScrollY(scrollY) ?: return@setOnScrollChangeListener
-            highlightLetter(letter)
+        // ---- 布局 ----
+        val root = FrameLayout(this).apply { setBackgroundColor(0xFF000000.toInt()) }
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        // 状态栏：时钟（等宽走秒）
+        val status = FrameLayout(this).apply {
+            setPadding(dp(28), dp(14), dp(28), dp(6))
         }
+        status.addView(
+            TextView(this).apply {
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 24f
+                letterSpacing = 0.08f
+                setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD)
+            }.also { clockView = it },
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER_VERTICAL or Gravity.START,
+            ),
+        )
+        content.addView(status)
+
+        // 页面区：ViewPager + 右侧字母条浮层
+        columns = if (resources.displayMetrics.widthPixels >= 1100) 4 else 3
+        perPage = columns * 3
+        val pagerArea = FrameLayout(this)
+
+        val viewPager = ViewPager2(this).apply {
+            adapter = PageAdapter()
+            offscreenPageLimit = 2
+        }
+        pager = viewPager
+        pagerArea.addView(
+            viewPager,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+
         val nav = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(24), dp(4), dp(24))
+            setPadding(0, dp(16), 0, dp(16))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dp(14).toFloat()
+                setColor(0x26FFFFFF)
+            }
+            setPadding(dp(2), dp(16), dp(2), dp(16))
         }
         navBar = nav
         letters.forEach { letter ->
             nav.addView(
                 TextView(this).apply {
                     text = letter
-                    setTextColor(0xFF5A6B7A.toInt())
+                    setTextColor(0xFF9A9AA5.toInt())
                     textSize = 11f
                     gravity = Gravity.CENTER
                 },
-                LinearLayout.LayoutParams(dp(44), 0, 1f),
+                LinearLayout.LayoutParams(dp(30), 0, 1f),
             )
         }
-        nav.setOnTouchListener { _, event ->
-            handleNavTouch(event, dp)
-            true
-        }
-
-        val horizontal = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        horizontal.addView(
-            scrollView,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
-        )
-        horizontal.addView(
+        nav.setOnTouchListener { _, event -> handleNavTouch(event); true }
+        pagerArea.addView(
             nav,
-            LinearLayout.LayoutParams(dp(48), ViewGroup.LayoutParams.MATCH_PARENT),
+            FrameLayout.LayoutParams(dp(34), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END or Gravity.CENTER_VERTICAL).apply {
+                rightMargin = dp(6)
+            },
         )
 
+        // 中央字母气泡（拖动反馈）
         val bubbleView = TextView(this).apply {
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 44f
@@ -190,85 +157,108 @@ class GridActivity : AppCompatActivity() {
             visibility = View.INVISIBLE
         }
         bubble = bubbleView
-
-        val content = FrameLayout(this)
-        content.addView(horizontal, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT,
-        ))
-        content.addView(
+        pagerArea.addView(
             bubbleView,
             FrameLayout.LayoutParams(dp(110), dp(110), Gravity.CENTER),
         )
+
+        content.addView(
+            pagerArea,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
+        )
+
+        // 页点
+        val dots = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(8), 0, dp(10))
+        }
+        dotsRow = dots
+        content.addView(
+            dots,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+
         root.addView(
             content,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
         )
         setContentView(root)
 
-        // 布局完成后记录各分区头的 y 偏移（导航条跳转目标）
-        scrollView.post {
-            headerViews.forEach { (letter, view) ->
-                sectionOffsets[letter] = view.top
+        rebuildDots()
+        viewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+            override fun onPageSelected(position: Int) {
+                highlightLetter(letterForPage(position))
+                updateDots(position)
             }
-        }
+        })
+        highlightLetter(letterForPage(0))
+    }
+
+    override fun onResume() {
+        super.onResume()
         clockHandler.post(clockTicker)
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
+    override fun onPause() {
+        super.onPause()
         clockHandler.removeCallbacks(clockTicker)
     }
 
-    /** 当前滚动位置所在的分区字母（取最后一个 top ≤ scrollY 的分区）。 */
-    private fun letterForScrollY(scrollY: Int): String? {
-        var best: String? = null
-        var bestTop = -1
-        letters.forEach { letter ->
-            val top = sectionOffsets[letter] ?: return@forEach
-            if (top <= scrollY + 8 && top > bestTop) {
-                bestTop = top
-                best = letter
-            }
-        }
-        return best ?: letters.firstOrNull()
-    }
+    // ---- 分页 ----
 
-    /** 仅更新导航条高亮（不滚动、不弹气泡）——滚动跟随用。 */
-    private fun highlightLetter(letter: String) {
-        navBar?.let { bar ->
-            for (i in 0 until bar.childCount) {
-                val child = bar.getChildAt(i) as? TextView ?: continue
-                val selected = letters.getOrNull(i) == letter
-                child.setTextColor(
-                    if (selected) 0xFF7EE3A0.toInt() else 0xFF5A6B7A.toInt(),
-                )
-                child.setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+    private inner class PageAdapter : RecyclerView.Adapter<PageHolder>() {
+        override fun getItemCount(): Int = (cells.size + perPage - 1) / perPage
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PageHolder {
+            val grid = GridLayout(parent.context).apply {
+                columnCount = columns
+                useDefaultMargins = false
             }
+            return PageHolder(grid)
+        }
+
+        override fun onBindViewHolder(holder: PageHolder, position: Int) {
+            holder.bind(position)
         }
     }
 
-    private fun buildCell(
-        entry: VirtualLauncher.AppEntry,
-        dp: (Int) -> Int,
-        cellDp: Int,
-        columns: Int,
-    ): View {
-        val cell = LinearLayout(this).apply {
+    private inner class PageHolder(private val grid: GridLayout) : RecyclerView.ViewHolder(grid) {
+        fun bind(page: Int) {
+            grid.removeAllViews()
+            val from = page * perPage
+            val to = minOf(from + perPage, cells.size)
+            for (index in from until to) {
+                grid.addView(buildCell(cells[index]))
+            }
+        }
+    }
+
+    private fun buildCell(cell: Cell): View {
+        val density = resources.displayMetrics.density
+        val dp = { v: Int -> (v * density).toInt() }
+        val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(dp(8), dp(14), dp(8), dp(14))
+            setPadding(dp(6), dp(10), dp(6), dp(10))
         }
-        cell.addView(
-            ImageView(this).apply { setImageDrawable(entry.icon) },
-            LinearLayout.LayoutParams(dp(84), dp(84)),
+        val iconSize = dp(92)
+        layout.addView(
+            ImageView(this).apply {
+                setImageBitmap(roundedIcon(cell.entry.icon, iconSize))
+            },
+            LinearLayout.LayoutParams(iconSize, iconSize),
         )
-        cell.addView(
+        layout.addView(
             TextView(this).apply {
-                text = entry.label
-                setTextColor(0xFFE6EDF3.toInt())
-                textSize = 14f
+                text = cell.entry.label
+                setTextColor(0xFFF2F2F7.toInt())
+                textSize = 13f
                 maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
                 gravity = Gravity.CENTER
                 setPadding(0, dp(8), 0, 0)
             },
@@ -277,45 +267,101 @@ class GridActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ),
         )
-        cell.setOnClickListener {
-            Toast.makeText(this, "启动 ${entry.label}", Toast.LENGTH_SHORT).show()
-            Thread { VirtualLauncher.launchApp(entry.component) }.start()
+        layout.setOnClickListener {
+            Toast.makeText(this, "启动 ${cell.entry.label}", Toast.LENGTH_SHORT).show()
+            Thread { VirtualLauncher.launchApp(cell.entry.component) }.start()
         }
-        return cell
+        return layout
     }
 
-    /** 导航条触摸：按 y 位置选字母 → 高亮 + 滚动到分区 + 中央气泡。 */
-    private fun handleNavTouch(event: MotionEvent, dp: (Int) -> Int) {
+    /** App 图标 → 圆角位图（iOS 风格 ~22% 圆角；AdaptiveIcon 直接绘制两层）。 */
+    private fun roundedIcon(drawable: Drawable, size: Int): Bitmap {
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val radius = size * 0.22f
+        val path = Path().apply {
+            addRoundRect(0f, 0f, size.toFloat(), size.toFloat(), radius, radius, Path.Direction.CW)
+        }
+        canvas.save()
+        canvas.clipPath(path)
+        drawable.setBounds(0, 0, size, size)
+        drawable.draw(canvas)
+        canvas.restore()
+        return bitmap
+    }
+
+    // ---- 页点 ----
+
+    private fun rebuildDots() {
+        val row = dotsRow ?: return
+        row.removeAllViews()
+        val count = (cells.size + perPage - 1) / perPage
+        val density = resources.displayMetrics.density
+        repeat(count) {
+            row.addView(
+                View(this).apply {
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        shape = android.graphics.drawable.GradientDrawable.OVAL
+                        setColor(0x66FFFFFF)
+                    }
+                },
+                LinearLayout.LayoutParams((7 * density).toInt(), (7 * density).toInt()).apply {
+                    marginStart = (3 * density).toInt()
+                    marginEnd = (3 * density).toInt()
+                },
+            )
+        }
+        updateDots(0)
+    }
+
+    private fun updateDots(selected: Int) {
+        val row = dotsRow ?: return
+        for (i in 0 until row.childCount) {
+            (row.getChildAt(i).background as? android.graphics.drawable.GradientDrawable)
+                ?.setColor(if (i == selected) 0xFFFFFFFF.toInt() else 0x66FFFFFF)
+        }
+    }
+
+    // ---- 字母条：拖动/点击 → 跳到目标字母所在页 ----
+
+    private fun letterForPage(page: Int): String? {
+        val index = page * perPage
+        return cells.getOrNull(index)?.letter
+    }
+
+    private fun pageForLetter(letter: String): Int {
+        val index = letterFirstIndex[letter] ?: return pager?.currentItem ?: 0
+        return index / perPage
+    }
+
+    private fun handleNavTouch(event: MotionEvent) {
         val nav = navBar ?: return
         if (letters.isEmpty() || nav.height == 0) return
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
-                navDragging = true
                 val index = (event.y / nav.height * letters.size)
                     .toInt().coerceIn(0, letters.size - 1)
-                selectLetter(letters[index], dp)
+                val letter = letters[index]
+                bubble?.text = letter
+                bubble?.visibility = View.VISIBLE
+                highlightLetter(letter)
+                pager?.currentItem = pageForLetter(letter)
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                navDragging = false
-                bubble?.postDelayed({ bubble?.visibility = View.INVISIBLE }, 600)
+                bubble?.postDelayed({ bubble?.visibility = View.INVISIBLE }, 500)
             }
         }
     }
 
-    private fun selectLetter(letter: String, dp: (Int) -> Int) {
-        bubble?.text = letter
-        bubble?.visibility = View.VISIBLE
-        val target = sectionOffsets[letter]
-        if (target != null) {
-            scroll?.smoothScrollTo(0, target)
-        } else {
-            // 布局未完成时补记偏移后再跳
-            scroll?.post {
-                scroll?.smoothScrollTo(0, sectionOffsets[letter] ?: 0)
-            }
+    private fun highlightLetter(letter: String?) {
+        val bar = navBar ?: return
+        for (i in 0 until bar.childCount) {
+            val child = bar.getChildAt(i) as? TextView ?: continue
+            val selected = letters.getOrNull(i) == letter
+            child.setTextColor(if (selected) 0xFFFFFFFF.toInt() else 0xFF9A9AA5.toInt())
+            child.setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
         }
-        highlightLetter(letter)
     }
 
     override fun onBackPressed() = Unit // 桌面不退出
