@@ -212,6 +212,31 @@ class AirPlayClient(
     }
 
     /**
+     * 声明 HID 输入模式（hidSetInputMode，FromDevice 方向——手机→车机的触摸启用命令）。
+     * 对照 catplay CommandHidSetInputMode {hidInputMode u8, uuid string}；
+     * uuid 为 /info hidDevices[].uuid 的十六进制串（DiPlay sendHidReport 同款 uid.toString(16)）。
+     * 奥迪 display features=0x08（高保真触摸）+ hidDevices 齐备，触摸无报文的最大嫌疑
+     * 是缺这一步武装。
+     */
+    fun sendHidSetInputMode(deviceUuidHex: String, mode: Int = 0): Boolean = try {
+        val body = BinaryPlist.encode(
+            linkedMapOf(
+                "type" to "hidSetInputMode",
+                "params" to linkedMapOf<String, Any?>(
+                    "hidInputMode" to mode.toLong(),
+                    "uuid" to deviceUuidHex,
+                ),
+            ),
+        )
+        val (statusLine, _) = request("POST", "/command", body, contentType = "application/x-apple-binary-plist")
+        log("AIRPLAY: hidSetInputMode uuid=$deviceUuidHex mode=$mode [$statusLine]")
+        statusLine.contains("200")
+    } catch (error: IOException) {
+        log("AIRPLAY: hidSetInputMode 失败 - ${error.message}")
+        false
+    }
+
+    /**
      * 声明资源归属（modesChanged）：手机持有主屏 + 主音频（对照 catplay assert_modes）。
      * 真车验证的顺序：modesChanged → 屏幕流 SETUP。跳过此声明时 Audi MIB3 对
      * 屏幕流 SETUP 直接 400（资源仲裁未通过）。appStates：话机/导航归 None（0）、
@@ -323,6 +348,7 @@ class AirPlayClient(
         }
         // /info 全量转储：找奥迪私有的数据流 UUID（type-130 的 clientTypeUUID 候选）、
         // HID 设备描述（触摸）、以及任何我们没实现的能力声明
+        val hidDevices = ArrayList<Int>() // uuid 列表（0=触摸，1=旋钮，见 hidDevices[].uuid）
         infoRoot?.let { root ->
             val skipped = setOf("displays")
             val summary = root.entries.joinToString("; ") { (key, value) ->
@@ -335,6 +361,16 @@ class AirPlayClient(
             for (hidKey in listOf("hids", "hidDevices", "hid")) {
                 (root[hidKey] as? List<*>)?.forEachIndexed { index, h ->
                     log("AIRPLAY: /info $hidKey[$index]=$h")
+                    if (h is Map<*, *> && hidKey == "hidDevices") {
+                        val uuid = (h["uuid"] as? Long)?.toInt() ?: -1
+                        if (uuid >= 0) hidDevices += uuid
+                        (h["hidDescriptor"] as? ByteArray)?.let { descriptor ->
+                            log(
+                                "AIRPLAY: hidDescriptor[$index] ${descriptor.size}B hex=" +
+                                    descriptor.take(96).joinToString(" ") { "%02x".format(it) },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -349,6 +385,7 @@ class AirPlayClient(
             // 键名以小写 "uuid" 为准，大写 "UUID" 兜底）
             displayUuid = (display?.get("uuid") ?: display?.get("UUID"))?.toString(),
             maxFps = ((display?.get("maxFPS") as? Long) ?: 30L).toInt(),
+            hidDeviceUuids = hidDevices,
         )
         log(
             "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
@@ -369,6 +406,8 @@ class AirPlayClient(
         val displayHeight: Int,
         val displayUuid: String?,
         val maxFps: Int,
+        /** /info hidDevices[].uuid 列表（0=触摸、1=旋钮；DiPlay 同款编号）。 */
+        val hidDeviceUuids: List<Int> = emptyList(),
     )
 
     /** 屏幕流协商结果。 */
@@ -1011,8 +1050,20 @@ class AirPlayClient(
                         pending += buffer.copyOf(count)
                         val decrypted = cipher.decrypt(pending)
                         pending = decrypted.rest
+                        var eventOtherLogged = 0
                         for ((firstLine, body) in accumulator.offer(decrypted.data)) {
-                            if (!firstLine.contains("/command")) continue
+                            if (!firstLine.contains("/command")) {
+                                // 事件通道上的非 /command 消息此前被静默丢弃——
+                                // 虚拟链路的后续消息/触摸若走其他路径会全部漏掉，必须留痕
+                                if (eventOtherLogged < 20) {
+                                    eventOtherLogged++
+                                    log(
+                                        "EVENT: 非 /command 消息 [$firstLine] body=${body.size}B " +
+                                            body.joinToString(" ") { "%02x".format(it) }.take(160),
+                                    )
+                                }
+                                continue
+                            }
                             val command = try {
                                 BinaryPlist.parse(body) as? Map<*, *>
                             } catch (_: IllegalArgumentException) {
