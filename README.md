@@ -21,8 +21,37 @@
 | Phase 0 | 测试台 + 网络层 demo（本仓库） | 两台手机 mDNS 互发现 | ✅ 已验收（DiPlay 测试台） |
 | Phase 1 | iAP2 发送端会话（链路状态机 + 0x1D00/0x5702/0x4300） | 接收端日志显示「iPhone 接入」 | ✅ 已验收：完整走通至 0x4301，拿到热点凭据与 AirPlay 端点 |
 | Phase 2 | AirPlay 主会话（PairVerify + H.264 编码 + HID 回传） | 备用机显示本机画面并可触摸 | ✅ 已验收（2026-10-08 23:17）：30fps 推流+渲染、触摸事件回传打通 |
-| Phase 3 | 真车（奥迪 MIB3）验证 | 车机点亮 | 🔶 进行中（2026-10-09 实车）：iAP2 全链路打通（识别→MFi→凭据→ctrl 邀请→mDNS 端点），卡在 AirPlay 配对（pair-setup 403 → 已实现 pair-verify 快路径，待实车复测） |
-| 兜底 | 买 Tbox 安卓盒子，把同一套自绘 UI 装进盒子 | — | 失败时启用 |
+| Phase 3 | 真车（奥迪 MIB3）验证 | 车机点亮 | ✅ **全通（2026-10-11）**：视频稳定上屏 + 车机触摸/滑动可交互（详见下方 Phase 3-C） |
+| 兜底 | 买 Tbox 安卓盒子，把同一套自绘 UI 装进盒子 | — | 不需要（真车路线已通） |
+
+**Phase 3-C 全通（2026-10-11，奥迪实车验收）**：iAP2 → AirPlay 配对 → 视频推流 →
+触摸回传 → 虚拟屏注入全链路可交互。本日攻坚战果（细节见 `docs/PROTOCOL-NOTES.md` §9c）：
+
+1. **AirPlay 配对 403 破案**：配对请求缺 Apple 标识头（`Content-Type: application/pairing+tlv8` +
+   `X-Apple-HKP: 2`、pair-verify 加 `X-Apple-PD: 1`，对照 catplay PairingHelperTx 逐字）。
+   补齐后 pair-setup/pair-verify 全 200，车机保存长期公钥。
+2. **屏幕流 400 破案**：SETUP 必须通告**真实 UDP 计时端口**（TimingServer，RTCP NTP 应答）
+   且 features 发**完整 iPhone 能力清单**（接收端按「车机支持 ∩ 手机提议」算交集，
+   只提 videoPlayback 会得到空集 → 视频管线不启用）；modesChanged 资源声明先行；
+   UA/sourceVersion 用 iPhone 自报值（566.25.21），勿用车机的。
+3. **会话 10s 拆链破案**：双心跳缺一不可——keepAlive UDP ping（车机 keepAlivePort，10s 周期）
+   + `POST /feedback`（1s 周期，catplay FEEDBACK_INTERVAL）。
+4. **触摸链路（本日最后战场，五连破）**：
+   - 车机命令必须走**事件通道 socket** 上的 `POST /command`（fire-and-forget、独立 CSeq、
+     Events 密钥），发在 RTSP 控制连接上车机收不到（DiPlay sendCommandLocked 实证）
+   - `hidSetInputMode`（uuid 原样字符串回传）武装 HID 后车机才开始发触摸
+   - 奥迪 `/info hidDevices[].uuid` 是**字符串** "0"/"1"（触摸=uuid 1 eso_touchScreen，
+     报文 5 字节 `[tip 1bit][X u16LE][Y u16LE]`，坐标上限 1412×654=屏幕分辨率）
+   - 事件通道是双向 RTSP：**每条来向请求立即回 200**，否则车机请求管道塞满判通道死亡
+     （表现为「能滑一下就断」）
+   - 事件通道 `iAPSendMessage` 承载车机发起的**虚拟 iAP2 链路**（marker=DETECT 一问一答，
+     车机是客户端发 SYN——服务器重发 DETECT 会把它打回 Detecting）
+5. **稳定性三修**：BT 客户端线程世代号（防僵尸并发）、ctrl mDNS 注册跟随网络绑定
+   （换网/绑定后 force 重注册，listener 每次新建）、mDNS 结果按车机网段过滤
+   （防手机热点共享把电脑 AirPlay 当车机）。
+6. **调试流程坑（记一辈子）**：`adb install -r` 不杀旧进程——旧 dex 继续跑，
+   「修复无效」时先 force-stop 重启；验证时进程代次（`ps -T` 线程数）
+   与 APK 内字符串（解包 dex grep）都要查。
 
 **Phase 3 实车突破（2026-10-09，Audi_MMI_6318 / MHI3_AS_AU_P3801，见 `docs/PROTOCOL-NOTES.md` §9b）**：
 与测试台（DiPlay）相比，奥迪 MIB3 有六处关键差异，逐一修正后 iAP2 全链路首次贯通：

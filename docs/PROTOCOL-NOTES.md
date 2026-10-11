@@ -218,6 +218,28 @@ nonce(12B) = 4 字节零 + 尾 8 字节小端计数（逐包递增）
 （Android 11+ 应用层只能拿到占位 `02:00:00:00:00:00`）。
 Shizuku shell 侧读法：`content query --uri content://settings/secure/bluetooth_address`。
 
+## 9c. 奥迪 MIB3 全通记录（2026-10-11，Phase 3-C 验收）
+
+iAP2 → AirPlay 配对 → 视频推流 → 触摸回传 → 虚拟屏注入，全链路可交互。
+本日在 §9b 基础上攻克的最后一批协议差异：
+
+| 环节 | 根因 | 修复 |
+|---|---|---|
+| pair-setup/pair-verify 403 | 配对请求缺 Apple 标识头 | `Content-Type: application/pairing+tlv8` + `X-Apple-HKP: 2`（pair-verify 再加 `X-Apple-PD: 1`）；M1 加 Method=None(0)+State(1) TLV |
+| 屏幕流 SETUP 400 | ① timingPort=0 ② features 只提 videoPlayback（接收端算交集得空） ③ 缺资源声明 ④ 身份自报用车机版本 | TimingServer（32B RTCP NTP，pt=0xD2 请求/0xD3 应答，回显 t3+本地单调钟）；CONTROLLER_FEATURES 完整清单（uiContext/viewAreas/…共 14 项）；SETUP 前发 modesChanged（resourceID 1/2 entity=1）；UA/sourceVersion=iPhone 自报 566.25.21 + osName/osBuild 等全字段 |
+| 会话 ~10s 被拆 | 缺双心跳 | keepAlive UDP 4B ping →车机 keepAlivePort（10s）；POST /feedback 空体（1s）。两者独立看门狗 |
+| 触摸无报文（一） | 车机命令路径错 | 命令必须发**事件通道 socket** 上的 POST /command（Events 密钥、独立 CSeq、fire-and-forget）；RTSP 控制连接上的 200 是假确认 |
+| 触摸无报文（二） | 未武装 HID | SETUP 后对 /info hidDevices[].uuid 逐个发 hidSetInputMode {hidInputMode:0, uuid}；**奥迪 uuid 是字符串 "0"/"1"**（DiPlay 是整数） |
+| 触摸无报文（三） | 事件通道是双向 RTSP | 每条来向请求立即回 RTSP/1.0 200 OK（加密）；不应答→车机塞 3 条就断通道（「能滑一下」） |
+| 触摸坐标 | 奥迪 HID 描述符 | uuid=1 eso_touchScreen：5 字节 `[tip 1bit][X u16LE][Y u16LE]`，X≤1412/Y≤654=屏幕分辨率绝对坐标；uuid=0 是 Consumer 媒体键（非触摸） |
+| 虚拟 iAP2 链路 | iAPSendMessage 语义 | 事件通道 iAPSendMessage.data = 链路层字节流；marker=DETECT，车机（客户端）每 200ms 重发、等服务器回一次 DETECT 后发 SYN；服务器重发 DETECT 会把客户端打回 Detecting |
+| 0x4E0E 杀 BT 链路 | 车机接受但不 ACK | sendControl(awaitAck=false) 发后不管；0x4300 同改 |
+| mDNS 抓错目标 | 手机开热点共享 | 按「本机 IP /24 前缀」过滤 _airplay._tcp 结果；mDNS 失败时网关兜底（网关=车机，端口 7000） |
+
+**调试流程坑**：`adb install -r` 不杀旧进程（旧 dex 继续跑，修复「无效」）；
+NsdManager unregisterService 异步（复用 listener 报 already in use，每次注册新建）；
+ctrl mDNS 注册必须发生在 bindProcessToNetwork **之后**（组播跟随进程绑定网络）。
+
 ## 10. 参考文件速查
 
 > 表中路径均指 `reference/` 下**代码精读来源**（xcertplay 与 DiPlay 同源，
