@@ -32,6 +32,7 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
+    private lateinit var shellStateText: TextView
     private lateinit var logText: TextView
     private lateinit var ssidInput: EditText
 
@@ -733,6 +734,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // ---- Shell 全局状态面板（调试/复位）----
+        // 展示调试期间可能被 shell 改动过、且影响全局的项（letterbox 宽高比由本 App
+        // 会话期间设置；force_resizable_activities 为开发者选项；overlay 为叠加屏实验
+        // 残留；wm size/density 为主屏覆盖；CarPlay 虚拟屏为会话/残留清单）。
+        // 「设为默认值」一键复位全部（下次连接会自动重新应用会话调优）。
+        shellStateText = findViewById(R.id.shellStateText)
+        findViewById<Button>(R.id.btnShellRefresh).setOnClickListener { refreshShellState() }
+        findViewById<Button>(R.id.btnShellReset).setOnClickListener { resetShellState() }
+        refreshShellState()
+
         // 日志开关（默认开；关闭后不采集、不显示日志区域；选择持久化）
         val logSwitch = findViewById<android.widget.CheckBox>(R.id.switchLog)
         val logHeader = findViewById<android.view.View>(R.id.logHeader)
@@ -808,6 +819,110 @@ class MainActivity : AppCompatActivity() {
             statusText.text = "wifi=${wifiConnector.currentNetwork != null} " +
                 "bt=${bluetoothServer.isRunning} ctrl=${ctrlAdvertiser.port > 0}"
         }
+    }
+
+    /**
+     * 解析 dumpsys display 中的 CarPlay 虚拟屏：返回 (displayId, 名称)。
+     * 注意 uniqueId 形如 virtual:com.android.shell,2000,CarPlayDock,36——尾数 36 是
+     * 代次计数器而非显示屏 ID；真实 ID 在 "displayId=39, uniqueId='…'" 段里。
+     */
+    private fun parseCarPlayDisplays(dump: String): List<Pair<Int, String>> =
+        Regex("displayId=(\\d+), uniqueId='[^']*CarPlay(Dock|App)")
+            .findAll(dump)
+            .map { it.groupValues[1].toInt() to "CarPlay${it.groupValues[2]}" }
+            .distinctBy { it.first }
+            .toList()
+
+    /** 读取 shell 全局状态（后台线程 + UI 回填）。 */
+    private fun refreshShellState() {
+        val view = shellStateText
+        view.text = "读取中…"
+        Thread {
+            if (com.lizhihua.carplaysender.shizuku.ShizukuGate.state(this) !=
+                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
+            ) {
+                runOnUiThread { view.text = "Shizuku 未就绪——shell 状态读取需要 Shizuku" }
+                return@Thread
+            }
+            fun sh(cmd: String) = com.lizhihua.carplaysender.shizuku.Shell.exec(cmd, 4_000L).output
+            val letterbox = Regex("Aspect ratio:\\s*([0-9.]+)")
+                .find(sh("cmd window get-letterbox-style"))?.groupValues?.get(1) ?: "?"
+            val forceResizable = sh("settings get global force_resizable_activities").ifBlank { "null" }
+            val overlay = sh("settings get global overlay_display_devices").ifBlank { "null" }
+            val wmSize = sh("wm size").replace("\n", " / ").ifBlank { "?" }
+            val wmDensity = sh("wm density").replace("\n", " / ").ifBlank { "?" }
+            val displays = parseCarPlayDisplays(sh("dumpsys display"))
+                .joinToString(", ") { "${it.second}(${it.first})" }
+            val timeout = sh("settings get system screen_off_timeout").ifBlank { "?" }
+            val text = buildString {
+                appendLine("letterbox 宽高比: $letterbox  （1.05=会话调优生效；0.0=系统默认）")
+                appendLine("force_resizable: $forceResizable  （平板模式实验；默认 null/0）")
+                appendLine("overlay_display_devices: $overlay  （叠加屏实验残留；应为 null）")
+                appendLine("wm size: $wmSize")
+                appendLine("wm density: $wmDensity")
+                appendLine("CarPlay 虚拟屏: " + displays.trim().replace("\n", ", ").ifEmpty { "无" })
+                appendLine("screen_off_timeout: $timeout  （App 常亮功能管理）")
+            }
+            runOnUiThread { view.text = text.trim() }
+        }.start()
+    }
+
+    /** 一键把 shell 全局状态复位为系统默认值（含残留虚拟屏释放，保留当前会话屏）。 */
+    private fun resetShellState() {
+        val view = shellStateText
+        view.text = "复位中…"
+        Thread {
+            if (com.lizhihua.carplaysender.shizuku.ShizukuGate.state(this) !=
+                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
+            ) {
+                runOnUiThread { view.text = "Shizuku 未就绪——shell 复位需要 Shizuku" }
+                return@Thread
+            }
+            fun sh(cmd: String) = com.lizhihua.carplaysender.shizuku.Shell.exec(cmd, 5_000L)
+            val steps = listOf(
+                "letterbox 宽高比" to "cmd window reset-letterbox-style aspectRatio",
+                "overlay 叠加屏" to "settings delete global overlay_display_devices",
+                "force_resizable" to "settings delete global force_resizable_activities",
+                "wm size" to "wm size reset",
+                "wm density" to "wm density reset",
+            )
+            val results = steps.map { (name, cmd) ->
+                val r = sh(cmd)
+                if (r.ok) "✓ $name" else "✗ $name（${r.output.take(40)}）"
+            }
+            // 残留虚拟屏释放：保留当前会话的 dock/app 屏，其余 CarPlay* 屏逐一释放
+            val keep = setOf(
+                com.lizhihua.carplaysender.launcher.VirtualLauncher.dockDisplayId,
+                com.lizhihua.carplaysender.launcher.VirtualLauncher.appDisplayId,
+            )
+            // uniqueId 尾数是代次计数器（≠ display id）！实际 id 取 "displayId=NN, uniqueId=…CarPlayXxx"
+            val ids = parseCarPlayDisplays(sh("dumpsys display").output)
+                .map { it.first }
+                .filter { it !in keep }
+                .toList()
+            // UserService 懒绑定：新进程里 service 可能还是 null——先 ensure 并短等
+            var svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
+            if (svc == null && ids.isNotEmpty()) {
+                com.lizhihua.carplaysender.shizuku.CarInputClient.ensure(this)
+                val deadline = android.os.SystemClock.uptimeMillis() + 3_000L
+                while (svc == null && android.os.SystemClock.uptimeMillis() < deadline) {
+                    Thread.sleep(150)
+                    svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
+                }
+            }
+            val bound = svc
+            val released = if (bound == null) 0 else ids.count { id ->
+                runCatching { bound.releaseDisplay(id) }.getOrDefault(false)
+            }
+            val summary = results.joinToString("；") + "；残留屏释放 $released/${ids.size}"
+            log("SHELL-RESET: $summary")
+            runOnUiThread {
+                view.text = "复位结果：\n" + results.joinToString("\n") +
+                    "\n残留虚拟屏: 释放 $released/${ids.size}（保留当前会话屏）\n" +
+                    "提示：letterbox 调优会在下次连接时自动重新应用"
+            }
+            refreshShellState()
+        }.start()
     }
 
     /** 悬浮窗权限请求：先弹说明弹窗，用户确认后再跳系统设置。 */
