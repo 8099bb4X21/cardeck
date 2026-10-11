@@ -64,6 +64,11 @@ object Iap2MessageIds {
     const val START_COMMUNICATIONS_UPDATES = 0x4157
     const val START_CALL_STATE_UPDATES = 0x4154
 
+    // ---- ExternalAccessory 会话（链路 2 号会话承载 EA 数据；触摸 HID 高概率载体）----
+    const val EA_OPEN_SESSION = 0xEA00   // 手机 → 配件（奥迪可收清单明确支持）
+    const val EA_CLOSE_SESSION = 0xEA01  // 手机 → 配件
+    const val EA_SESSION_STATUS = 0xEA03 // 配件 → 手机（奥迪发送清单明确声明）
+
     fun nameOf(messageId: Int): String = when (messageId) {
         START_IDENTIFICATION -> "StartIdentification"
         IDENTIFICATION_INFORMATION -> "IdentificationInformation"
@@ -79,6 +84,9 @@ object Iap2MessageIds {
         DEVICE_HID_REPORT -> "DeviceHIDReport"
         ACCESSORY_HID_REPORT -> "AccessoryHIDReport"
         STOP_HID -> "StopHID"
+        EA_OPEN_SESSION -> "StartEASession"
+        EA_CLOSE_SESSION -> "StopEASession"
+        EA_SESSION_STATUS -> "EASessionStatus"
         else -> "0x%04X".format(messageId)
     }
 }

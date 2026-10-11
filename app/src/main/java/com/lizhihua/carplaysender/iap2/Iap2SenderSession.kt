@@ -105,6 +105,18 @@ class Iap2SenderSession(
         send(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
         log("iap2 tx=0x1d02 identification-accepted")
 
+        // ---- EA 会话启动（车机可收清单明确列有 0xEA00；奥迪 0x1D01 声明了
+        // de.audi.mmicconnectdatatransfer / com.audi.cpp.eadata0/1 三个 EA 协议——
+        // 触摸 HID 的高概率载体。此前从未启动过 EA 会话，车机因此从不发 EA 数据）----
+        val eaProtocols = parseEaProtocols(identification)
+        for ((protocolId, name) in eaProtocols) {
+            sendFireAndForget(
+                Iap2MessageIds.EA_OPEN_SESSION,
+                Iap2Csm.u8(0, protocolId) + Iap2Csm.u16(1, protocolId),
+            )
+            log("iap2 tx=0xea00 startEASession protocol=$protocolId name=$name")
+        }
+
         // ---- MFi（跳过校验：0xAA05 自报成功）----
         val identityText = identityText(identification)
         val legacyCar = LEGACY_RECEIVER_MARKERS.any { identityText.contains(it) }
@@ -461,8 +473,25 @@ class Iap2SenderSession(
         )
     }
 
-    private fun logIdentification(frame: Iap2Csm.Frame) {
+    /**
+     * 从 0x1D01 的 ExternalAccessoryProtocol 组件（参数组 10/11/12）解析 EA 协议：
+     * 子参数 0 = 协议号（u8）、1 = 协议名。对照 DiPlay 同款构造（u8(0,index)+string(1,name)+u8(2,0)）。
+     */
+    private fun parseEaProtocols(frame: Iap2Csm.Frame): List<Pair<Int, String>> {
+        val out = ArrayList<Pair<Int, String>>()
         val params = Iap2Csm.parseParams(frame.body).associateBy { it.id }
+        for (groupId in intArrayOf(10, 11, 12)) {
+            val value = params[groupId]?.value ?: continue
+            val sub = Iap2Csm.parseParams(value).associateBy { it.id }
+            val protocolId = sub[0]?.value?.firstOrNull()?.toInt()?.and(0xFF) ?: continue
+            val name = sub[1]?.value?.asStringOrEmpty() ?: "?"
+            out += protocolId to name
+            log("iap2 0x1d01 EA 组件[$groupId] protocol=$protocolId name=$name")
+        }
+        return out
+    }
+
+    private fun logIdentification(frame: Iap2Csm.Frame) {        val params = Iap2Csm.parseParams(frame.body).associateBy { it.id }
         val name = params[0]?.value?.asStringOrEmpty()
         val model = params[1]?.value?.asStringOrEmpty()
         val manufacturer = params[2]?.value?.asStringOrEmpty()

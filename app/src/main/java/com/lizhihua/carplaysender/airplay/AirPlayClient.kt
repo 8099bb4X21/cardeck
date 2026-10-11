@@ -311,13 +311,32 @@ class AirPlayClient(
             return null
         }
         // 拉取主显示屏参数（跟随接收端屏幕方向；横屏车机应推横屏画面，触摸坐标也按此对齐）
+        var infoRoot: Map<*, *>? = null
         val display = try {
             val (_, infoBody) = request("GET", "/info", ByteArray(0))
             val info = BinaryPlist.parse(infoBody) as? Map<*, *>
+            infoRoot = info
             val displays = info?.get("displays") as? List<*>
             displays?.firstOrNull() as? Map<*, *>
         } catch (_: Exception) {
             null
+        }
+        // /info 全量转储：找奥迪私有的数据流 UUID（type-130 的 clientTypeUUID 候选）、
+        // HID 设备描述（触摸）、以及任何我们没实现的能力声明
+        infoRoot?.let { root ->
+            val skipped = setOf("displays")
+            val summary = root.entries.joinToString("; ") { (key, value) ->
+                if (key in skipped) "$key=[${(value as? List<*>)?.size ?: "?"}项]" else "$key=${value.toString().take(200)}"
+            }
+            log("AIRPLAY: /info 字段: $summary")
+            (root["displays"] as? List<*>)?.forEachIndexed { index, d ->
+                log("AIRPLAY: /info displays[$index]=$d")
+            }
+            for (hidKey in listOf("hids", "hidDevices", "hid")) {
+                (root[hidKey] as? List<*>)?.forEachIndexed { index, h ->
+                    log("AIRPLAY: /info $hidKey[$index]=$h")
+                }
+            }
         }
         val info = SetupInfo(
             eventPort = portOf(root["eventPort"]),
