@@ -38,7 +38,7 @@ object TouchRouter {
 
         val launcher = com.lizhihua.carplaysender.launcher.VirtualLauncher
         val dockW = launcher.dockWidthPx
-        if (dockW <= 0 || launcher.appDisplayId < 0) return
+        if (dockW <= 0 || launcher.appDisplayId < 0 || launcher.dockDisplayId < 0) return
         var svc = CarInputClient.service
         if (svc == null) {
             // 主动触发重绑（手机重启/Shizuku 重启后 binder 丢失）
@@ -54,15 +54,29 @@ object TouchRouter {
             return
         }
         failStreak = 0
-        // 主画面坐标 → 分流：dock 区（x < dockW）→ dock 屏；其余 → 应用屏（x 平移）
-        val inDock = contact.xPixels < dockW
-        val targetDisplay = if (inDock) launcher.dockDisplayId else launcher.appDisplayId
+        // 主画面坐标 → 分流：
+        //  横屏：dock 左侧竖条（x < dockW），app 在右（x 平移 dockW）
+        //  竖屏：dock 底部横条（y > appHeight），app 在上
+        val inDock: Boolean
+        val targetDisplay: Int
+        val localX: Int
+        val localY: Int
+        if (launcher.dockAtBottom) {
+            val appH = launcher.appHeightPx
+            inDock = contact.yPixels >= appH
+            targetDisplay = if (inDock) launcher.dockDisplayId else launcher.appDisplayId
+            localX = contact.xPixels
+            localY = if (inDock) contact.yPixels - appH else contact.yPixels
+        } else {
+            inDock = contact.xPixels < dockW
+            targetDisplay = if (inDock) launcher.dockDisplayId else launcher.appDisplayId
+            localX = if (inDock) contact.xPixels else contact.xPixels - dockW
+            localY = contact.yPixels
+        }
         if (targetDisplay < 0) {
             diag("目标屏无效 dock=${launcher.dockDisplayId} app=${launcher.appDisplayId}")
             return
         }
-        val localX = if (inDock) contact.xPixels else contact.xPixels - dockW
-        val localY = contact.yPixels
         try {
             val ok: Boolean = when {
                 contact.down && !pressed -> {

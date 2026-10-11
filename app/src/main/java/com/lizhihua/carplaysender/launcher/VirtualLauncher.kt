@@ -58,9 +58,24 @@ object VirtualLauncher {
     var appDisplayId: Int = -1
         private set
 
-    /** dock 在主合成画面中占据的像素宽度（TouchRouter 分流阈值）。 */
+    /** dock 在主合成画面中占据的像素宽度（TouchRouter 分流阈值；横屏=左侧竖条宽）。 */
     @Volatile
     var dockWidthPx: Int = 0
+        private set
+
+    /** 竖屏车机（屏幕高>宽）：dock 改为底部横条。 */
+    @Volatile
+    var dockAtBottom: Boolean = false
+        private set
+
+    /** dock 横条高度（竖屏；TouchRouter 按 y 分流）。 */
+    @Volatile
+    var dockHeightPx: Int = 0
+        private set
+
+    /** 应用区高度（竖屏；y < appHeightPx 属于应用屏）。 */
+    @Volatile
+    var appHeightPx: Int = 0
         private set
 
     private var dockDisplay: VirtualDisplay? = null
@@ -82,11 +97,25 @@ object VirtualLauncher {
     ): Boolean {
         detach()
         val density = densityDpi / 160f
-        dockWidthPx = (DOCK_WIDTH_DP * density).toInt().coerceAtLeast(80)
-        val appWidth = (totalWidth - dockWidthPx).coerceAtLeast(200)        // 横屏应用屏用「手机密度」：竖屏锁定应用被 letterbox 的窗口 ≈ 390dp 宽（正常手机布局），
+        val thicknessPx = (DOCK_WIDTH_DP * density).toInt().coerceAtLeast(80)
+        // 车机方向决定 dock 位置：横屏 → 左侧竖条；竖屏 → 底部横条（2026-10-11 用户要求）
+        dockAtBottom = totalHeight > totalWidth
+        val appWidth: Int
+        if (dockAtBottom) {
+            dockWidthPx = totalWidth
+            dockHeightPx = thicknessPx
+            appHeightPx = (totalHeight - thicknessPx).coerceAtLeast(200)
+            appWidth = totalWidth
+        } else {
+            dockWidthPx = thicknessPx
+            dockHeightPx = totalHeight
+            appHeightPx = totalHeight
+            appWidth = (totalWidth - thicknessPx).coerceAtLeast(200)
+        }
+        // 横屏应用屏用「手机密度」：竖屏锁定应用被 letterbox 的窗口 ≈ 390dp 宽（正常手机布局），
         // 字号/间距不再是「平板放大版」；竖屏应用屏（本就手机比例）保持原密度
-        val appDensity = if (appWidth > totalHeight) {
-            val letterboxWidthPx = totalHeight * 9f / 16f
+        val appDensity = if (appWidth > appHeightPx && !dockAtBottom) {
+            val letterboxWidthPx = appHeightPx * 9f / 16f
             (letterboxWidthPx / 390f * 160f).toInt().coerceIn(240, densityDpi)
         } else {
             densityDpi
@@ -108,7 +137,7 @@ object VirtualLauncher {
         val useTrusted = svc != null
         log("LAUNCHER: 虚拟屏模式=${if (useTrusted) "受信屏(shell)" else "应用屏(回退)"}")
 
-        val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight)
+        val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom)
         this.composer = composer
         val displaysCreated = arrayOf(false)
         composer.onSurfacesReady = { dockSurface, appSurface ->
@@ -127,8 +156,8 @@ object VirtualLauncher {
                                 .onSuccess { log("LAUNCHER: 已释放残留虚拟屏 ${stale.name}#${stale.displayId}") }
                         }
                     Thread.sleep(150) // 等系统完成注销
-                    val dockId = svc!!.createDisplay("CarPlayDock", dockWidthPx, totalHeight, densityDpi, dockSurface)
-                    val appId = svc!!.createDisplay("CarPlayApp", appWidth, totalHeight, appDensity, appSurface)
+                    val dockId = svc!!.createDisplay("CarPlayDock", dockWidthPx, dockHeightPx, densityDpi, dockSurface)
+                    val appId = svc!!.createDisplay("CarPlayApp", appWidth, appHeightPx, appDensity, appSurface)
                     if (dockId >= 0 && appId >= 0) {
                         dockDisplayId = dockId
                         appDisplayId = appId
@@ -149,7 +178,7 @@ object VirtualLauncher {
                 dockDisplay = dm.createVirtualDisplay(
                     "CarPlayDock",
                     dockWidthPx,
-                    totalHeight,
+                    dockHeightPx,
                     densityDpi,
                     dockSurface,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
@@ -160,7 +189,7 @@ object VirtualLauncher {
                 appDisplay = dm.createVirtualDisplay(
                     "CarPlayApp",
                     appWidth,
-                    totalHeight,
+                    appHeightPx,
                     appDensity,
                     appSurface,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
@@ -175,7 +204,7 @@ object VirtualLauncher {
             displaysCreated[0] = dockDisplayId >= 0 && appDisplayId >= 0
         }
         return try {
-            composer.start(dockWidthPx, totalHeight, appWidth, totalHeight)
+            composer.start(dockWidthPx, dockHeightPx, appWidth, appHeightPx)
             if (!displaysCreated[0]) {
                 log("LAUNCHER: 虚拟屏创建失败")
                 detach()
@@ -223,6 +252,9 @@ object VirtualLauncher {
         dockDisplayId = -1
         appDisplayId = -1
         dockWidthPx = 0
+        dockHeightPx = 0
+        appHeightPx = 0
+        dockAtBottom = false
     }
 
     private fun startOn(displayId: Int, component: String): Boolean {

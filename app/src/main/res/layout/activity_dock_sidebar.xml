@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- CarPlay 侧栏（左侧竖条）：顶部时间+电量，中部运行中应用，底部回桌面。
+     宽屏车机（横屏 composite）时 dock 在左侧使用本布局；对照 CarPlay 截图左侧栏。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center_horizontal"
+    android:background="#000000"
+    android:paddingLeft="2dp"
+    android:paddingRight="2dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="6dp">
+
+    <TextView
+        android:id="@+id/dockClock"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:maxLines="1"
+        android:textColor="#FFFFFF"
+        android:textStyle="bold"
+        android:autoSizeTextType="uniform"
+        android:autoSizeMinTextSize="5sp"
+        android:autoSizeMaxTextSize="14sp"
+        android:includeFontPadding="false" />
+
+    <TextView
+        android:id="@+id/dockBatteryText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="3dp"
+        android:gravity="center"
+        android:textColor="#B0B0B8"
+        android:autoSizeTextType="uniform"
+        android:autoSizeMinTextSize="6sp"
+        android:autoSizeMaxTextSize="10sp"
+        android:includeFontPadding="false" />
+
+    <FrameLayout
+        android:id="@+id/dockBatteryBar"
+        android:layout_width="30dp"
+        android:layout_height="3dp"
+        android:layout_marginTop="4dp"
+        android:background="#3A3A3C">
+
+        <View
+            android:id="@+id/dockBatteryFill"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:background="#34C759" />
+    </FrameLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="8dp"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:id="@+id/dockApps"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center_horizontal" />
+    </ScrollView>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1px"
+        android:layout_marginBottom="4dp"
+        android:background="#3A3A3C" />
+
+    <TextView
+        android:id="@+id/dockHome"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:text="⌂"
+        android:textColor="#FFFFFF"
+        android:textSize="22sp" />
+</LinearLayout>

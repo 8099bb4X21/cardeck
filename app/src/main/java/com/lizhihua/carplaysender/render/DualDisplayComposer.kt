@@ -26,6 +26,8 @@ class DualDisplayComposer(
     private val output: Surface,
     private val outWidth: Int,
     private val outHeight: Int,
+    /** true：dock 是底部横条（竖屏车机）；false：dock 是左侧竖条（横屏车机）。 */
+    private val dockAtBottom: Boolean = false,
 ) {
     companion object {
         private const val TAG = "DualComposer"
@@ -182,9 +184,17 @@ class DualDisplayComposer(
                 app.hasContent = true
                 app.surfaceTexture.updateTexImage()
             }
-            if (dock.hasContent) drawInput(dock, 0f, dockW.toFloat(), 0f, outHeight.toFloat())
-            if (app.hasContent) {
-                drawInput(app, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
+            if (dockAtBottom) {
+                // 竖屏：dock 横条贴底（GL 坐标 y=0 为底边），app 在其余区域
+                if (dock.hasContent) drawInput(dock, 0f, outWidth.toFloat(), 0f, dockH.toFloat())
+                if (app.hasContent) {
+                    drawInput(app, 0f, outWidth.toFloat(), dockH.toFloat(), outHeight.toFloat())
+                }
+            } else {
+                if (dock.hasContent) drawInput(dock, 0f, dockW.toFloat(), 0f, outHeight.toFloat())
+                if (app.hasContent) {
+                    drawInput(app, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
+                }
             }
             if (fullRedraw || dock.hasContent || app.hasContent) {
                 EGL14.eglSwapBuffers(display, outputSurface)
