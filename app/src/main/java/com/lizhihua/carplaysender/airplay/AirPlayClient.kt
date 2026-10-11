@@ -218,8 +218,8 @@ class AirPlayClient(
      * 奥迪 display features=0x08（高保真触摸）+ hidDevices 齐备，触摸无报文的最大嫌疑
      * 是缺这一步武装。
      */
-    fun sendHidSetInputMode(deviceUuidHex: String, mode: Int = 0): Boolean = try {
-        val body = BinaryPlist.encode(
+    fun sendHidSetInputMode(deviceUuidHex: String, mode: Int = 0): Boolean {
+        val sent = postEventCommand(
             linkedMapOf(
                 "type" to "hidSetInputMode",
                 "params" to linkedMapOf<String, Any?>(
@@ -228,12 +228,8 @@ class AirPlayClient(
                 ),
             ),
         )
-        val (statusLine, _) = request("POST", "/command", body, contentType = "application/x-apple-binary-plist")
-        log("AIRPLAY: hidSetInputMode uuid=$deviceUuidHex mode=$mode [$statusLine]")
-        statusLine.contains("200")
-    } catch (error: IOException) {
-        log("AIRPLAY: hidSetInputMode 失败 - ${error.message}")
-        false
+        log("AIRPLAY: hidSetInputMode(事件通道) uuid=$deviceUuidHex mode=$mode ok=$sent")
+        return sent
     }
 
     /**
@@ -242,6 +238,51 @@ class AirPlayClient(
      * 屏幕流 SETUP 直接 400（资源仲裁未通过）。appStates：话机/导航归 None（0）、
      * 语音 None（-1）；resources：主屏(1)/主音频(2)，entity=permanent=Controller(1)。
      */
+    // ---- 事件通道命令发送（对照 DiPlay sendCommandLocked）----
+    // 车机命令双向都走事件通道 socket 上的 POST /command（不是 RTSP 控制连接！）：
+    // iAPSendMessage（虚拟链路字节）、hidSetInputMode、modesChanged 等。
+    // 异步 fire-and-forget：不等应答（DiPlay 同款写法），独立 CSeq 计数。
+
+    @Volatile
+    private var eventCommandSocket: Socket? = null
+
+    @Volatile
+    private var eventCommandCipher: ControlCipher? = null
+
+    private val eventCommandLock = Any()
+    private var eventCseq = 0
+
+    /** 事件通道建立后由 connectEventChannel 调用。 */
+    private fun registerEventCommandChannel(socket: Socket, cipher: ControlCipher) {
+        eventCommandSocket = socket
+        eventCommandCipher = cipher
+    }
+
+    /** 在事件通道上发 POST /command（加密）。通道未就绪时返回 false。 */
+    fun postEventCommand(command: Map<String, Any?>): Boolean {
+        val socket = eventCommandSocket ?: return false
+        val cipher = eventCommandCipher ?: return false
+        return try {
+            synchronized(eventCommandLock) {
+                eventCseq++
+                val body = BinaryPlist.encode(command)
+                val head = "POST /command RTSP/1.0\r\n" +
+                    "Content-Type: application/x-apple-binary-plist\r\n" +
+                    "Content-Length: \${body.size}\r\n" +
+                    "CSeq: \$eventCseq\r\n\r\n"
+                val bytes = cipher.encrypt(head.toByteArray(Charsets.US_ASCII) + body)
+                socket.getOutputStream().apply {
+                    write(bytes)
+                    flush()
+                }
+            }
+            true
+        } catch (error: IOException) {
+            log("EVENT: 命令发送失败 - \${error.message}")
+            false
+        }
+    }
+
     fun assertModes(): Boolean {
         val body = BinaryPlist.encode(
             linkedMapOf(
@@ -611,25 +652,21 @@ class AirPlayClient(
      * 手机→车机 iAP2 消息：事件通道 iAPSendMessage 命令（对照 DiPlay sendIapMessage，
      * params 信封 + data 字节，catplay CommandIApSendMessage 同款）。
      */
-    fun sendIap(data: ByteArray): Boolean = try {
-        val body = BinaryPlist.encode(
+    fun sendIap(data: ByteArray): Boolean {
+        val sent = postEventCommand(
             linkedMapOf(
                 "type" to "iAPSendMessage",
                 "params" to linkedMapOf<String, Any?>("data" to data),
             ),
         )
-        val (statusLine, _) = request("POST", "/command", body, contentType = "application/x-apple-binary-plist")
         sendIapCount++
-        if (sendIapCount <= 5 || !statusLine.contains("200")) {
+        if (sendIapCount <= 10) {
             log(
-                "IAPLINK: tx ${data.size}B [$statusLine] hex=" +
+                "IAPLINK: tx(事件通道) ${data.size}B ok=$sent hex=" +
                     data.joinToString(" ") { "%02x".format(it) }.take(120),
             )
         }
-        statusLine.contains("200")
-    } catch (error: IOException) {
-        log("TUNNEL: sendIap 失败 - ${error.message}")
-        false
+        return sent
     }
 
     // ---- 事件通道上的虚拟 iAP2 链路 ----
@@ -1049,6 +1086,7 @@ class AirPlayClient(
                 "Events-Write-Encryption-Key".toByteArray(),
             )
             val cipher = ControlCipher(phoneReadKey, phoneWriteKey)
+            registerEventCommandChannel(socket, cipher)
             Thread({
                 val input = socket.getInputStream()
                 val accumulator = RtspAccumulator()
