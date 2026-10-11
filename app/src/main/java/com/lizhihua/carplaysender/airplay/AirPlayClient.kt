@@ -24,6 +24,12 @@ class AirPlayClient(
     private var socket: Socket? = null
     private var cSeq = 0
 
+    /**
+     * 计时服务（初始 SETUP 通告端口；车机 NTP ping 它同步媒体时钟）。
+     * 懒启动、跨重试常驻（close() 不停它——UDP socket 无会话状态）。
+     */
+    private val timingServer = TimingServer(log)
+
     /** pair-verify 之后启用：所有后续 RTSP 报文整体加密封装。 */
     private var cipher: ControlCipher? = null
     private var cipherPending = ByteArray(0)
@@ -188,18 +194,32 @@ class AirPlayClient(
      * 清单对照 catplay（真车验证的发送端，含 viewAreas/uiContext 等视频必需项）。
      */
     fun runSetup(): SetupInfo? {
+        // 计时端口：catplay 真车实现始终绑定真实 UDP timing server 通告给车机
+        // （媒体时钟同步源）；timingPort=0 曾是我们的屏幕流 400 头号嫌疑。
+        if (!timingServer.start()) {
+            log("AIRPLAY: 计时服务未启动（继续，但媒体时钟无法同步）")
+        }
         val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
         val body = BinaryPlist.encode(
             linkedMapOf(
-                "deviceID" to "02:00:00:00:00:00",
+                "deviceID" to "ff:ee:dd:cc:bb:aa", // catplay 同款假值（车机不校验）
+                "macAddress" to "aa:bb:cc:dd:ee:ff",
                 "name" to "iPhone",
                 "model" to "iPhone14,2",
-                "sourceVersion" to (endpoint.sourceVersion ?: "950.7.1"),
-                "timingPort" to 0L,
+                "osName" to "iPhone OS",
+                "osBuildVersion" to "19A404",
+                "osVersion" to "15.0.2",
+                // iPhone 自己的 AirPlay 版本（catplay 实证值）；此前误用车机的 320.17.7
+                "sourceVersion" to SENDER_SOURCE_VERSION,
+                "timingPort" to timingServer.port.toLong(),
                 "sessionUUID" to java.util.UUID.randomUUID().toString().uppercase(),
+                "sessionCorrelationUUID" to java.util.UUID.randomUUID().toString().uppercase(),
+                "statsCollectionEnabled" to false,
+                "keepAliveLowPower" to true,
                 "features" to CONTROLLER_FEATURES,
             ),
         )
+        log("AIRPLAY: 初始 SETUP body=${body.size}B timingPort=${timingServer.port}")
         val (statusLine, responseBody) = try {
             request(
                 "SETUP",
@@ -322,6 +342,12 @@ class AirPlayClient(
 
         /** 等车机打开 AirPlay 窗口的总时长（用户在车机上点手机图标的等待窗口）。 */
         private const val PAIRING_WINDOW_MILLIS = 120_000L
+
+        /** 发送端自报的 AirPlay 版本（catplay 真车验证值，iOS 15.0.2 时代；勿用车机的版本）。 */
+        private const val SENDER_SOURCE_VERSION = "566.25.21"
+
+        /** 屏幕流延迟（catplay c2a car_manager 实测值）。 */
+        private const val SCREEN_LATENCY_MS = 25L
     }
 
     /**
@@ -446,9 +472,9 @@ class AirPlayClient(
                         "streamConnectionID" to connectionId,
                         // 真实 iPhone / catplay 发送端：uuid 与 latencyMs 都必带。
                         // uuid 必须是接收端 /info displays[] 声明的显示屏 UUID（真车会校验；
-                        // 随机值曾致 Audi 直接 400 拆会话）。latencyMs=50 为镜像常规值。
+                        // 随机值曾致 Audi 直接 400 拆会话）。latencyMs=25 为 catplay 实测值。
                         "uuid" to (displayUuid ?: java.util.UUID.randomUUID().toString()),
-                        "latencyMs" to 50L,
+                        "latencyMs" to SCREEN_LATENCY_MS,
                     ),
                 ),
             ),
@@ -467,7 +493,10 @@ class AirPlayClient(
             return null
         }
         if (!statusLine.contains("200")) {
-            log("AIRPLAY: 流协商应答 [$statusLine]（响应头：${lastResponseHead.replace("\r\n", " | ")}）")
+            log(
+                "AIRPLAY: 流协商应答 [$statusLine]（响应头：${lastResponseHead.replace("\r\n", " | ")}）\n" +
+                    "  ↳ 请求体(${body.size}B)=" + body.joinToString("") { "%02x".format(it) },
+            )
             return null
         }
         val root = try {
@@ -717,7 +746,7 @@ class AirPlayClient(
         client.soTimeout = timeoutMillis
         val head = "$method $path RTSP/1.0\r\n" +
             "CSeq: ${++cSeq}\r\n" +
-            "User-Agent: AirPlay/${endpoint.sourceVersion ?: "950.7.1"}\r\n" +
+            "User-Agent: AirPlay/$SENDER_SOURCE_VERSION\r\n" +
             "Content-Type: $contentType\r\n" +
             extraHeaders.joinToString("") { "${it.first}: ${it.second}\r\n" } +
             "Content-Length: ${body.size}\r\n" +
