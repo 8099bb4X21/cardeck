@@ -205,7 +205,9 @@ class Iap2SenderSession(
         }
 
         // 真机顺序：0x4301 之后回 0x4E0E（传输标识确认）。
-        send(
+        // Audi 实测：车机对该消息**接受但从不 ACK**（其余包毫秒级 ACK）——必须发后不管，
+        // 否则重传看门狗在 +20s 把整条蓝牙链路杀掉（EA 会话/触摸载体随之丢失）。
+        sendFireAndForget(
             Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER,
             Iap2Csm.string(0, bluetoothMac),
         )
@@ -332,6 +334,21 @@ class Iap2SenderSession(
             offset = end
         }
         log("iap2 tx=0x${messageId.toString(16).padStart(4, '0')}")
+    }
+
+    /** [send] 的发后不管变体：链路不因对端不 ACK 此消息而重传/死亡（见 0x4E0E）。 */
+    private fun sendFireAndForget(messageId: Int, body: ByteArray) {
+        val frame = Iap2Csm.encode(messageId, body)
+        val limit = channel.peerMaxControlPayload() ?: (frame.size - 1).coerceAtLeast(1)
+        var offset = 0
+        while (offset < frame.size) {
+            val end = minOf(offset + limit, frame.size)
+            if (!channel.sendControl(frame.copyOfRange(offset, end), awaitAck = false)) {
+                throw IOException("iAP2 链路在发送 0x${messageId.toString(16)} 时关闭")
+            }
+            offset = end
+        }
+        log("iap2 tx=0x${messageId.toString(16).padStart(4, '0')}（发后不管）")
     }
 
     private fun expect(messageId: Int, deadline: Long): Iap2Csm.Frame =

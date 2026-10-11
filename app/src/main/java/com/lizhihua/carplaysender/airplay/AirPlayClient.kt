@@ -359,6 +359,204 @@ class AirPlayClient(
         val streamKey: ByteArray,
     )
 
+    /**
+     * iAP 隧道（type-130 DataStream，对照 DiPlay IapTunnel）：现代 CarPlay 的 iAP2
+     * EA 数据通道——**车机→手机的 iAP2 消息（含触摸 HID）走这条加密 TCP**，
+     * 手机→车机走事件通道 iAPSendMessage 命令（[sendIap]）。
+     * 线格式：ChaCha 帧（2B LE 长度作 AAD + 密文 + 16B tag，nonce=8B LE 计数器，
+     * 密钥 = HKDF(shared, "DataStream-Salt$seed", "DataStream-Output-Encryption-Key")）
+     * ⊃ APTransportPackage（4B BE 总长，32B 头，偏移 16 处 type="comm"）→ body = iAP2 消息。
+     */
+    inner class IapTunnelClient(
+        val socket: Socket,
+        private val readKey: ByteArray,
+        private val logPrefix: String = "TUNNEL",
+    ) {
+        @Volatile
+        var messageCount = 0
+            private set
+
+        /** 车机→手机 iAP2 消息回调（CSM 帧字节）。 */
+        var onIapMessage: ((com.lizhihua.carplaysender.iap2.Iap2Csm.Frame) -> Unit)? = null
+
+        private val parser = com.lizhihua.carplaysender.iap2.Iap2Csm.Parser()
+
+        fun startReading() {
+            Thread({
+                val input = socket.getInputStream()
+                var pending = ByteArray(0)
+                var plaintext = ByteArray(0)
+                val buffer = ByteArray(16 * 1024)
+                try {
+                    while (socket.isClosed == false) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        pending += buffer.copyOf(count)
+                        val decrypted = decryptFrames(pending)
+                        pending = decrypted.second
+                        plaintext += decrypted.first
+                        plaintext = parsePackages(plaintext)
+                    }
+                    log("$logPrefix: 通道关闭（EOF），共 $messageCount 条 iAP2 消息")
+                } catch (error: IOException) {
+                    log("$logPrefix: 读取结束 - ${error.message}")
+                }
+            }, "iap-tunnel-reader").apply {
+                isDaemon = true
+                start()
+            }
+        }
+
+        /** ChaCha 帧解密（与 ControlCipher 同帧格式，独立计数器/密钥）。 */
+        private fun decryptFrames(buffer: ByteArray): Pair<ByteArray, ByteArray> {
+            val output = ArrayList<ByteArray>()
+            var offset = 0
+            while (buffer.size - offset >= 2) {
+                val length = (buffer[offset].toInt() and 0xFF) or ((buffer[offset + 1].toInt() and 0xFF) shl 8)
+                val frameLength = 2 + length + 16
+                if (buffer.size - offset < frameLength) break
+                val aad = buffer.copyOfRange(offset, offset + 2)
+                val sealed = buffer.copyOfRange(offset + 2, offset + frameLength)
+                val plain = AirPlayCrypto.chachaOpen(
+                    readKey,
+                    AirPlayCrypto.nonce64(tunnelReadCounter++),
+                    sealed,
+                    aad,
+                )
+                output += plain
+                offset += frameLength
+            }
+            val rest = buffer.copyOfRange(offset, buffer.size)
+            return if (output.isEmpty()) ByteArray(0) to rest else output.reduce { a, b -> a + b } to rest
+        }
+
+        /** APTransportPackage 解析：4B BE 总长，32B 头，偏移 16 type="comm" → body=iAP2。 */
+        private fun parsePackages(buffer: ByteArray): ByteArray {
+            var offset = 0
+            while (buffer.size - offset >= 32) {
+                val size = ((buffer[offset].toInt() and 0xFF) shl 24) or
+                    ((buffer[offset + 1].toInt() and 0xFF) shl 16) or
+                    ((buffer[offset + 2].toInt() and 0xFF) shl 8) or
+                    (buffer[offset + 3].toInt() and 0xFF)
+                if (size < 32 || buffer.size - offset < size) break
+                val messageType = String(buffer, offset + 16, 4, Charsets.US_ASCII)
+                if (messageType == "comm") {
+                    val body = buffer.copyOfRange(offset + 32, offset + size)
+                    onIapBytes(body)
+                }
+                offset += size
+            }
+            return buffer.copyOfRange(offset, buffer.size)
+        }
+
+        private fun onIapBytes(bytes: ByteArray) {
+            messageCount++
+            val frames = parser.offer(bytes)
+            for (frame in frames) {
+                val hex = bytes.joinToString(" ") { "%02x".format(it) }
+                if (messageCount <= 20) {
+                    log(
+                        "$logPrefix: iAP2 msg #${messageCount} id=0x${frame.messageId.toString(16)} " +
+                            "(${com.lizhihua.carplaysender.iap2.Iap2MessageIds.nameOf(frame.messageId)}) body=${frame.body.size}B " +
+                            "hex=${hex.take(160)}",
+                    )
+                } else if (messageCount % 100 == 0) {
+                    log("$logPrefix: iAP2 msg #${messageCount} id=0x${frame.messageId.toString(16)} body=${frame.body.size}B")
+                }
+                onIapMessage?.invoke(frame)
+            }
+        }
+
+        private var tunnelReadCounter = 0L
+    }
+
+    /**
+     * SETUP type-130 iAP 隧道并连接车机 dataPort。失败返回 null（会话继续，触摸不可用）。
+     * 手机→车机方向用 [sendIap]（事件通道 iAPSendMessage）。
+     */
+    fun runIapTunnel(sharedSecret: ByteArray): IapTunnelClient? {
+        val host = ipv4Host() ?: return null
+        val seed = (System.currentTimeMillis() % 0x7FFF_FFFFL) + 1L
+        val connectionId = java.security.SecureRandom().nextLong() and Long.MAX_VALUE or 1L
+        val body = BinaryPlist.encode(
+            linkedMapOf(
+                "streams" to listOf(
+                    linkedMapOf<String, Any?>(
+                        "type" to 130L,
+                        "clientTypeUUID" to IAP_DATASTREAM_UUID,
+                        "seed" to seed,
+                        "streamConnectionID" to connectionId,
+                    ),
+                ),
+            ),
+        )
+        val (statusLine, responseBody) = try {
+            request("SETUP", "/", body, contentType = "application/x-apple-binary-plist")
+        } catch (error: IOException) {
+            log("TUNNEL: SETUP 失败 - ${error.message}")
+            return null
+        }
+        if (!statusLine.contains("200")) {
+            log("TUNNEL: SETUP 应答 [$statusLine]（响应头：${lastResponseHead.replace("\r\n", " | ")}）")
+            return null
+        }
+        val root = try {
+            BinaryPlist.parse(responseBody) as? Map<*, *>
+        } catch (_: IllegalArgumentException) {
+            null
+        } ?: run {
+            log("TUNNEL: SETUP 应答解析失败")
+            return null
+        }
+        val streams = root["streams"] as? List<*>
+        val stream = streams?.firstOrNull() as? Map<*, *>
+        val dataPort = ((stream?.get("dataPort") as? Long) ?: 0L).toInt() and 0xFFFF
+        if (dataPort == 0) {
+            log("TUNNEL: SETUP 应答无 dataPort（streams=$streams）")
+            return null
+        }
+        val key = AirPlayCrypto.hkdfSha512(
+            sharedSecret,
+            "DataStream-Salt$seed".toByteArray(Charsets.US_ASCII),
+            "DataStream-Output-Encryption-Key".toByteArray(Charsets.US_ASCII),
+        )
+        val tcp = try {
+            Socket()
+        } catch (error: IOException) {
+            return null
+        }
+        return try {
+            tcp.tcpNoDelay = true
+            tcp.connect(java.net.InetSocketAddress(host, dataPort), 5_000)
+            log("TUNNEL: ✓ iAP 隧道已建立 $host:$dataPort（seed=$seed）")
+            val client = IapTunnelClient(tcp, key)
+            client.startReading()
+            client
+        } catch (error: IOException) {
+            log("TUNNEL: TCP 连接失败 - ${error.message}")
+            runCatching { tcp.close() }
+            null
+        }
+    }
+
+    /**
+     * 手机→车机 iAP2 消息：事件通道 iAPSendMessage 命令（对照 DiPlay sendIapMessage，
+     * params 信封 + data 字节，catplay CommandIApSendMessage 同款）。
+     */
+    fun sendIap(data: ByteArray): Boolean = try {
+        val body = BinaryPlist.encode(
+            linkedMapOf(
+                "type" to "iAPSendMessage",
+                "params" to linkedMapOf<String, Any?>("data" to data),
+            ),
+        )
+        val (statusLine, _) = request("POST", "/command", body, contentType = "application/x-apple-binary-plist")
+        statusLine.contains("200")
+    } catch (error: IOException) {
+        log("TUNNEL: sendIap 失败 - ${error.message}")
+        false
+    }
+
     /** 音频流协商结果（RTP over UDP；密钥同视频流规则，盐用音频连接 ID）。 */
     class AudioStreamInfo(
         val streamConnectionId: Long,
@@ -413,6 +611,9 @@ class AirPlayClient(
 
         /** 屏幕流延迟（catplay c2a car_manager 实测值）。 */
         private const val SCREEN_LATENCY_MS = 25L
+
+        /** iAP DataStream 的 clientTypeUUID（DiPlay IAP_DATASTREAM_UUID，真 iPhone 同款）。 */
+        private const val IAP_DATASTREAM_UUID = "E9459FD0-BCAD-4C45-820F-1E72447EF2F2"
     }
 
     /**

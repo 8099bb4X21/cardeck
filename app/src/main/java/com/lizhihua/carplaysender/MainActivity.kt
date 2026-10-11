@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import com.lizhihua.carplaysender.bt.Iap2BluetoothServer
 import com.lizhihua.carplaysender.net.CarPlayCtrlAdvertiser
 import com.lizhihua.carplaysender.net.CarPlayServiceBrowser
+import com.lizhihua.carplaysender.iap2.Iap2MessageIds
 import com.lizhihua.carplaysender.net.WifiCarPlayConnector
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -43,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     private val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private val logBuilder = StringBuilder()
     private var touchLogCount = 0
+    private var iapEventMessageCount = 0
 
     private var videoSender: com.lizhihua.carplaysender.video.VideoSender? = null
     private var audioSender: com.lizhihua.carplaysender.audio.AudioSender? = null
@@ -533,15 +535,20 @@ class MainActivity : AppCompatActivity() {
                                         }
 
                                         "iAPSendMessage" -> {
-                                            // type-130 iAP 隧道（车机 ↔ 手机 EA 消息经事件通道转发）。
-                                            // 先留证据：payload 内容决定后续是否要实现隧道转发。
-                                            val payload = command["iAPData"]
-                                            val streamId = command["streamID"]
-                                            log(
-                                                "EVENT: iAPSendMessage streamID=$streamId " +
-                                                    "payload=${payload?.javaClass?.simpleName ?: "null"} " +
-                                                    (payload as? ByteArray)?.joinToString(" ") { "%02x".format(it) }?.take(200) ?: "",
-                                            )
+                                            // 事件通道上的 iAP2 消息（catplay CommandIApSendMessage：
+                                            // params 信封 + data 字节）。隧道未建时车机走这条路。
+                                            val params = command["params"] as? Map<*, *>
+                                            val data = params?.get("data") as? ByteArray
+                                            if (data == null) {
+                                                log("EVENT: iAPSendMessage 无 data（params=$params）")
+                                            } else {
+                                                iapEventMessageCount++
+                                                val hex = data.joinToString(" ") { "%02x".format(it) }
+                                                log(
+                                                    "EVENT: iAPSendMessage #${iapEventMessageCount} ${data.size}B" +
+                                                        if (iapEventMessageCount <= 10) " hex=${hex.take(200)}" else "",
+                                                )
+                                            }
                                         }
 
                                         "changeModes" -> {
@@ -566,7 +573,20 @@ class MainActivity : AppCompatActivity() {
                                         client.startKeepAlive(host, setup.keepAlivePort!!)
                                     }
                                     client.startFeedbackLoop()
-                                    // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
+                                    // iAP 隧道（type-130）：车机→手机的 iAP2 EA 数据（触摸 HID 载体）。
+                                    // 建立失败不阻塞会话（触摸不可用但视频照常）。
+                                    val tunnel = client.runIapTunnel(keys.sharedSecret)
+                                    tunnel?.onIapMessage = { frame ->
+                                        // 触摸证据采集：先全量记录，格式确认后接 TouchRouter
+                                        if (frame.messageId != 0x0000) {
+                                            val hex = frame.body.joinToString(" ") { "%02x".format(it) }
+                                            log(
+                                                "TUNNEL: rx 0x${frame.messageId.toString(16)} " +
+                                                    "(${Iap2MessageIds.nameOf(frame.messageId)}) ${frame.body.size}B" +
+                                                    if (frame.body.isNotEmpty()) " hex=${hex.take(120)}" else "",
+                                            )
+                                        }
+                                    }                                    // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
                                     // 协议顺序：全部 SETUP 完成后再 RECORD 激活会话；失败不影响主链路。
                                     startAudioChannel(client, keys.sharedSecret, host)
                                     client.record()

@@ -86,10 +86,10 @@ class Iap2LinkChannel(
         synchronized(lock) { engine.peerSynchronization?.maxLength?.minus(Iap2LinkEngine.HEADER_BYTES + 1) }
 
     /** 排入一个完整控制载荷；链路已死返回 false。窗口满时内部积压，由 ACK 驱动发出。 */
-    fun sendControl(bytes: ByteArray): Boolean {
+    fun sendControl(bytes: ByteArray, awaitAck: Boolean = true): Boolean {
         synchronized(lock) {
             if (terminated) return false
-            val accepted = engine.sendControl(bytes, nowMillis())
+            val accepted = engine.sendControl(bytes, nowMillis(), awaitAck)
             drainOutputLocked()
             return accepted
         }

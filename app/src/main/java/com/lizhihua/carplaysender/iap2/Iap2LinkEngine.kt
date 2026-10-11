@@ -90,6 +90,7 @@ class Iap2LinkEngine(
         val payload: ByteArray,
         var retransmissions: Int = 0,
         var deadlineMillis: Long = 0,
+        val awaitAck: Boolean = true,
     )
 
     var state: State = State.IDLE
@@ -210,15 +211,19 @@ class Iap2LinkEngine(
     /**
      * 排入一个完整的控制会话载荷。窗口满时进入积压队列，由 ACK 或 pump 驱动重试。
      * 返回 false 仅代表链路已死。
+     *
+     * [awaitAck]=false：发后不管——不计入未确认清单、不重传，**链路不会因它未被 ACK
+     * 而死亡**。用于 Audi 实测中「接受但从不 ACK」的消息（0x4E0E 传输标识：车机对
+     * 其他包毫秒级 ACK、唯独不认它，重传看门狗曾据此在 +20s 杀掉整条蓝牙链路）。
      */
-    fun sendControl(bytes: ByteArray, nowMillis: Long): Boolean {
+    fun sendControl(bytes: ByteArray, nowMillis: Long, awaitAck: Boolean = true): Boolean {
         if (state == State.DEAD) return false
         val limit = (peerSynchronization?.maxLength ?: 0xFFFF) - HEADER_BYTES - 1
         if (limit <= 0 || bytes.size > limit) {
             die("control payload ${bytes.size} exceeds negotiated limit $limit")
             return false
         }
-        sendBacklog += Packet(0, bytes.copyOf())
+        sendBacklog += Packet(0, bytes.copyOf(), awaitAck = awaitAck)
         drainSendWindow(nowMillis)
         return true
     }
@@ -384,6 +389,7 @@ class Iap2LinkEngine(
             packet.sequence = sentSequence
             packet.deadlineMillis = nowMillis + retransmissionTimeoutMillis
             writePacket(packet.payload, packet.sequence, CONTROL_ACKNOWLEDGEMENT, controlSessionId())
+            if (!packet.awaitAck) continue // 发后不管：不追踪、不重传（见 sendControl 注释）
             if (peer == null || peer.maxRetransmissions > 0) {
                 unacknowledged += packet
                 retransmitDeadline = packet.deadlineMillis
