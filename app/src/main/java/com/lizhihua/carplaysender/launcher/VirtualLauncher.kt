@@ -27,8 +27,17 @@ object VirtualLauncher {
 
     private const val TAG = "VirtualLauncher"
 
-    /** dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。CarPlay 化后含时钟/电量，54dp。 */
+    /** dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。CarPlay 化后含时钟/电量。 */
     const val DOCK_WIDTH_DP = 48
+
+    /**
+     * 竖屏锁定应用的 letterbox 宽高比（宽/高，会话建立时经 Shizuku 写入系统）。
+     * 默认（约 1.78）下窗口只有 ~303px≈188dp@240dpi；1.05 放宽到约 514px。
+     */
+    private const val LETTERBOX_ASPECT_RATIO = 1.05f
+
+    /** letterbox 窗口的目标逻辑宽度（dp）：≈ 手机屏宽，触发电商类应用的紧凑手机布局。 */
+    private const val LETTERBOX_TARGET_DP = 410f
 
     val runningApps = LinkedHashSet<ComponentName>()
 
@@ -112,11 +121,14 @@ object VirtualLauncher {
             appHeightPx = totalHeight
             appWidth = (totalWidth - thicknessPx).coerceAtLeast(200)
         }
-        // 横屏应用屏用「手机密度」：竖屏锁定应用被 letterbox 的窗口 ≈ 390dp 宽（正常手机布局），
-        // 字号/间距不再是「平板放大版」；竖屏应用屏（本就手机比例）保持原密度
+        // 横屏应用屏的密度选择（2026-10-11 实测标定）：
+        // 竖屏锁定应用（如头条）在横屏屏上被系统 letterbox 成窄条窗口，窗口逻辑宽度
+        // = 屏高px/letterbox宽高比，再由屏幕密度换算 dp。密度偏高 → 窗口只有 ~343dp，
+        // 应用呈现「大字大搜索框」的窄屏布局；密度 ~200 → 窗口 ~411dp ≈ 手机宽度，
+        // 应用呈现紧凑手机布局（截图验证）。目标：letterbox 窗口 ≈ LETTERBOX_TARGET_DP。
         val appDensity = if (appWidth > appHeightPx && !dockAtBottom) {
-            val letterboxWidthPx = appHeightPx * 9f / 16f
-            (letterboxWidthPx / 390f * 160f).toInt().coerceIn(240, densityDpi)
+            val letterboxWindowPx = appHeightPx / LETTERBOX_ASPECT_RATIO
+            (letterboxWindowPx / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(180, densityDpi)
         } else {
             densityDpi
         }
@@ -212,6 +224,9 @@ object VirtualLauncher {
             }
             // 应用屏方向策略：高德等横屏应用在竖屏虚拟屏上会被 letterbox
             Shell.exec("cmd window set-ignore-orientation-request -d $appDisplayId reset")
+            // 放宽竖屏应用的 letterbox 窗口（默认窄条 → 手机宽度）；断开时还原（detach）
+            Shell.exec("cmd window set-letterbox-style --aspectRatio $LETTERBOX_ASPECT_RATIO")
+            log("LAUNCHER: letterbox 宽高比=$LETTERBOX_ASPECT_RATIO appDensity=${appDensity}dpi")
             val dockOk = startOn(dockDisplayId, "com.lizhihua.carplaysender/.launcher.DockActivity")
             val gridOk = startOn(appDisplayId, "com.lizhihua.carplaysender/.launcher.GridActivity")
             appContextRef = context.applicationContext
@@ -243,6 +258,8 @@ object VirtualLauncher {
         }
         appContextRef = null
         watchdogActive = false
+        // 还原 letterbox 宽高比为系统默认（不把会话调参留在系统里）
+        runCatching { com.lizhihua.carplaysender.shizuku.Shell.exec("cmd window reset-letterbox-style aspectRatio") }
         runCatching { composer?.stop() }
         composer = null
         runCatching { dockDisplay?.release() }
