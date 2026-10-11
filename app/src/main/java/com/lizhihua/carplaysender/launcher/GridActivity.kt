@@ -31,6 +31,16 @@ class GridActivity : AppCompatActivity() {
     /** 导航条拖动中：抑制「滚动同步高亮」回写，避免与手指位置打架。 */
     private var navDragging = false
 
+    // 秒级时钟：右上角实时走秒——车机屏上它若在动即证明视频链路活着的直观证据
+    private val clockHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var clockView: TextView? = null
+    private val clockTicker = object : Runnable {
+        override fun run() {
+            clockView?.text = android.text.format.DateFormat.format("HH:mm:ss", System.currentTimeMillis())
+            clockHandler.postDelayed(this, 1_000)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val density = resources.displayMetrics.density
@@ -40,22 +50,41 @@ class GridActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xFF0D1117.toInt())
         }
-        root.addView(
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(16), dp(20), dp(10))
+        }
+        val titleBlock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        titleBlock.addView(
             TextView(this).apply {
                 text = "CarPlay Sender"
                 setTextColor(0xFFE6EDF3.toInt())
                 textSize = 22f
-                setPadding(dp(20), dp(20), dp(20), dp(8))
             },
         )
-        root.addView(
+        titleBlock.addView(
             TextView(this).apply {
                 text = "点击应用在车机屏运行；右栏字母条可快速定位"
                 setTextColor(0xFF5A6B7A.toInt())
                 textSize = 12f
-                setPadding(dp(20), 0, dp(20), dp(12))
+                setPadding(0, dp(4), 0, 0)
             },
         )
+        headerRow.addView(
+            titleBlock,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val clock = TextView(this).apply {
+            setTextColor(0xFF7EE3A0.toInt())
+            textSize = 30f
+            setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD)
+        }
+        clockView = clock
+        headerRow.addView(clock)
+        root.addView(headerRow)
 
         val apps = VirtualLauncher.launchableApps(this)
         synchronized(VirtualLauncher.runningApps) {
@@ -183,6 +212,12 @@ class GridActivity : AppCompatActivity() {
                 sectionOffsets[letter] = view.top
             }
         }
+        clockHandler.post(clockTicker)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        clockHandler.removeCallbacks(clockTicker)
     }
 
     /** 当前滚动位置所在的分区字母（取最后一个 top ≤ scrollY 的分区）。 */

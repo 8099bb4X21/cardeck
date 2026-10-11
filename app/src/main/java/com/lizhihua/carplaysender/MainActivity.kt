@@ -511,10 +511,12 @@ class MainActivity : AppCompatActivity() {
                                         "hidSendReport" -> {
                                             val uuid = command["uuid"]?.toString()
                                             val report = command["hidReport"] as? ByteArray
-                                            if (uuid == com.lizhihua.carplaysender.input.TouchReports.TOUCH_UUID_HEX &&
-                                                report != null
-                                            ) {
-                                                val contacts = com.lizhihua.carplaysender.input.TouchReports.parse(report)
+                                            val contacts = if (uuid != null && report != null) {
+                                                com.lizhihua.carplaysender.input.TouchReports.parseByUuid(uuid, report)
+                                            } else {
+                                                null
+                                            }
+                                            if (contacts != null) {
                                                 touchLogCount++
                                                 if (touchLogCount <= 30 || touchLogCount % 50 == 0) {
                                                     log(
