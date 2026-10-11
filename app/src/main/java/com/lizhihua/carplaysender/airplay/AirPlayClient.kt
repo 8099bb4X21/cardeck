@@ -283,6 +283,25 @@ class AirPlayClient(
         }
     }
 
+    /**
+     * 事件通道请求应答：对每条车机请求回 RTSP/1.0 200 OK（DiPlay runEventRead 同款）。
+     * 通道写与 postEventCommand 共用一把锁，避免两线程加密帧交叉。
+     */
+    private fun respondEventRequest() {
+        val socket = eventCommandSocket ?: return
+        val cipher = eventCommandCipher ?: return
+        try {
+            synchronized(eventCommandLock) {
+                val head = "RTSP/1.0 200 OK\r\nContent-Length: 0\r\nCSeq: \$eventCseq\r\n\r\n"
+                socket.getOutputStream().apply {
+                    write(cipher.encrypt(head.toByteArray(Charsets.US_ASCII)))
+                    flush()
+                }
+            }
+        } catch (_: IOException) {
+        }
+    }
+
     fun assertModes(): Boolean {
         val body = BinaryPlist.encode(
             linkedMapOf(
@@ -1110,9 +1129,12 @@ class AirPlayClient(
                         pending = decrypted.rest
                         var eventOtherLogged = 0
                         for ((firstLine, body) in accumulator.offer(decrypted.data)) {
+                            // 每条车机请求都要立即回 RTSP 200（DiPlay runEventRead 同款；
+                            // 不应答时车机请求管道塞满后判通道死亡关闭——2026-10-11 实测
+                            // 触摸 3 个事件后 EOF 断通道的根因）
+                            respondEventRequest()
                             if (!firstLine.contains("/command")) {
-                                // 事件通道上的非 /command 消息此前被静默丢弃——
-                                // 虚拟链路的后续消息/触摸若走其他路径会全部漏掉，必须留痕
+                                // 事件通道上的非 /command 消息留痕（其他路径的数据不漏掉）
                                 if (eventOtherLogged < 20) {
                                     eventOtherLogged++
                                     log(
