@@ -80,7 +80,7 @@ class GridActivity : AppCompatActivity() {
         val navPx = dp(40)
         val pagerW = screenW - navPx
         val pagerH = screenH - statusPx - dotsPx
-        columns = if (pagerW / 4 >= dp(170)) 4 else 3
+        columns = 4 // CarPlay 规格：固定 4 列 × 3 行（自适应公式曾被密度算成 3 列）
         perPage = columns * 3
         cellWidthPx = pagerW / columns
         cellHeightPx = pagerH / 3
@@ -124,7 +124,7 @@ class GridActivity : AppCompatActivity() {
         nav.setOnTouchListener { _, event -> handleNavTouch(event); true }
         pagerArea.addView(
             nav,
-            FrameLayout.LayoutParams(dp(34), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END or Gravity.CENTER_VERTICAL).apply {
+            FrameLayout.LayoutParams(dp(30), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END or Gravity.CENTER_VERTICAL).apply {
                 rightMargin = dp(6)
             },
         )
@@ -233,7 +233,7 @@ class GridActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
             setPadding(dp(6), dp(10), dp(6), dp(10))
         }
-        val iconSize = (cellHeightPx * 0.55f).toInt().coerceAtMost((cellWidthPx * 0.62f).toInt())
+        val iconSize = (cellHeightPx * 0.58f).toInt().coerceAtMost((cellWidthPx * 0.62f).toInt())
         layout.addView(
             ImageView(this).apply {
                 setImageBitmap(roundedIcon(cell.entry.icon, iconSize))

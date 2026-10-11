@@ -87,7 +87,7 @@ class DockActivity : AppCompatActivity() {
 
         // 时钟（CarPlay dock 顶部样式，HH:mm 每秒刷新）
         clockView = TextView(this).apply {
-            textSize = 17f
+            textSize = 14f
             setTextColor(0xFFFFFFFF.toInt())
             setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
@@ -96,7 +96,7 @@ class DockActivity : AppCompatActivity() {
 
         // 电量：百分比 + 细条（注册系统电池广播实时更新）
         batteryText = TextView(this).apply {
-            textSize = 11f
+            textSize = 10f
             setTextColor(0xFF9AB0C4.toInt())
             gravity = Gravity.CENTER
         }

@@ -28,7 +28,7 @@ object VirtualLauncher {
     private const val TAG = "VirtualLauncher"
 
     /** dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。CarPlay 化后含时钟/电量，54dp。 */
-    const val DOCK_WIDTH_DP = 54
+    const val DOCK_WIDTH_DP = 48
 
     val runningApps = LinkedHashSet<ComponentName>()
 
