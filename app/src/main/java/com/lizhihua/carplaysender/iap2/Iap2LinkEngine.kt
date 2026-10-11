@@ -156,6 +156,20 @@ class Iap2LinkEngine(
         syncDeadline = nowMillis + SYNC_RESEND_MILLIS
     }
 
+    /**
+     * 应答者模式：只发 marker，**不发 SYN**——等对端（车机）自己发 SYN 再 ACK+回显。
+     * 奥迪事件通道虚拟链路实测（2026-10-11）：车机发 marker 开场后由它发起 SYN；
+     * 我们主动发 SYN（且被 500ms 重发洪水放大）会把车机 CarPlay 栈打懵——
+     * 表现为事件通道再无响应、连蓝牙链路的 ACK 都停了。
+     */
+    fun startResponder(nowMillis: Long) {
+        if (state != State.IDLE) return
+        state = State.NEGOTIATING
+        appendOutput(MARKER)
+        markerDeadline = nowMillis + MARKER_RESEND_MILLIS
+        // syncDeadline 保持 null：不主动发 SYN、不重发 SYN
+    }
+
     fun feed(bytes: ByteArray, nowMillis: Long) {
         if (state == State.DEAD) return
         var offset = 0

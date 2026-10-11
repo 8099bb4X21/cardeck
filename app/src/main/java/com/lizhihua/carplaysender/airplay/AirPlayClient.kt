@@ -539,6 +539,8 @@ class AirPlayClient(
         }
     }
 
+    private var sendIapCount = 0
+
     /**
      * 手机→车机 iAP2 消息：事件通道 iAPSendMessage 命令（对照 DiPlay sendIapMessage，
      * params 信封 + data 字节，catplay CommandIApSendMessage 同款）。
@@ -551,6 +553,13 @@ class AirPlayClient(
             ),
         )
         val (statusLine, _) = request("POST", "/command", body, contentType = "application/x-apple-binary-plist")
+        sendIapCount++
+        if (sendIapCount <= 5 || !statusLine.contains("200")) {
+            log(
+                "IAPLINK: tx ${data.size}B [$statusLine] hex=" +
+                    data.joinToString(" ") { "%02x".format(it) }.take(120),
+            )
+        }
         statusLine.contains("200")
     } catch (error: IOException) {
         log("TUNNEL: sendIap 失败 - ${error.message}")
@@ -611,8 +620,8 @@ class AirPlayClient(
             synchronized(lock) {
                 if (started) return
                 started = true
-                log("IAPLINK: 车机发来链路 marker——在事件通道上启动虚拟 iAP2 链路（marker+SYN）")
-                engine.start(System.nanoTime() / 1_000_000L)
+                log("IAPLINK: 车机发来链路 marker——应答者模式回 marker（等车机发起 SYN）")
+                engine.startResponder(System.nanoTime() / 1_000_000L)
                 drainLocked()
             }
         }

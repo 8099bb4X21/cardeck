@@ -172,7 +172,9 @@ class Iap2SenderSession(
         //  - Audi MIB3：识别清单只声明发送 0x5703/0xea03，**不认 0x4300、不发 0x4301**；
         //    AirPlay 端点走 WiFi 上的 mDNS（_airplay._tcp）。因此 0x4301 只给短窗口，
         //    超时返回无端点的 CarPlayEndpoint，由主控 mDNS 合成。
-        send(
+        // 0x4300 同样发后不管：2026-10-11 12:52 轮实测车机曾对它停止 ACK
+        // （事件通道 SYN 洪水把它打懵的时段），链路看门狗险些再次自杀。
+        sendFireAndForget(
             Iap2MessageIds.CARPLAY_AVAILABILITY,
             Iap2Csm.group(1, Iap2Csm.u8(0, 1), Iap2Csm.string(1, bluetoothMac)),
         )
