@@ -652,10 +652,11 @@ class AirPlayClient(
         private var frameCount = 0
         private var eaCount = 0
         private var started = false
+        private var detectReplies = 0
 
         init {
             engine.onEaData = { bytes -> handleEaData(bytes) }
-            // 节拍线程：驱动引擎计时器（marker/SYN 重发、重传）
+            // 节拍线程：驱动引擎计时器（重传等）
             Thread({
                 while (socket?.isClosed == false) {
                     try {
@@ -678,14 +679,24 @@ class AirPlayClient(
             synchronized(lock) {
                 if (started) return
                 started = true
-                log("IAPLINK: 车机发来链路 marker——应答者模式回 marker（等车机发起 SYN）")
-                engine.startResponder(System.nanoTime() / 1_000_000L)
-                drainLocked()
+                // DETECT 语义（catplay LinkLayer server 角色）：静默进协商，
+                // 车机（客户端）DETECT 一次我们回一次，绝不主动重发
+                engine.enterNegotiating()
+                log("IAPLINK: 车机发来链路 marker（DETECT）——服务端模式待命，等车机 SYN")
             }
         }
 
         fun onCarBytes(bytes: ByteArray) {
             synchronized(lock) {
+                // 车机重发的 DETECT：一问一答回 marker（上限 3 次防意外洪泛）
+                if (bytes.size == 6 &&
+                    bytes[0] == 0xFF.toByte() && bytes[1] == 0x55.toByte() &&
+                    detectReplies < 3
+                ) {
+                    detectReplies++
+                    log("IAPLINK: 回 DETECT #$detectReplies")
+                    sendIap(com.lizhihua.carplaysender.iap2.Iap2LinkEngine.MARKER)
+                }
                 engine.feed(bytes, System.nanoTime() / 1_000_000L)
                 drainLocked()
             }

@@ -170,6 +170,17 @@ class Iap2LinkEngine(
         // syncDeadline 保持 null：不主动发 SYN、不重发 SYN
     }
 
+    /**
+     * 静默进入协商（DETECT 语义，对照 catplay LinkLayer server 角色）：
+     * 不发任何字节——对端（客户端）每 200ms 重发 DETECT，我们**收到一次回一次**、
+     * 绝不主动重发（服务器重发 DETECT 会把客户端状态机打回 Detecting，
+     * SYN 永远出不来——2026-10-11 事件通道实测）。
+     */
+    fun enterNegotiating() {
+        if (state != State.IDLE) return
+        state = State.NEGOTIATING
+    }
+
     fun feed(bytes: ByteArray, nowMillis: Long) {
         if (state == State.DEAD) return
         var offset = 0
