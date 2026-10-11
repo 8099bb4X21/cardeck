@@ -209,6 +209,8 @@ class AirPlayClient(
         socket = null
         leftover = ByteArray(0)
         cipherPending = ByteArray(0)
+        runCatching { iapTunnel?.socket?.close() }
+        iapTunnel = null
     }
 
     /**
@@ -506,6 +508,7 @@ class AirPlayClient(
         val socket: Socket,
         private val readKey: ByteArray,
         private val logPrefix: String = "TUNNEL",
+        private val writeKey: ByteArray = readKey,
     ) {
         @Volatile
         var messageCount = 0
@@ -515,6 +518,60 @@ class AirPlayClient(
         var onIapMessage: ((com.lizhihua.carplaysender.iap2.Iap2Csm.Frame) -> Unit)? = null
 
         private val parser = com.lizhihua.carplaysender.iap2.Iap2Csm.Parser()
+
+        private val writeLock = Any()
+        private var writeCounter = 0L
+        private var writeFailureLogged = false
+
+        /**
+         * 手机→接收端方向（隧道）写入：DiPlay 的隧道链路引擎**只从 TCP socket 读**
+         * （AirPlayIapTunnelStream 的 inbound=IapTunnel/TCP，outbound=事件通道），
+         * 因此发送端必须把 iAP2 链路字节以「ChaCha 帧（2B LE 长度作 AAD + 密文 + 16B tag）
+         * ⊃ APTransportPackage（4B BE 总长、偏移 16 处 type="comm"）」写进该 socket。
+         * 密钥与读取方向同源（OUTPUT 标签 = 手机→接收端方向，2026-08 对照源码确认）。
+         * 返回是否写出（socket 关闭/异常返回 false，调用方仅记录一次）。
+         */
+        fun writeIapBytes(bytes: ByteArray): Boolean {
+            if (socket.isClosed || !socket.isConnected || bytes.isEmpty()) return false
+            return try {
+                val size = TUNNEL_PACKAGE_HEADER_BYTES + bytes.size
+                val plain = ByteArray(size)
+                plain[0] = (size ushr 24).toByte()
+                plain[1] = (size ushr 16).toByte()
+                plain[2] = (size ushr 8).toByte()
+                plain[3] = size.toByte()
+                plain[16] = 'c'.code.toByte()
+                plain[17] = 'o'.code.toByte()
+                plain[18] = 'm'.code.toByte()
+                plain[19] = 'm'.code.toByte()
+                bytes.copyInto(plain, TUNNEL_PACKAGE_HEADER_BYTES)
+                val aad = byteArrayOf(
+                    (size and 0xFF).toByte(),
+                    ((size ushr 8) and 0xFF).toByte(),
+                )
+                // 计数器自增必须与写 socket 同锁：ChaCha nonce 乱序 = 对端解密失败
+                synchronized(writeLock) {
+                    val sealed = AirPlayCrypto.chachaSeal(
+                        writeKey,
+                        AirPlayCrypto.nonce64(writeCounter++),
+                        plain,
+                        aad,
+                    )
+                    val output = socket.getOutputStream()
+                    output.write(aad)
+                    output.write(sealed)
+                    output.flush()
+                }
+                writeFailureLogged = false
+                true
+            } catch (error: IOException) {
+                if (!writeFailureLogged) {
+                    writeFailureLogged = true
+                    log("$logPrefix: 写出失败 - ${error.message}")
+                }
+                false
+            }
+        }
 
         fun startReading() {
             Thread({
@@ -666,6 +723,7 @@ class AirPlayClient(
             log("TUNNEL: ✓ iAP 隧道已建立 $host:$dataPort（seed=$seed）")
             val client = IapTunnelClient(tcp, key)
             client.startReading()
+            iapTunnel = client
             client
         } catch (error: IOException) {
             log("TUNNEL: TCP 连接失败 - ${error.message}")
@@ -673,6 +731,14 @@ class AirPlayClient(
             null
         }
     }
+
+    /**
+     * 隧道客户端引用（DiPlay 形态）：事件通道虚拟链路（[IapLinkOverEvent]）的**出站方向**
+     * 必须写进 type-130 TCP（DiPlay 的隧道链路引擎只从 TCP 读；其出站走事件通道，
+     * 与我们被动接收一致）。无隧道（Audi 事件通道形态）时出站继续走事件通道 [sendIap]。
+     */
+    @Volatile
+    private var iapTunnel: IapTunnelClient? = null
 
     private var sendIapCount = 0
 
@@ -727,8 +793,17 @@ class AirPlayClient(
         private var started = false
         private var detectReplies = 0
 
+        /** 隧道发送端 CSM 握手进度（仅在隧道存在时推进；Audi 事件通道形态不参与）。 */
+        private var tunnelCsmStarted = false
+        private var tunnelIdentified = false
+
+        /** 同步回显待投递（隧道门闸：回显真正写进隧道 TCP 后才允许发 0x1D00）。 */
+        private var pendingEchoFlush = false
+        private var tunnelEchoDelivered = false
+
         init {
             engine.onEaData = { bytes -> handleEaData(bytes) }
+            engine.onSynchronizationEchoSent = { pendingEchoFlush = true }
             // 节拍线程：驱动引擎计时器（重传等）
             Thread({
                 while (socket?.isClosed == false) {
@@ -761,6 +836,8 @@ class AirPlayClient(
 
         fun onCarBytes(bytes: ByteArray) {
             synchronized(lock) {
+                // 隧道存在时切换「回显先行」协商语义（DiPlay 对端引擎硬性期望，详见 Iap2LinkEngine）
+                engine.echoFirst = iapTunnel != null
                 // 车机 DETECT：一问一答（catplay server 角色：收到即回、绝不主动）。
                 // 引擎处于 NEGOTIATING（尚未见 SYN）时的裸 marker 都按 DETECT 对待
                 if (bytes.size == 6 &&
@@ -769,10 +846,44 @@ class AirPlayClient(
                 ) {
                     detectReplies++
                     log("IAPLINK: 回 DETECT #$detectReplies")
-                    sendIap(com.lizhihua.carplaysender.iap2.Iap2LinkEngine.MARKER)
+                    sendLinkBytes(com.lizhihua.carplaysender.iap2.Iap2LinkEngine.MARKER)
                 }
                 engine.feed(bytes, System.nanoTime() / 1_000_000L)
                 drainLocked()
+            }
+        }
+
+        /** 链路字节出站：有隧道走隧道 TCP（DiPlay），否则走事件通道（Audi）。 */
+        private fun sendLinkBytes(bytes: ByteArray) {
+            if (bytes.isEmpty()) return
+            val tunnel = iapTunnel
+            if (tunnel != null) {
+                tunnel.writeIapBytes(bytes)
+            } else {
+                sendIap(bytes)
+            }
+        }
+
+        /**
+         * 引擎出站字节落盘：有隧道写隧道 TCP（成功且内容含同步回显时标记回显已送达），
+         * 否则走事件通道（回显发往错误通道时作废投递标记，等对端 SYN 重发重新回显）。
+         */
+        private fun flushOutputLocked() {
+            val out = engine.takeOutput()
+            if (out.isEmpty()) return
+            val tunnel = iapTunnel
+            if (tunnel != null) {
+                val ok = tunnel.writeIapBytes(out)
+                if (ok && pendingEchoFlush) {
+                    pendingEchoFlush = false
+                    if (!tunnelEchoDelivered) {
+                        tunnelEchoDelivered = true
+                        log("IAPLINK: ✓ 同步回显已写入隧道（链路协商完成，发送端 CSM 就绪）")
+                    }
+                }
+            } else {
+                sendIap(out)
+                pendingEchoFlush = false
             }
         }
 
@@ -789,9 +900,73 @@ class AirPlayClient(
                     }
                 }
             }
-            val out = engine.takeOutput()
-            if (out.isNotEmpty()) {
-                sendIap(out)
+            // 先冲刷（回显必须先行送达对端），再启动 CSM，最后再冲刷 CSM 字节
+            flushOutputLocked()
+            maybeStartTunnelCsmLocked()
+            flushOutputLocked()
+        }
+
+        /**
+         * 隧道发送端握手启动：链路协商完成（NORMAL）且同步回显已送达后，主动发
+         * 0x1D00 StartIdentification。DiPlay 的隧道控制端（Iap2WirelessControlClient）
+         * 在 awaitReady 返回后等待我们发 0x1D00；缺此步其 5 分钟窗口超时即拆掉
+         * 整条链路（2026-10-11 实测根因）。回显送达门闸保证对端引擎先进入 NORMAL
+         * （其对端在未收到 SYN 前收到任何裸 ACK 会直接 die）。
+         */
+        private fun maybeStartTunnelCsmLocked() {
+            if (tunnelCsmStarted || iapTunnel == null || !tunnelEchoDelivered) return
+            if (engine.state != com.lizhihua.carplaysender.iap2.Iap2LinkEngine.State.NORMAL) return
+            tunnelCsmStarted = true
+            sendCsmLocked(
+                com.lizhihua.carplaysender.iap2.Iap2MessageIds.START_IDENTIFICATION,
+            )
+        }
+
+        /** 隧道上的 CSM 发送（计入发送窗口由引擎 flush 到隧道 TCP）。 */
+        private fun sendCsmLocked(messageId: Int, body: ByteArray = ByteArray(0)) {
+            val frame = com.lizhihua.carplaysender.iap2.Iap2Csm.encode(messageId, body)
+            val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L)
+            log(
+                "IAPLINK: 隧道 tx 0x${messageId.toString(16)} " +
+                    "(${com.lizhihua.carplaysender.iap2.Iap2MessageIds.nameOf(messageId)}) " +
+                    "${frame.size}B ok=$ok",
+            )
+        }
+
+        /**
+         * 隧道发送端握手（对照 DiPlay Iap2WirelessControlClient 的对端期望）：
+         *   0x1D01 → 回 0x1D02（识别完成）→ 随发 0xAA00
+         *   0xAA01 → 发 0xAA02 挑战（32B，DiPlay CARLINKIT 身份只接受精确 32B）
+         *   0xAA03 → 发 0xAA05（自报成功）
+         * 完成后对方发出订阅并视为隧道就绪，5 分钟拆链不再发生。
+         */
+        private fun maybeRespondTunnelCsmLocked(frame: com.lizhihua.carplaysender.iap2.Iap2Csm.Frame) {
+            if (iapTunnel == null) return
+            val ids = com.lizhihua.carplaysender.iap2.Iap2MessageIds
+            when (frame.messageId) {
+                ids.IDENTIFICATION_INFORMATION -> {
+                    if (tunnelIdentified) return
+                    tunnelIdentified = true
+                    val params = com.lizhihua.carplaysender.iap2.Iap2Csm.parseParams(frame.body)
+                        .associateBy { it.id }
+                    log(
+                        "IAPLINK: 隧道 rx 0x1d01 接收端身份 " +
+                            "name=${params[0]?.value?.decodeToString()?.trimEnd('\u0000')} " +
+                            "model=${params[1]?.value?.decodeToString()?.trimEnd('\u0000')}",
+                    )
+                    sendCsmLocked(ids.IDENTIFICATION_ACCEPTED)
+                    sendCsmLocked(ids.MFI_REQUEST_CERTIFICATE)
+                }
+
+                ids.MFI_CERTIFICATE -> {
+                    val challenge = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+                    sendCsmLocked(ids.MFI_REQUEST_CHALLENGE, com.lizhihua.carplaysender.iap2.Iap2Csm.param(0, challenge))
+                }
+
+                ids.MFI_RESPONSE -> {
+                    sendCsmLocked(ids.MFI_AUTHENTICATION_SUCCEEDED)
+                    log("IAPLINK: 隧道 MFi 完成——等待对端订阅（随后其标记隧道就绪）")
+                }
             }
         }
 
@@ -807,6 +982,7 @@ class AirPlayClient(
                             "${frame.body.size}B hex=${hex.take(160)}",
                     )
                 }
+                maybeRespondTunnelCsmLocked(frame)
             }
             if (frames.isEmpty() && frameCount <= 10) {
                 log("IAPLINK: rx ${bytes.size}B（非 CSM）hex=" + bytes.joinToString(" ") { "%02x".format(it) }.take(160))
@@ -883,6 +1059,9 @@ class AirPlayClient(
 
         /** iAP DataStream 的 clientTypeUUID（DiPlay IAP_DATASTREAM_UUID，真 iPhone 同款）。 */
         private const val IAP_DATASTREAM_UUID = "E9459FD0-BCAD-4C45-820F-1E72447EF2F2"
+
+        /** 隧道 APTransportPackage 头长（4B BE 总长 + 12B 保留 + 4B type="comm" + 12B 保留）。 */
+        private const val TUNNEL_PACKAGE_HEADER_BYTES = 32
     }
 
     /**

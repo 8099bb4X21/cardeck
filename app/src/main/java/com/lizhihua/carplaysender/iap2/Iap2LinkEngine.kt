@@ -111,8 +111,19 @@ class Iap2LinkEngine(
      */
     private var adoptedPeerControlSessionId: Int? = null
 
-    /** 采纳过的对端 sync 载荷（协商回显/诊断用）。 */
+    /** 采纳的对端 sync 载荷（协商回显/诊断用）。 */
     private var adoptedSynchronization: SynchronizationPayload? = null
+
+    /**
+     * 隧道（type-130）协商模式。DiPlay 的隧道链路引擎（Iap2LinkEngine.openTunnel，
+     * initiateNegotiation=true）有两个硬性期望（2026-08 字节级对照源码）：
+     *  1. 收到「ACK 但尚未收到对端 SYN」时立即判链路失败（die）——因此回显必须**先于**
+     *     裸 ACK 发出（回显帧 control=SYN|ACK 自带确认位，一帧即可完成对端协商）；
+     *  2. 其隧道为零 ACK 模式（maxRetransmissions=0/maxAcknowledgements=0），不会回
+     *     任何 ACK——等待「对端 ACK」完成协商会死锁，回显即视为协商完成。
+     * 默认 false：蓝牙（RFCOMM/事件通道）路径语义不变（Audi 需 ACK+回显、等最终 ACK）。
+     */
+    var echoFirst: Boolean = false
 
     /** 诊断：首次采纳对端会话表时回调（打印对端提议的会话表，便于真车排查）。 */
     var onPeerSynchronizationAdopted: ((SynchronizationPayload) -> Unit)? = null
@@ -315,7 +326,11 @@ class Iap2LinkEngine(
         }
         if (control and CONTROL_SYNCHRONIZE != 0) {
             val sync = SynchronizationPayload.decode(payload ?: ByteArray(0))
-            if (sync != null && state == State.NEGOTIATING) {
+            // echoFirst 模式下即使本引擎已 NORMAL 也继续处理对端 SYN 重发：对端引擎
+            // （DiPlay openTunnel）只从 TCP 读，若其 SYN 到达时我方隧道尚未建立，
+            // 首次回显会走错通道；其 500ms 的 SYN 重发让我们在隧道就绪后补上回显
+            // （parseAvailable 的帧扫描会丢弃重发中的 FF55 marker，无副作用）。
+            if (sync != null && (state == State.NEGOTIATING || echoFirst)) {
                 val firstAdoption = adoptedSynchronization == null
                 peerSynchronization = sync
                 if (firstAdoption) adoptedSynchronization = sync
@@ -327,10 +342,20 @@ class Iap2LinkEngine(
                     adoptedPeerControlSessionId = it.id
                 }
                 lastReceivedInOrder = sequence
-                sendAcknowledgement()
-                if (firstAdoption) {
+                if (echoFirst) {
+                    // 隧道模式（DiPlay 对端引擎硬性期望，2026-10-11 对照源码）：
+                    //  ① 先收 SYN 再收任何裸 ACK——ACK 先到直接 die；
+                    //  ② 零 ACK 模式（maxAcks=0），等对端 ACK 完成协商会死锁。
+                    // 因此只发 SYN|ACK 回显（自带确认位，一帧同时完成两件事），不回裸 ACK。
                     sendSynchronizationEcho(sync)
-                    onPeerSynchronizationAdopted?.invoke(sync)
+                    if (firstAdoption) onPeerSynchronizationAdopted?.invoke(sync)
+                    completeNegotiationIfPending(nowMillis)
+                } else {
+                    sendAcknowledgement()
+                    if (firstAdoption) {
+                        sendSynchronizationEcho(sync)
+                        onPeerSynchronizationAdopted?.invoke(sync)
+                    }
                 }
             }
         }
@@ -371,12 +396,16 @@ class Iap2LinkEngine(
         if (unknownSessionDropped <= 5) onUnknownSessionData?.invoke(sessionId, size)
     }
 
+    /** 诊断：出向同步包回显已生成（隧道模式用于「回显已送达后才允许发 CSM」门闸）。 */
+    var onSynchronizationEchoSent: (() -> Unit)? = null
+
     /**
      * 回显对端 sync（SYN|ACK，载荷与对端完全一致）——声明「手机采纳车机会话表」。
      * 不消耗发送序号（Audi 实测可用；extractor 真车客户端同款：ACK 与 echo 都不占序号）。
      */
     private fun sendSynchronizationEcho(sync: SynchronizationPayload) {
         writePacket(sync.encode(), sentSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
+        onSynchronizationEchoSent?.invoke()
     }
 
     private fun handleAcknowledgement(acknowledgement: Int, nowMillis: Long) {
