@@ -13,7 +13,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.text.method.ScrollingMovementMethod
 import android.view.View
-import android.view.animation.LinearInterpolator
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -35,6 +34,11 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private enum class HeroState { IDLE, CONNECTING, CONNECTED }
+
+    /** 连接中的默认副标题（无阶段提示时）。 */
+    private companion object {
+        const val DEFAULT_CONNECTING_HINT = "蓝牙 iAP2 握手 → 加入车机热点 → 建立 CarPlay 会话"
+    }
 
     private lateinit var deviceSubtitle: TextView
     private lateinit var shizukuChip: TextView
@@ -68,7 +72,6 @@ class MainActivity : AppCompatActivity() {
     // ---- 英雄卡状态机（1s 轮询 SessionController 对账）----
     private var heroState: HeroState? = null
     private var connectedAt = 0L
-    private var ctaSpinner: ObjectAnimator? = null
     private var hubBlink: ObjectAnimator? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -168,6 +171,16 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("开启声音") { _, _ -> beginWithAudio(enabled = true) }
             .setNegativeButton("仅视频（更流畅）") { _, _ -> beginWithAudio(enabled = false) }
             .setNeutralButton("取消", null)
+            .show()
+    }
+
+    /** 「取消连接」确认弹窗（防误触）：中止当前连接尝试并断开蓝牙/WiFi 链路。 */
+    private fun promptCancelConnecting() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("取消连接？")
+            .setMessage("将停止当前连接尝试：蓝牙与 WiFi 链路都会断开，需重新点「启动连接」。")
+            .setPositiveButton("取消连接") { _, _ -> SessionController.cancelConnecting(this) }
+            .setNegativeButton("继续连接", null)
             .show()
     }
 
@@ -329,7 +342,9 @@ class MainActivity : AppCompatActivity() {
             when (heroState) {
                 HeroState.CONNECTED -> promptDisconnect()
                 HeroState.IDLE -> showAudioChoiceDialog()
-                null, HeroState.CONNECTING -> {}
+                // 连接中可取消：卡在错误网络/等待回连时用户主动脱身（弹窗防误触）
+                HeroState.CONNECTING -> promptCancelConnecting()
+                null -> {}
             }
         }
 
@@ -477,6 +492,10 @@ class MainActivity : AppCompatActivity() {
             heroState = s
             applyHeroState(s)
         }
+        // 连接中：副标题跟随阶段提示（英雄卡内即可见，不必划到底部看日志）
+        if (s == HeroState.CONNECTING) {
+            heroSubline.text = SessionController.phaseHint ?: DEFAULT_CONNECTING_HINT
+        }
         updateConnectedSubline()
         updateAudioTag()
         updateReadyRow()
@@ -536,13 +555,15 @@ class MainActivity : AppCompatActivity() {
                 audioTag.visibility = View.GONE
             }
             HeroState.CONNECTING -> {
-                heroSubline.text = "蓝牙 iAP2 握手 → 加入车机热点 → 建立 CarPlay 会话"
+                heroSubline.text = SessionController.phaseHint ?: DEFAULT_CONNECTING_HINT
                 ctaButton.setBackgroundResource(R.drawable.bg_cta_fill)
-                ctaLabel.setTextColor(0x73DDE5E5)
-                ctaIcon.imageTintList = android.content.res.ColorStateList.valueOf(0x73DDE5E5)
-                ctaIcon.setImageResource(R.drawable.ic_spinner)
-                ctaLabel.text = "连接中…"
-                ctaButton.isEnabled = false
+                ctaLabel.setTextColor(getColor(R.color.m3_on_primary))
+                ctaIcon.imageTintList = android.content.res.ColorStateList.valueOf(
+                    getColor(R.color.m3_on_primary),
+                )
+                ctaIcon.setImageResource(R.drawable.ic_close)
+                ctaLabel.text = "取消连接"
+                ctaButton.isEnabled = true
                 audioTag.visibility = View.GONE
             }
             HeroState.CONNECTED -> {
@@ -558,17 +579,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        ctaSpinner?.cancel()
-        ctaSpinner = null
         ctaIcon.rotation = 0f
-        if (s == HeroState.CONNECTING) {
-            ctaSpinner = ObjectAnimator.ofFloat(ctaIcon, View.ROTATION, 0f, 360f).apply {
-                duration = 900L
-                repeatCount = ObjectAnimator.INFINITE
-                interpolator = LinearInterpolator()
-                start()
-            }
-        }
     }
 
     private fun updateConnectedSubline() {

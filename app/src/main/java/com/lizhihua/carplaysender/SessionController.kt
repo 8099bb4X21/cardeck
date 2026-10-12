@@ -97,6 +97,25 @@ object SessionController {
     /** 会话建立互斥（端点交接 → 配对 → 推流全程只允许一条）。 */
     val sessionStarting = AtomicBoolean(false)
 
+    /** 用户取消连接：配对线程在关键检查点看到后中止（mDNS/配对等待无法中途打断，粒度秒级）。 */
+    @Volatile
+    var connectCancelled: Boolean = false
+
+    /**
+     * 当前连接阶段的一句话提示（英雄卡副标题用，详细过程看日志）。
+     * 由各阶段显式设置；null 时 UI 显示默认文案。
+     */
+    @Volatile
+    var phaseHint: String? = null
+
+    /** 取消「连接中」：停链路 + 置取消标志，卡在错误网络/等待回连时用户可主动脱身。 */
+    fun cancelConnecting(context: Context) {
+        connectCancelled = true
+        appendLog("SESSION: 用户取消连接——正在停止蓝牙/WiFi 链路")
+        disconnect(context)
+        phaseHint = "正在取消连接…"
+    }
+
     /** 挂屏 UI 钩子：SSID 变化时通知当前 Activity 回填输入框（可空）。 */
     @Volatile
     var ssidSink: ((String) -> Unit)? = null
@@ -140,6 +159,8 @@ object SessionController {
      * 幂等：已有会话时 BT 组件的 start() 自行短路，不会双开。
      */
     fun startConnection(context: Context) {
+        connectCancelled = false
+        phaseHint = "蓝牙就绪，等待车机回连…"
         when (com.lizhihua.carplaysender.shizuku.ShizukuGate.state(context)) {
             com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY ->
                 appendLog("SHIZUKU: 就绪（触摸注入可用）")
@@ -166,6 +187,7 @@ object SessionController {
     fun disconnect(context: Context) {
         val hadProjection = com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null
         retireSession()
+        phaseHint = null
         com.lizhihua.carplaysender.service.CarPlayService.stop(context)
         bluetoothServer?.stop()
         bluetoothClient?.stop()
@@ -220,12 +242,14 @@ object SessionController {
         wifi: com.lizhihua.carplaysender.iap2.Iap2SenderSession.WifiConfiguration,
     ) {
         ssidSink?.invoke(wifi.ssid)
+        phaseHint = "拿到车机热点凭据，绑定 WiFi…"
         appendLog(">>> 拿到车机热点凭据（0x5703）——立即绑定 WiFi + 广播 _carplay-ctrl")
         // 先占位注册（此时可能尚未绑定到目标网络）；绑定成功后再 force 重注册，
         // 保证 mDNS 组播落在车机所在网络（真车实测必需：注册早于绑定会广播到错误网络）
         ctrlAdvertiser?.ensureForNetwork(wifi.ssid)
         wifiConnector?.bindCurrentWifi { bound ->
             if (!bound) {
+                phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${wifi.ssid}"
                 appendLog(">>> 手机不在车机热点 \"${wifi.ssid}\" —— 请到 系统设置>WLAN 加入后重新连接")
             } else {
                 // 关键时机：bindProcessToNetwork 完成后再注册，车机才能看到 ctrl 广播
@@ -305,6 +329,7 @@ object SessionController {
         val needPort = effective.airPlayPort <= 0
         if (!needHost && !needPort) return effective
 
+        phaseHint = "mDNS 解析车机地址…"
         appendLog(">>> [$source] 0x4301 端点不完整（port=${effective.airPlayPort} ips=${effective.ipAddresses}），mDNS 解析车机 _airplay._tcp…")
         // 车机网段前缀（本机 IP 前 3 段）：手机若同时开热点共享（如给电脑），mDNS 会跨网
         // 发现电脑的 AirPlay 接收器（macOS 自带）——2026-10-11 实测把 MacBook 10.180.48.59
@@ -399,6 +424,7 @@ object SessionController {
             ">>> [$source] 拿到接收端热点：SSID=${endpoint.ssid}；" +
                 "密码=${if (endpoint.passphrase.isEmpty()) "(空)" else "已获取"}",
         )
+        phaseHint = "蓝牙已连上车机，解析热点地址…"
         ssidSink?.invoke(endpoint.ssid)
         // ctrl 广播已在 onWifiCredentials（0x5703 到达时）启动；这里兜底再确保一次
         // （SSID 变化会触发重新注册，见 ensureForNetwork）
@@ -410,13 +436,24 @@ object SessionController {
         // 主动断开 BT 控制会话（复现接收端唯一应答 RTSP 的状态）→ 执行 AirPlay 配对
         wifiConnector?.bindCurrentWifi { bound ->
             if (!bound) {
+                phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${endpoint.ssid}"
                 appendLog(">>> [$source] 手机当前不在该热点——请到 设置>WLAN 加入 \"${effectiveEndpoint.ssid}\" 后断开重连")
                 sessionStarting.set(false)
                 return@bindCurrentWifi
             }
             Thread({
                 try {
+                if (connectCancelled) {
+                    appendLog("AIRPLAY: 用户已取消——中止配对")
+                    sessionStarting.set(false)
+                    return@Thread
+                }
                 Thread.sleep(1_600) // 等 ctrl 探测（实测 +1.0~+1.3s）
+                if (connectCancelled) {
+                    appendLog("AIRPLAY: 用户已取消——中止配对")
+                    sessionStarting.set(false)
+                    return@Thread
+                }
                 fun newClient() = com.lizhihua.carplaysender.airplay.AirPlayClient(
                     effectiveEndpoint,
                     log = { line -> appendLog(line) },
@@ -427,9 +464,16 @@ object SessionController {
                 // （典型：连着 DiPlay 测试台时不再噪音式探测 Audi）。会话结束/断开时解除。
                 com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = true
                 // 第一阶段：保持 BT 在位直接配对 + SETUP（协议上正确的形态）
+                phaseHint = "AirPlay 配对中…"
                 var client = newClient()
                 currentClient = client
                 var keys = client.runPairing()
+                if (connectCancelled) {
+                    retireSession()
+                    appendLog("AIRPLAY: 用户已取消——中止配对")
+                    sessionStarting.set(false)
+                    return@Thread
+                }
                 if (keys == null && !client.pairSetupRejected && client.attemptedPairing) {
                     // 第二阶段（仅测试台 DiPlay）：复现「BT 控制已结束」状态再试一次。
                     // 真车（Audi）绝不能断 BT——真无线 CarPlay 的 BT 控制通道全程保活，
@@ -441,8 +485,15 @@ object SessionController {
                     client = newClient()
                     currentClient = client
                     keys = client.runPairing()
+                    if (connectCancelled) {
+                        retireSession()
+                        appendLog("AIRPLAY: 用户已取消——中止配对")
+                        sessionStarting.set(false)
+                        return@Thread
+                    }
                 }
                         if (keys != null) {
+                            phaseHint = "配对完成，建立 CarPlay 会话…"
                             appendLog(
                                 "AIRPLAY: ✓ 配对完成 writeKey=" +
                                     keys.phoneWriteKey.joinToString("") { "%02x".format(it) }.take(16) + "… " +
