@@ -118,7 +118,8 @@ class GridActivity : AppCompatActivity() {
                 )
             }.getOrNull() ?: return@Thread
             val margin = (CARD_MARGIN_PX * scale).toInt()
-            val cardX = ((VirtualLauncher.dockWidthPx + VirtualLauncher.mapTileWidth + CARD_MARGIN_PX) * scale).toInt()
+            // 音乐卡左缘收半边距（8）：与地图 tile 右缘之间形成 16px 中缝（两侧各让一半）
+            val cardX = ((VirtualLauncher.dockWidthPx + VirtualLauncher.mapTileWidth + CARD_MARGIN_PX / 2) * scale).toInt()
             val cropX = cardX.coerceAtMost(bitmap.width - 2)
             val cropY = margin.coerceAtMost(bitmap.height - 2)
             val cropW = (bitmap.width - cropX - margin).coerceAtLeast(2)
@@ -214,7 +215,8 @@ class GridActivity : AppCompatActivity() {
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
             ).apply {
-                leftMargin = (VirtualLauncher.mapTileWidth * scale).toInt() + cardMargin
+                // 左缘收半边距（8）：与地图 tile 右缘之间形成 16px 中缝（同 CARD_MARGIN_PX/2）
+                leftMargin = (VirtualLauncher.mapTileWidth * scale).toInt() + cardMargin / 2
                 topMargin = cardMargin
                 rightMargin = cardMargin
                 bottomMargin = cardMargin

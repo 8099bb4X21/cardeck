@@ -587,7 +587,11 @@ object VirtualLauncher {
         Thread({
             ensureMapTask()
             if (mapFullscreen) setMapFullscreen(false)
-            composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
+            // 期间用户可能已点开普通应用（launchApp 会置 HIDDEN 并退出仪表盘）：
+            // 复查模式，别把地图层又盖回去
+            if (dashboardMode) {
+                composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
+            }
         }, "dashboard-enter").start()
         logSink?.invoke("LAUNCHER: 仪表盘模式（地图 tile + 音乐卡）")
     }
@@ -756,6 +760,15 @@ object VirtualLauncher {
         if (ok) {
             synchronized(runningApps) { runningApps.add(component) }
             notifyRunningAppsChanged()
+            // 仪表盘/全屏地图中打开普通应用：退出仪表盘并隐藏地图层，
+            // 否则 SPLIT 带区继续画在应用上面（实测地图 tile 盖住打开的应用）
+            if (dashboardMode || mapFullscreen) {
+                dashboardMode = false
+                mapFullscreen = false
+                notifyDashboard()
+                composer?.setTileLayout(DualDisplayComposer.TileLayout.HIDDEN)
+                logSink?.invoke("LAUNCHER: 退出仪表盘（普通应用已打开）")
+            }
             // 合成器切到目标屏（超采样屏等其出帧再切；原生屏即时切换）
             composer?.requestActiveApp(targetDisplay == appHiDisplayId)
         } else {

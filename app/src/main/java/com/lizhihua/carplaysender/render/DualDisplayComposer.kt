@@ -368,8 +368,11 @@ class DualDisplayComposer(
                     if (layout == TileLayout.FULLSCREEN) {
                         drawInput(map!!, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
                     } else {
-                        // 卡片形态：四周留边 + 圆角（与音乐卡一致）
-                        val tileW = (outWidth - dockW) / 2f - TILE_MARGIN * 2f
+                        // 卡片形态：四周留边 + 圆角（与音乐卡一致）。
+                        // 中缝=TILE_MARGIN（16）：tile 右缘与音乐卡左缘各收半边距（8），
+                        // 否则两边各 16px 叠加出 32px 的中缝、比外侧 16px 边距宽一倍不协调
+                        val half = (outWidth - dockW) / 2f
+                        val tileW = half - TILE_MARGIN - TILE_MARGIN / 2f
                         drawInputUV(
                             map!!,
                             dockW + TILE_MARGIN, dockW + TILE_MARGIN + tileW,
