@@ -327,6 +327,8 @@ class GridActivity : AppCompatActivity() {
             synchronized(VirtualLauncher.runningApps) { VirtualLauncher.iconCache.clear() }
             scanned.forEach { VirtualLauncher.iconCache[it.component] = it.icon }
             appsCache = scanned
+            // 纳入进程级共享缓存：桌面扫过之后，车机设置首次打开即秒开
+            VirtualLauncher.adoptAppsCache(scanned)
             scanned
         }
 

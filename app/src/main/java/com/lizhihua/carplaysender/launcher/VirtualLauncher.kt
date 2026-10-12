@@ -804,6 +804,17 @@ object VirtualLauncher {
     fun cachedApps(context: Context): List<AppEntry> =
         appsCache ?: scanLaunchableApps(context).also { appsCache = it }
 
+    /**
+     * 仅读取共享缓存，**绝不扫描**：设置页等必须在主线程取列表的界面用这个，
+     * 缓存未命中时自行异步扫描（cachedApps 的同步兜底会把整页应用扫描压上 UI 线程）。
+     */
+    fun peekCachedApps(): List<AppEntry>? = appsCache
+
+    /** 把外部线程扫描的结果纳入共享缓存（桌面扫描后设置页即可秒开）。 */
+    fun adoptAppsCache(apps: List<AppEntry>) {
+        if (appsCache == null) appsCache = apps
+    }
+
     fun invalidateAppsCache() {
         appsCache = null
     }

@@ -33,18 +33,24 @@ class SettingsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_settings)
 
-        // 共享缓存即时填充（桌面已扫描时秒开）；冷启动异步扫描，页面先渲染
-        apps = VirtualLauncher.cachedApps(this)
+        // 共享缓存即时填充（peek 绝不在主线程扫描）；未命中时异步扫描，页面先渲染。
+        // （此前 cachedApps 在主线程同步扫描——首次打开车机设置卡顿的根因）
+        apps = VirtualLauncher.peekCachedApps() ?: emptyList()
         selected += DesktopApps.selected(this, apps)
         if (apps.isEmpty()) {
             Thread({
+                val startedAt = android.os.SystemClock.uptimeMillis()
                 val scanned = VirtualLauncher.launchableApps(this)
+                VirtualLauncher.adoptAppsCache(scanned)
+                val cost = android.os.SystemClock.uptimeMillis() - startedAt
                 runOnUiThread {
                     apps = scanned
                     selected.clear()
                     selected += DesktopApps.selected(this, apps)
                     findViewById<RecyclerView>(R.id.appList).adapter?.notifyDataSetChanged()
                     findViewById<RecyclerView>(R.id.ssList).adapter?.notifyDataSetChanged()
+                    updateCount()
+                    VirtualLauncher.logSink?.invoke("SETTINGS: 应用列表异步扫描完成 ${scanned.size} 个，${cost}ms")
                 }
             }, "settings-scan").start()
         }
