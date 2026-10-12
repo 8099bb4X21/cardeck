@@ -41,7 +41,7 @@ class MediaListenerService : NotificationListenerService() {
     private val periodicRefresh = object : Runnable {
         override fun run() {
             refresh()
-            mainHandler.postDelayed(this, 3_000)
+            mainHandler.postDelayed(this, 1_000)
         }
     }
 
@@ -133,6 +133,7 @@ object MediaSessionsState {
     }
 
     fun publish(value: NowPlaying?) {
+        // 内容与当前一致时直接跳过（不通知、不写日志，避免轮询刷屏）
         if (nowPlaying == value) return
         nowPlaying = value
         com.lizhihua.carplaysender.launcher.VirtualLauncher.logSink?.invoke(
