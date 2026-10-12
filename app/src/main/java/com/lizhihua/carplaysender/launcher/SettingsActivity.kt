@@ -63,44 +63,79 @@ class SettingsActivity : AppCompatActivity() {
         setupIndexBar(findViewById(R.id.ssListIndex), ssList) { (ssList.adapter as SupersampleAdapter).rows }
 
         setupMenuSwitching()
+        setupDockPrefsUI()
         updateCount()
     }
 
-    /** 左菜单切换：选中态样式 + 右栏内容显隐。 */
-    private fun setupMenuSwitching() {
-        val menuDesktop = findViewById<LinearLayout>(R.id.menuDesktopApps)
-        val menuSs = findViewById<LinearLayout>(R.id.menuSupersample)
-        val contentDesktop = findViewById<View>(R.id.contentDesktopApps)
-        val contentSs = findViewById<View>(R.id.contentSupersample)
+    /** dock 栏设置：暗幕透明度/模糊程度滑条（拖动即保存，dock 经监听即时生效）。 */
+    @android.annotation.SuppressLint("SetTextI18n")
+    private fun setupDockPrefsUI() {
+        val scrimSeek = findViewById<android.widget.SeekBar>(R.id.dockScrimSeek)
+        val scrimValue = findViewById<TextView>(R.id.dockScrimValue)
+        val blurSeek = findViewById<android.widget.SeekBar>(R.id.dockBlurSeek)
+        val blurValue = findViewById<TextView>(R.id.dockBlurValue)
 
-        fun apply(desktop: Boolean) {
-            menuDesktop.background = if (desktop) {
-                getDrawable(R.drawable.bg_menu_item)
-            } else {
-                android.util.TypedValue().let {
-                    val out = android.util.TypedValue()
-                    theme.resolveAttribute(android.R.attr.selectableItemBackground, out, true)
-                    getDrawable(out.resourceId)
-                }
+        scrimSeek.progress = DockPrefs.scrimOpacity(this)
+        scrimValue.text = "${scrimSeek.progress}%"
+        scrimSeek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: android.widget.SeekBar?, value: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                scrimValue.text = "$value%"
+                DockPrefs.setScrimOpacity(this@SettingsActivity, value)
             }
-            menuSs.background = if (!desktop) {
-                getDrawable(R.drawable.bg_menu_item)
-            } else {
-                android.util.TypedValue().let {
-                    val out = android.util.TypedValue()
-                    theme.resolveAttribute(android.R.attr.selectableItemBackground, out, true)
-                    getDrawable(out.resourceId)
-                }
+
+            override fun onStartTrackingTouch(seekBar: android.widget.SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: android.widget.SeekBar?) = Unit
+        })
+
+        blurSeek.progress = DockPrefs.blur(this)
+        blurValue.text = "${blurSeek.progress}%"
+        blurSeek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: android.widget.SeekBar?, value: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                blurValue.text = "$value%"
+                DockPrefs.setBlur(this@SettingsActivity, value)
             }
-            setMenuTextStyle(menuDesktop, desktop)
-            setMenuTextStyle(menuSs, !desktop)
-            contentDesktop.visibility = if (desktop) View.VISIBLE else View.GONE
-            contentSs.visibility = if (!desktop) View.VISIBLE else View.GONE
+
+            override fun onStartTrackingTouch(seekBar: android.widget.SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: android.widget.SeekBar?) = Unit
+        })
+    }
+
+    /** 左菜单切换：选中态样式 + 右栏内容显隐（三个菜单互斥）。 */
+    private fun setupMenuSwitching() {
+        val menus = listOf(
+            findViewById<LinearLayout>(R.id.menuDesktopApps),
+            findViewById<LinearLayout>(R.id.menuSupersample),
+            findViewById<LinearLayout>(R.id.menuDock),
+        )
+        val contents = listOf(
+            findViewById<View>(R.id.contentDesktopApps),
+            findViewById<View>(R.id.contentSupersample),
+            findViewById<View>(R.id.contentDock),
+        )
+        val ripple = runCatching {
+            val out = android.util.TypedValue()
+            theme.resolveAttribute(android.R.attr.selectableItemBackground, out, true)
+            getDrawable(out.resourceId)
+        }.getOrNull()
+
+        fun apply(selected: Int) {
+            menus.forEachIndexed { index, menu ->
+                menu.background = if (index == selected) {
+                    getDrawable(R.drawable.bg_menu_item)
+                } else {
+                    ripple
+                }
+                setMenuTextStyle(menu, index == selected)
+            }
+            contents.forEachIndexed { index, content ->
+                content.visibility = if (index == selected) View.VISIBLE else View.GONE
+            }
         }
 
-        menuDesktop.setOnClickListener { apply(true) }
-        menuSs.setOnClickListener { apply(false) }
-        apply(true)
+        menus.forEachIndexed { index, menu -> menu.setOnClickListener { apply(index) } }
+        apply(0)
     }
 
     /** 菜单项内文字样式（选中=亮色粗体；未选中=暗色常规）。 */

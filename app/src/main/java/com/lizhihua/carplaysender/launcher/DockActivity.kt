@@ -62,6 +62,9 @@ class DockActivity : AppCompatActivity() {
     /** 壁纸变更监听（WallpaperStore 主线程回调；解码在本类自行切后台线程）。 */
     private val wallpaperListener = { _: Long -> refreshWallpaperIfChanged() }
 
+    /** dock 外观偏好监听（设置页拖动滑条即时生效）。 */
+    private val dockPrefsListener: () -> Unit = { runOnUiThread { applyDockPrefs() } }
+
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) = updateBattery(intent)
     }
@@ -92,6 +95,9 @@ class DockActivity : AppCompatActivity() {
         // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
         com.lizhihua.carplaysender.ui.WallpaperStore.addListener(wallpaperListener)
         refreshWallpaperIfChanged()
+        // dock 外观（暗幕/模糊）：应用当前值 + 监听设置页调整
+        DockPrefs.addListener(dockPrefsListener)
+        applyDockPrefs()
         // 系统受保护广播：ACTION_BATTERY_CHANGED 为 sticky，注册即回填当前电量
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
     }
@@ -101,6 +107,7 @@ class DockActivity : AppCompatActivity() {
         pollHandler.removeCallbacksAndMessages(null)
         clockHandler.removeCallbacks(clockTicker)
         com.lizhihua.carplaysender.ui.WallpaperStore.removeListener(wallpaperListener)
+        DockPrefs.removeListener(dockPrefsListener)
         runCatching { unregisterReceiver(batteryReceiver) }
         super.onDestroy()
     }
@@ -137,7 +144,31 @@ class DockActivity : AppCompatActivity() {
         refreshWallpaperIfChanged()
     }
 
-    /** 壁纸版本变化时后台重解码并换图（手机侧更换后 ≤1 分钟内 dock 更新）。 */
+    /**
+     * 应用 dock 外观偏好：暗幕强度（scrim View 的黑 alpha）+ 背景高斯模糊
+     * （RenderEffect，API 31+；半径按 dock 物理像素，最大 40px）。
+     */
+    private fun applyDockPrefs() {
+        val scrim = findViewById<View>(R.id.dockScrim) ?: return
+        val alpha = (DockPrefs.scrimOpacity(this) * 255 / 100).coerceIn(0, 255)
+        scrim.background = android.graphics.drawable.ColorDrawable(
+            android.graphics.Color.argb(alpha, 0, 0, 0),
+        )
+        val wallpaper = wallpaperView ?: return
+        val percent = DockPrefs.blur(this)
+        if (percent <= 0) {
+            wallpaper.setRenderEffect(null)
+        } else {
+            val radius = percent / 100f * 40f
+            wallpaper.setRenderEffect(
+                android.graphics.RenderEffect.createBlurEffect(
+                    radius, radius, android.graphics.Shader.TileMode.CLAMP,
+                ),
+            )
+        }
+    }
+
+    /** 壁纸版本变化时后台重解码并换图（监听器模式下与桌面同步更新）。 */
     private fun refreshWallpaperIfChanged() {
         val view = wallpaperView ?: return
         val current = com.lizhihua.carplaysender.ui.WallpaperStore.version
