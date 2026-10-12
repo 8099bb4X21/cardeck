@@ -1,0 +1,973 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>CarPlay 发送端 · 手机侧界面 Material 重构原型</title>
+<!--
+  设计方向：Material Design 3（Material You）暗色 · 车载工具气质。
+  基底沿用现有 #101418 深青黑；主色取「信号青」——CarPlay 无线连接的意象，
+  全套 M3 色调令牌（surface 容器阶梯 / primary 容器 / outline 阶梯），
+  组件严格对齐 M3 规范：pill 填充按钮、M3 开关、tonal 图标容器、28dp 圆角对话框。
+  结构：连接状态英雄卡（唯一视觉重心）→ 连接准备清单 → 车机显示 → 高级(折叠) → 日志(折叠)。
+  现有功能无删减：启动连接/声音选择/SSID/WLAN/投屏权限/常亮暗幕/假息屏/壁纸/Shell状态/日志。
+  交互：左侧面板可切换三种连接状态；也可直接点「启动连接」走完整流程（弹窗→连接中→已连接）。
+  注：图标为内联 SVG 手绘集（Material Symbols 轮廓风格，24 栅格 stroke 1.8），
+  不依赖外网字体——Google Fonts 在目标网络不可达。
+-->
+<style>
+/* ===================== 页面舞台（评审用，非 App 内容） ===================== */
+:root{
+  --ease: cubic-bezier(.2,0,0,1);
+  --ease-emph: cubic-bezier(.3,0,.2,1);
+}
+*{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html,body{ height:100%; }
+body{
+  margin:0; min-height:100vh;
+  background:#0A0D0E;
+  background-image:
+    radial-gradient(1100px 500px at 18% -8%, rgba(66,180,190,.075), transparent 62%),
+    radial-gradient(900px 480px at 88% 108%, rgba(66,180,190,.05), transparent 60%);
+  color:#C7D1D1;
+  font-family:-apple-system,"SF Pro Display","SF Pro Text","PingFang SC","HarmonyOS Sans SC","MiSans","Microsoft YaHei","Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  display:flex; flex-direction:column; align-items:center;
+  padding:26px 20px 40px; gap:22px;
+}
+.spec-head{ text-align:center; }
+.spec-head h1{
+  margin:0; font-size:17px; font-weight:700; letter-spacing:.02em; color:#E8EFEF;
+}
+.spec-head p{ margin:6px 0 0; font-size:12.5px; color:#5F6E6E; letter-spacing:.03em; }
+.spec-head p b{ color:#8FA0A0; font-weight:600; }
+
+.stage{ display:flex; gap:30px; align-items:flex-start; }
+
+/* ---------- 左侧：设计说明 + 评审控制 ---------- */
+.notes{ width:298px; display:flex; flex-direction:column; gap:14px; position:sticky; top:24px; }
+.note-card{
+  background:#101517; border:1px solid #1D2527; border-radius:14px; padding:14px 16px;
+}
+.note-card h3{
+  margin:0 0 8px; font-size:11px; font-weight:700; letter-spacing:.14em;
+  color:#5F7373;
+}
+.note-card ul{ margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:7px; }
+.note-card li{
+  font-size:12.5px; line-height:1.55; color:#93A3A3; padding-left:14px; position:relative;
+}
+.note-card li::before{
+  content:""; position:absolute; left:0; top:.62em; width:5px; height:5px; border-radius:2px;
+  background:#2E8F9B;
+}
+.note-card li b{ color:#C9D6D6; font-weight:600; }
+
+.seg{
+  display:flex; background:#151B1D; border:1px solid #232B2D; border-radius:999px; padding:3px; gap:3px;
+}
+.seg button{
+  flex:1; border:0; background:transparent; color:#7E8E8E; font:inherit; font-size:12px; font-weight:600;
+  padding:7px 0; border-radius:999px; cursor:pointer; letter-spacing:.02em;
+  transition:all .25s var(--ease);
+}
+.seg button.on{ background:#1D3B40; color:#8FE1EA; }
+.seg button:hover:not(.on){ color:#AEBDBD; }
+
+.trigger{
+  border:1px solid #24302F; background:#141A1B; color:#A9BBB9; font:inherit; font-size:12.5px;
+  font-weight:600; padding:9px 14px; border-radius:10px; cursor:pointer;
+  transition:all .2s var(--ease); text-align:left; display:flex; align-items:center; gap:8px;
+}
+.trigger:hover{ background:#1A2223; border-color:#31403E; color:#D3E2E0; }
+.trigger .msr{ font-size:16px; color:#4FA8B4; }
+.trigger-col{ display:flex; flex-direction:column; gap:8px; }
+
+/* ===================== 手机设备框 ===================== */
+.device-wrap{ flex:0 0 auto; }
+.device{
+  width:412px; height:902px; border-radius:47px; padding:9px;
+  background:linear-gradient(160deg,#2A3134,#14181A 40%,#20272A);
+  box-shadow:0 40px 110px rgba(0,0,0,.72), 0 4px 18px rgba(0,0,0,.5), inset 0 0 0 1px #364044;
+  position:relative;
+}
+.device::after{ /* 侧键 */
+  content:""; position:absolute; right:-2.5px; top:220px; width:3px; height:96px;
+  border-radius:0 3px 3px 0; background:#394347;
+}
+.screen{
+  width:100%; height:100%; border-radius:39px; overflow:hidden; position:relative;
+  background:var(--m3-surface);
+  display:flex; flex-direction:column;
+}
+.punch{
+  position:absolute; top:12px; left:50%; transform:translateX(-50%);
+  width:11px; height:11px; border-radius:50%; background:#05070A;
+  box-shadow:inset 0 0 2px 1px #10151C; z-index:60;
+}
+.home-indicator{
+  position:absolute; bottom:7px; left:50%; transform:translateX(-50%);
+  width:108px; height:4px; border-radius:4px; background:rgba(255,255,255,.24); z-index:60;
+}
+
+/* ===================== M3 色调令牌 ===================== */
+.screen{
+  --m3-surface:#0E1415;
+  --m3-surface-low:#151B1C;
+  --m3-surface-c:#191F21;
+  --m3-surface-high:#232A2C;
+  --m3-surface-highest:#2E3638;
+  --m3-on-surface:#DDE5E5;
+  --m3-on-var:#B0BEBE;
+  --m3-outline:#899393;
+  --m3-outline-var:#394444;
+  --m3-primary:#7EDCE6;
+  --m3-on-primary:#003540;
+  --m3-pri-container:#0E4D58;
+  --m3-on-pri-container:#A5EEF7;
+  --m3-sec-container:#36494D;
+  --m3-on-sec-container:#CEE7EB;
+  --m3-error:#FFB4AB;
+  --m3-on-err-container:#FFDAD6;
+  --m3-err-container:#5C1A16;
+  --m3-inverse:#2B3335;
+  --m3-on-inverse:#ECF4F4;
+  --mono:"SF Mono",Menlo,Consolas,"JetBrains Mono",monospace;
+}
+
+/* 内联图标：svg 以 1em 适配字号 */
+.msr{ font-style:normal; display:inline-flex; line-height:1; flex:0 0 auto; }
+.msr svg{ width:1em; height:1em; display:block; }
+.spin svg{ animation:rot .9s linear infinite; }
+@keyframes rot{ to{ transform:rotate(360deg); } }
+
+/* ===================== 系统状态栏 ===================== */
+.statusbar{
+  flex:0 0 auto; height:38px; padding:0 26px 0 30px;
+  display:flex; align-items:center; justify-content:space-between;
+  font-size:12.5px; font-weight:700; color:#E4ECEC; letter-spacing:.02em;
+  font-variant-numeric:tabular-nums;
+}
+.statusbar .right{ display:flex; align-items:center; gap:6px; }
+.statusbar .msr{ font-size:15px; }
+.statusbar .battery{
+  width:22px; height:11.5px; border:1.4px solid rgba(228,236,236,.75); border-radius:3.5px;
+  position:relative; padding:1.5px;
+}
+.statusbar .battery::after{
+  content:""; display:block; height:100%; width:74%; background:#E4ECEC; border-radius:1.5px;
+}
+.statusbar .battery::before{
+  content:""; position:absolute; right:-4px; top:3px; width:2px; height:4px;
+  background:rgba(228,236,236,.75); border-radius:0 2px 2px 0;
+}
+
+/* ===================== 顶部应用栏 ===================== */
+.appbar{
+  flex:0 0 auto; padding:10px 22px 14px; display:flex; align-items:center; justify-content:space-between;
+}
+.appbar h1{ margin:0; font-size:21px; font-weight:700; letter-spacing:.01em; color:#EDF3F3; }
+.appbar .sub{ margin:3px 0 0; font-size:11.5px; color:#7C8B8B; letter-spacing:.03em; display:flex; align-items:center; gap:5px; }
+.appbar .sub .dot{ width:5px; height:5px; border-radius:50%; background:#58C08A; }
+
+.chip-shizuku{
+  display:flex; align-items:center; gap:6px; height:30px; padding:0 12px;
+  border-radius:999px; border:1px solid var(--m3-outline-var);
+  font-size:11.5px; font-weight:600; color:var(--m3-on-var); letter-spacing:.02em;
+}
+.chip-shizuku .dot{ width:6px; height:6px; border-radius:50%; background:#58C08A; box-shadow:0 0 6px rgba(88,192,138,.8); }
+
+/* ===================== 滚动内容区 ===================== */
+.scroll{
+  flex:1; overflow-y:auto; padding:2px 16px 30px; display:flex; flex-direction:column; gap:12px;
+  scrollbar-width:none;
+}
+.scroll::-webkit-scrollbar{ display:none; }
+
+/* 入场：分级浮现；flex 子项禁止压缩（否则内容互相挤压而非滚动） */
+.scroll > *{ animation:rise .6s var(--ease) both; flex-shrink:0; }
+.scroll > *:nth-child(1){ animation-delay:.02s; } .scroll > *:nth-child(2){ animation-delay:.07s; }
+.scroll > *:nth-child(3){ animation-delay:.12s; } .scroll > *:nth-child(4){ animation-delay:.17s; }
+.scroll > *:nth-child(5){ animation-delay:.22s; } .scroll > *:nth-child(6){ animation-delay:.27s; }
+@keyframes rise{ from{ opacity:0; transform:translateY(14px); } to{ opacity:1; transform:none; } }
+
+.card{
+  background:var(--m3-surface-low); border-radius:24px; padding:6px 16px 8px;
+  border:1px solid rgba(255,255,255,.035);
+}
+.card-title{
+  display:flex; align-items:center; gap:8px;
+  font-size:12.5px; font-weight:700; letter-spacing:.06em; color:#8FA09F;
+  padding:14px 6px 8px;
+}
+.card-title .count{
+  margin-left:auto; font-size:11px; font-weight:700; color:#6FC4CF;
+  background:rgba(111,196,207,.1); border-radius:999px; padding:2px 9px; letter-spacing:.04em;
+  font-variant-numeric:tabular-nums;
+}
+
+/* ---------- 列表行（M3 list item 气质） ---------- */
+.row{
+  display:flex; align-items:center; gap:14px; min-height:60px; padding:6px 2px;
+  position:relative;
+}
+.row + .row::before{
+  content:""; position:absolute; top:0; left:54px; right:0; height:1px;
+  background:var(--m3-outline-var); opacity:.55;
+}
+.row .icon-tile{
+  flex:0 0 38px; height:38px; border-radius:12px; background:var(--m3-surface-high);
+  display:flex; align-items:center; justify-content:center;
+}
+.row .icon-tile .msr{ font-size:20px; color:var(--m3-on-var); }
+.row .body{ flex:1; min-width:0; }
+.row .label{ font-size:14.5px; font-weight:600; color:var(--m3-on-surface); letter-spacing:.01em; }
+.row .desc{ margin-top:2px; font-size:12px; line-height:1.5; color:var(--m3-on-var); letter-spacing:.015em; }
+.row .desc .mono{ font-family:var(--mono); font-weight:600; color:#C4D2D1; font-size:11px; }
+
+/* 行尾动作：文本按钮 */
+.tbtn{
+  border:0; background:transparent; font:inherit; font-size:13px; font-weight:700;
+  color:var(--m3-primary); letter-spacing:.03em; padding:9px 12px; border-radius:999px; cursor:pointer;
+  transition:background .2s var(--ease); white-space:nowrap;
+}
+.tbtn:hover{ background:rgba(126,220,230,.09); }
+.tbtn:active{ background:rgba(126,220,230,.16); }
+.tbtn.err{ color:var(--m3-error); }
+.tbtn.err:hover{ background:rgba(255,180,171,.09); }
+.tbtn.done{ color:#7BD8A5; pointer-events:none; }
+
+/* 行尾状态小徽标 */
+.badge{
+  font-size:11px; font-weight:700; letter-spacing:.04em; border-radius:999px; padding:4px 10px;
+}
+.badge.ok{ color:#7BD8A5; background:rgba(88,192,138,.12); }
+.badge.todo{ color:#E8C072; background:rgba(232,192,114,.12); }
+
+/* SSID 行内输入 */
+.ssid-input{
+  border:0; outline:0; background:transparent; font:inherit; font-size:13.5px; font-weight:600;
+  color:#C4D2D1; width:100%; padding:6px 10px; border-radius:10px;
+  border:1.2px solid transparent; transition:all .2s var(--ease); letter-spacing:.02em;
+}
+.ssid-input:hover{ border-color:var(--m3-outline-var); }
+.ssid-input:focus{ border-color:var(--m3-primary); background:rgba(126,220,230,.05); }
+
+/* ---------- M3 开关 ---------- */
+.m3-switch{
+  flex:0 0 auto; width:52px; height:32px; border-radius:999px; border:2px solid var(--m3-outline);
+  background:var(--m3-surface-highest); position:relative; cursor:pointer;
+  transition:all .25s var(--ease-emph);
+}
+.m3-switch .thumb{
+  position:absolute; top:50%; left:6px; transform:translateY(-50%);
+  width:16px; height:16px; border-radius:50%; background:var(--m3-outline);
+  transition:all .25s var(--ease-emph); display:flex; align-items:center; justify-content:center;
+}
+.m3-switch .thumb .msr{ font-size:12px; color:transparent; transition:color .15s; }
+.m3-switch.on{ background:var(--m3-primary); border-color:var(--m3-primary); }
+.m3-switch.on .thumb{ left:24px; width:24px; height:24px; background:var(--m3-on-primary); }
+.m3-switch.on .thumb .msr{ color:var(--m3-primary); }
+
+/* ===================== 英雄卡：连接状态 ===================== */
+.hero{
+  border-radius:26px; padding:24px 20px 20px; text-align:center; position:relative; overflow:hidden;
+  background:
+    radial-gradient(130% 90% at 50% -18%, rgba(126,220,230,.10), transparent 55%),
+    var(--m3-surface-low);
+  border:1px solid rgba(126,220,230,.10);
+}
+.hero .waves{ display:block; margin:2px auto 0; }
+.hero .wave{ transform-origin:105px 88px; }
+.hero[data-state="idle"] .wave{ stroke:#39484A; }
+.hero[data-state="idle"] .hub-plate{ fill:var(--m3-surface-high); }
+.hero[data-state="idle"] .hub-car{ color:#7E8E8E; }
+.hero[data-state="idle"] .hub-sub{ color:#5C6B6B; }
+
+.hero[data-state="connecting"] .wave{ stroke:#3E8E9B; animation:pulse 1.5s var(--ease) infinite; }
+.hero[data-state="connecting"] .wave.w2{ animation-delay:.25s; }
+.hero[data-state="connecting"] .wave.w3{ animation-delay:.5s; }
+.hero[data-state="connecting"] .hub-plate{ fill:var(--m3-pri-container); }
+.hero[data-state="connecting"] .hub-car{ color:var(--m3-on-pri-container); animation:blink 1.2s var(--ease) infinite; }
+.hero[data-state="connecting"] .orbit{ animation:spin 2.6s linear infinite; transform-origin:105px 88px; }
+
+.hero[data-state="connected"] .wave{ stroke:#4FB4C4; animation:breathe 2.8s var(--ease) infinite; }
+.hero[data-state="connected"] .wave.w2{ animation-delay:.4s; }
+.hero[data-state="connected"] .wave.w3{ animation-delay:.8s; }
+.hero[data-state="connected"] .hub-plate{ fill:var(--m3-primary); }
+.hero[data-state="connected"] .hub-car{ color:var(--m3-on-primary); }
+.hero[data-state="connected"] .orbit{ animation:spin 9s linear infinite; transform-origin:105px 88px; opacity:1; }
+
+@keyframes pulse{ 0%,100%{ opacity:.25; } 50%{ opacity:1; } }
+@keyframes breathe{ 0%,100%{ opacity:.5; } 50%{ opacity:1; } }
+@keyframes blink{ 0%,100%{ opacity:1; } 50%{ opacity:.45; } }
+@keyframes spin{ to{ transform:rotate(360deg); } }
+
+.hub-sub{ font-size:10px; font-weight:700; letter-spacing:.22em; margin-top:3px; }
+.hero h2{
+  margin:14px 0 0; font-size:25px; font-weight:700; letter-spacing:.02em; color:#EDF4F4;
+  font-variant-numeric:tabular-nums;
+}
+.hero .subline{
+  margin:7px auto 0; font-size:12.5px; line-height:1.6; color:var(--m3-on-var);
+  max-width:300px; letter-spacing:.02em; min-height:20px;
+}
+.hero .subline b{ color:#C7D6D5; font-weight:600; }
+
+/* M3 线性进度（连接中显示） */
+.m3-progress{
+  height:4px; border-radius:4px; margin:16px auto 0; width:250px; overflow:hidden;
+  background:rgba(126,220,230,.12); opacity:0; transition:opacity .3s;
+}
+.hero[data-state="connecting"] .m3-progress{ opacity:1; }
+.m3-progress::after{
+  content:""; display:block; height:100%; width:40%; border-radius:4px; background:var(--m3-primary);
+}
+.hero[data-state="connecting"] .m3-progress::after{ animation:slide 1.15s var(--ease) infinite; }
+@keyframes slide{ 0%{ margin-left:-40%; } 100%{ margin-left:100%; } }
+
+/* 主按钮（M3 filled / outlined-error） */
+.cta{
+  margin-top:18px; width:100%; height:52px; border-radius:999px; border:0; cursor:pointer;
+  font:inherit; font-size:15.5px; font-weight:700; letter-spacing:.06em;
+  display:flex; align-items:center; justify-content:center; gap:9px;
+  transition:all .25s var(--ease-emph); position:relative; overflow:hidden;
+}
+.cta .msr{ font-size:19px; }
+.cta.fill{ background:var(--m3-primary); color:var(--m3-on-primary); box-shadow:0 6px 22px rgba(126,220,230,.16); }
+.cta.fill:hover:not([disabled]){ box-shadow:0 8px 28px rgba(126,220,230,.28); filter:brightness(1.05); }
+.cta.fill:active:not([disabled]){ transform:scale(.985); }
+.cta.fill[disabled]{
+  background:rgba(126,220,230,.14); color:rgba(221,229,229,.45); box-shadow:none; cursor:default;
+}
+.cta.outline-err{
+  background:transparent; color:var(--m3-error); border:1.6px solid rgba(255,180,171,.55);
+}
+.cta.outline-err:hover{ background:rgba(255,180,171,.08); }
+.cta.outline-err:active{ transform:scale(.985); }
+
+/* 声音小标签（已连接态显示） */
+.audio-tag{
+  display:none; margin:12px auto 0; width:fit-content;
+  align-items:center; gap:6px; height:30px; padding:0 13px;
+  border-radius:999px; background:var(--m3-surface-high);
+  font-size:11.5px; font-weight:600; color:var(--m3-on-var); letter-spacing:.03em;
+}
+.audio-tag .msr{ font-size:15px; }
+.hero[data-state="connected"] .audio-tag{ display:flex; }
+.audio-tag.muted .msr{ color:#7E8E8E; }
+.audio-tag.live .msr{ color:#7BD8A5; }
+
+/* ===================== 可折叠卡（高级 / 日志） ===================== */
+.exp-head{
+  display:flex; align-items:center; gap:14px; min-height:60px; padding:6px 2px; cursor:pointer;
+  border-radius:16px; user-select:none;
+}
+.exp-head:hover{ background:rgba(255,255,255,.025); }
+.exp-head .chev{
+  margin-left:auto; transition:transform .3s var(--ease-emph); color:var(--m3-on-var); font-size:22px;
+}
+.card.open .chev{ transform:rotate(180deg); }
+.exp-body{
+  display:grid; grid-template-rows:0fr; transition:grid-template-rows .38s var(--ease-emph);
+}
+.card.open .exp-body{ grid-template-rows:1fr; }
+.exp-inner{ overflow:hidden; min-height:0; }
+.exp-pad{ padding:2px 2px 14px; }
+
+/* Shell 状态文本 */
+.shell-text{
+  font-family:var(--mono); font-size:11px; line-height:1.75; letter-spacing:.01em;
+  color:#9FB2B0; background:var(--m3-surface); border:1px solid var(--m3-outline-var);
+  border-radius:14px; padding:12px 14px; white-space:pre-wrap; font-variant-numeric:tabular-nums;
+}
+.shell-text .k{ color:#6FC4CF; }
+.exp-actions{ display:flex; gap:10px; margin-top:12px; }
+
+/* M3 tonal 小按钮 */
+.tonal{
+  flex:1; height:40px; border-radius:999px; border:0; cursor:pointer; font:inherit;
+  font-size:13px; font-weight:700; letter-spacing:.03em;
+  background:var(--m3-sec-container); color:var(--m3-on-sec-container);
+  display:flex; align-items:center; justify-content:center; gap:7px;
+  transition:filter .2s, transform .15s;
+}
+.tonal:hover{ filter:brightness(1.12); }
+.tonal:active{ transform:scale(.98); }
+.tonal .msr{ font-size:16px; }
+.tonal.warn{ background:var(--m3-err-container); color:var(--m3-on-err-container); }
+
+/* 日志控制行 */
+.log-row{ display:flex; align-items:center; gap:6px; margin-bottom:10px; }
+.log-row .lbl{ font-size:12px; color:var(--m3-on-var); font-weight:600; margin-right:4px; }
+.log-row .sp{ flex:1; }
+.log-row .icon-btn{
+  width:36px; height:36px; border-radius:50%; border:0; background:transparent; cursor:pointer;
+  display:flex; align-items:center; justify-content:center; color:var(--m3-on-var);
+  transition:background .2s;
+}
+.log-row .icon-btn:hover{ background:rgba(255,255,255,.06); }
+.log-row .icon-btn .msr{ font-size:18px; }
+
+.console{
+  font-family:var(--mono); font-size:10.5px; line-height:1.8; letter-spacing:.01em;
+  color:#8FCFA4; background:#0A0F10; border:1px solid #22302E; border-radius:14px;
+  padding:11px 13px; height:172px; overflow-y:auto; white-space:pre-wrap; word-break:break-all;
+  scrollbar-width:none;
+}
+.console::-webkit-scrollbar{ display:none; }
+.console .t{ color:#4A6B58; }
+.console .warn{ color:#E8C072; }
+.console .ok{ color:#7BD8A5; }
+.console .sys{ color:#5F8BA0; }
+
+.foot{
+  text-align:center; font-size:11px; color:#576767; letter-spacing:.03em; margin:2px 0 8px; line-height:1.6;
+}
+
+/* ===================== 对话框（M3 basic dialog） ===================== */
+.scrim{
+  position:absolute; inset:0; z-index:80; background:rgba(4,8,10,.55);
+  display:flex; align-items:center; justify-content:center; padding:28px;
+  opacity:0; pointer-events:none; transition:opacity .25s var(--ease);
+  backdrop-filter:blur(2px);
+}
+.scrim.show{ opacity:1; pointer-events:auto; }
+.dialog{
+  width:100%; max-width:330px; background:var(--m3-surface-high); border-radius:28px;
+  padding:24px 24px 16px; transform:scale(.9); transition:transform .28s var(--ease-emph);
+  box-shadow:0 24px 70px rgba(0,0,0,.55);
+}
+.scrim.show .dialog{ transform:scale(1); }
+.dialog .d-icon{
+  width:44px; height:44px; border-radius:14px; background:var(--m3-pri-container);
+  display:flex; align-items:center; justify-content:center; margin-bottom:16px;
+}
+.dialog .d-icon .msr{ font-size:23px; color:var(--m3-on-pri-container); }
+.dialog h3{ margin:0; font-size:19px; font-weight:700; color:#EAF1F1; letter-spacing:.01em; }
+.dialog p{ margin:10px 0 0; font-size:12.5px; line-height:1.7; color:var(--m3-on-var); letter-spacing:.015em; }
+.dialog .d-actions{ display:flex; justify-content:flex-end; gap:2px; margin-top:20px; flex-wrap:wrap; }
+
+/* ===================== Snackbar ===================== */
+.snackbar{
+  position:absolute; left:18px; right:18px; bottom:26px; z-index:90;
+  background:var(--m3-inverse); color:var(--m3-on-inverse);
+  border-radius:14px; padding:13px 17px; font-size:12.5px; letter-spacing:.02em;
+  display:flex; align-items:center; gap:9px;
+  transform:translateY(140%); transition:transform .32s var(--ease-emph);
+  box-shadow:0 10px 30px rgba(0,0,0,.45);
+}
+.snackbar.show{ transform:none; }
+.snackbar .msr{ font-size:17px; color:#8FD8E2; flex:0 0 auto; }
+
+/* ===================== 假息屏演示覆盖层 ===================== */
+.dim-demo{
+  position:absolute; inset:0; z-index:95; background:rgba(2,4,5,.93);
+  display:flex; align-items:flex-end; justify-content:center; padding-bottom:64px;
+  opacity:0; pointer-events:none; transition:opacity .4s var(--ease);
+  cursor:pointer;
+}
+.dim-demo.show{ opacity:1; pointer-events:auto; }
+.dim-demo span{ font-size:11.5px; color:#4C5A5A; letter-spacing:.08em; }
+</style>
+</head>
+<body>
+
+<header class="spec-head">
+  <h1>CarPlay 发送端 · 手机侧界面 Material 重构</h1>
+  <p><b>Material Design 3</b> · 暗色 · 信号青主色 —— 右侧手机可直接操作；左侧可切换连接状态预览</p>
+</header>
+
+<div class="stage">
+
+  <!-- ============ 左侧：设计说明 + 评审控制 ============ -->
+  <aside class="notes">
+    <div class="note-card">
+      <h3>状态预览</h3>
+      <div class="seg" id="stateSeg">
+        <button data-s="idle" class="on">未连接</button>
+        <button data-s="connecting">连接中</button>
+        <button data-s="connected">已连接</button>
+      </div>
+      <div class="trigger-col" style="margin-top:12px">
+        <button class="trigger" id="btnDialog"><i class="msr" data-icon="speaker"></i>预览「车机侧声音」弹窗</button>
+        <button class="trigger" id="btnDim"><i class="msr" data-icon="moon"></i>预览「假息屏」效果</button>
+      </div>
+    </div>
+    <div class="note-card">
+      <h3>重构思路</h3>
+      <ul>
+        <li><b>英雄卡承载唯一重心</b>：连接状态可视化 + 主操作，替代原散落一排的按钮</li>
+        <li><b>连接准备清单化</b>：热点 / 蓝牙 / 声音权限三项，带状态徽标，一眼看出缺什么</li>
+        <li><b>调试信息折叠</b>：Shell 全局状态与日志默认收起，日常使用不干扰</li>
+        <li><b>功能零删减</b>：原有全部按钮 / 开关 / 输入框均保留，仅重组层级</li>
+        <li><b>M3 令牌制</b>：色调变量直接映射 Android themes.xml，便于 1:1 还原</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <h3>Android 映射</h3>
+      <ul>
+        <li>卡片 → MaterialCardView（24dp 圆角）</li>
+        <li>开关 → MaterialSwitch · 主按钮 → MaterialButton(pill)</li>
+        <li>主题 → Theme.Material3.Dark + 自定义色调板</li>
+        <li>弹窗 → MaterialAlertDialogBuilder · 轻提示 → Snackbar</li>
+      </ul>
+    </div>
+  </aside>
+
+  <!-- ============ 手机 ============ -->
+  <div class="device-wrap">
+  <div class="device">
+    <div class="screen" id="screen">
+      <div class="punch"></div>
+
+      <!-- 系统状态栏 -->
+      <div class="statusbar">
+        <span id="clock">23:47</span>
+        <div class="right">
+          <i class="msr" data-icon="wifi"></i>
+          <i class="msr" data-icon="bluetooth"></i>
+          <i class="msr" data-icon="signal"></i>
+          <div class="battery"></div>
+        </div>
+      </div>
+
+      <!-- 应用栏 -->
+      <header class="appbar">
+        <div>
+          <h1>CarPlay 发送端</h1>
+          <p class="sub"><span class="dot"></span>HONOR Magic7 Pro · Shizuku 就绪</p>
+        </div>
+        <div class="chip-shizuku"><span class="dot"></span>车机服务在线</div>
+      </header>
+
+      <!-- 内容 -->
+      <div class="scroll">
+
+        <!-- 英雄卡：连接 -->
+        <section class="hero" data-state="idle" id="hero">
+          <svg class="waves" width="210" height="176" viewBox="0 0 210 176" fill="none">
+            <circle class="orbit" cx="105" cy="88" r="86" stroke="#2A3B3E" stroke-width="1.6"
+                    stroke-dasharray="3 9" stroke-linecap="round" opacity=".55"/>
+            <path class="wave w3" d="M44.2 27.2 A86 86 0 0 1 165.8 27.2" stroke-width="2.4" stroke-linecap="round" opacity=".8"/>
+            <path class="wave w2" d="M56.9 39.9 A68 68 0 0 1 153.1 39.9" stroke-width="2.4" stroke-linecap="round" opacity=".85"/>
+            <path class="wave w1" d="M69.6 52.6 A50 50 0 0 1 140.4 52.6" stroke-width="2.6" stroke-linecap="round"/>
+            <circle class="hub-plate" cx="105" cy="88" r="37" fill="#232A2C"/>
+            <g class="hub-car" transform="translate(105,88) scale(1.5) translate(-12,-12)"
+               stroke="currentColor" fill="none" stroke-width="1.5"
+               stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3.8 15.6v-2.8c0-.5.1-1 .3-1.4l1.7-3.4A2.3 2.3 0 0 1 7.9 6.6h8.2c.9 0 1.7.5 2.1 1.4l1.7 3.4c.2.4.3.9.3 1.4v2.8"/>
+              <path d="M4.4 12h15.2"/>
+              <path d="M3.8 15.6h1.6M18.6 15.6h1.6"/>
+              <circle cx="7.6" cy="15.9" r="1.7"/>
+              <circle cx="16.4" cy="15.9" r="1.7"/>
+            </g>
+            <text class="hub-sub" x="105" y="141" text-anchor="middle">CARPLAY</text>
+          </svg>
+
+          <h2 id="heroState">未连接</h2>
+          <p class="subline" id="heroSub">与车机蓝牙完成配对后，点击下方按钮发起无线连接</p>
+          <div class="m3-progress"></div>
+          <button class="cta fill" id="btnMain">
+            <i class="msr" id="btnMainIcon" data-icon="play"></i><span id="btnMainLabel">启动连接</span>
+          </button>
+          <div class="audio-tag live" id="audioTag"></div>
+        </section>
+
+        <!-- 连接准备 -->
+        <section class="card">
+          <div class="card-title">连接准备 <span class="count" id="readyCount">2/3</span></div>
+
+          <div class="row">
+            <div class="icon-tile"><i class="msr" data-icon="wifi"></i></div>
+            <div class="body">
+              <div class="label">车机热点</div>
+              <input class="ssid-input" id="ssidInput" value="Audi_CarPlay_5G" spellcheck="false"/>
+            </div>
+            <button class="tbtn" id="btnWifi">去连接</button>
+          </div>
+
+          <div class="row">
+            <div class="icon-tile"><i class="msr" data-icon="bluetooth"></i></div>
+            <div class="body">
+              <div class="label">蓝牙配对</div>
+              <div class="desc">已与 <span class="mono">Audi MIB3</span> 配对 · 连接自动回连</div>
+            </div>
+            <span class="badge ok">就绪</span>
+          </div>
+
+          <div class="row">
+            <div class="icon-tile"><i class="msr" data-icon="speaker"></i></div>
+            <div class="body">
+              <div class="label">车机侧声音</div>
+              <div class="desc" id="audioDesc">需要「投屏」权限，可选 · 关闭时车机无声音</div>
+            </div>
+            <button class="tbtn" id="btnAudio">授权</button>
+          </div>
+        </section>
+
+        <!-- 车机显示 -->
+        <section class="card">
+          <div class="card-title">车机显示</div>
+
+          <div class="row">
+            <div class="icon-tile"><i class="msr" data-icon="brightness"></i></div>
+            <div class="body">
+              <div class="label">常亮 + 暗幕</div>
+              <div class="desc">手机不锁屏，无操作时自动暗幕 · 防车机触摸冻结</div>
+            </div>
+            <div class="m3-switch on" id="swAlwaysOn"><div class="thumb"><i class="msr" data-icon="check"></i></div></div>
+          </div>
+
+          <div class="row" id="rowDim" style="cursor:pointer">
+            <div class="icon-tile"><i class="msr" data-icon="moon"></i></div>
+            <div class="body">
+              <div class="label">立即假息屏</div>
+              <div class="desc">点击手机屏幕任意处恢复</div>
+            </div>
+            <i class="msr" data-icon="chev_right" style="color:var(--m3-on-var);font-size:22px"></i>
+          </div>
+
+          <div class="row">
+            <div class="icon-tile"><i class="msr" data-icon="wallpaper"></i></div>
+            <div class="body">
+              <div class="label">车机壁纸</div>
+              <div class="desc">全屏 aspectFill</div>
+            </div>
+            <button class="tbtn" id="btnWallpaper">更换</button>
+            <button class="tbtn" id="btnWallpaperReset">恢复默认</button>
+          </div>
+        </section>
+
+        <!-- 高级（默认折叠） -->
+        <section class="card" id="advCard">
+          <div class="exp-head" data-exp>
+            <div class="icon-tile"><i class="msr" data-icon="terminal"></i></div>
+            <div class="body">
+              <div class="label">Shell 全局状态</div>
+              <div class="desc">letterbox / 虚拟屏 / wm 覆盖 —— 调试排查用</div>
+            </div>
+            <i class="msr chev" data-icon="chev_down"></i>
+          </div>
+          <div class="exp-body"><div class="exp-inner"><div class="exp-pad">
+            <div class="shell-text" id="shellText">letterbox 宽高比:   <span class="k">1.05</span>   （会话调优生效）
+force_resizable:  <span class="k">null</span>
+overlay_display:  <span class="k">null</span>
+wm size:          Physical: 1280x2848
+wm density:       Physical: 560
+CarPlay 虚拟屏:    <span class="k">Dock(31) · App(33) · Map(34)</span>
+screen_off_timeout: 60000</div>
+            <div class="exp-actions">
+              <button class="tonal" id="btnShellRefresh"><i class="msr" data-icon="refresh"></i>刷新</button>
+              <button class="tonal warn" id="btnShellReset"><i class="msr" data-icon="restart"></i>复位默认</button>
+            </div>
+          </div></div></div>
+        </section>
+
+        <!-- 日志（默认折叠） -->
+        <section class="card" id="logCard">
+          <div class="exp-head" data-exp>
+            <div class="icon-tile"><i class="msr" data-icon="doc"></i></div>
+            <div class="body">
+              <div class="label">运行日志</div>
+              <div class="desc" id="logMeta">最近 200 条 · 可复制反馈问题</div>
+            </div>
+            <i class="msr chev" data-icon="chev_down"></i>
+          </div>
+          <div class="exp-body"><div class="exp-inner"><div class="exp-pad">
+            <div class="log-row">
+              <span class="lbl">监听日志</span>
+              <div class="m3-switch on" id="swLog"><div class="thumb"><i class="msr" data-icon="check"></i></div></div>
+              <span class="sp"></span>
+              <button class="icon-btn" id="btnClearLog" title="清除"><i class="msr" data-icon="trash"></i></button>
+              <button class="icon-btn" id="btnCopyLog" title="复制"><i class="msr" data-icon="copy"></i></button>
+            </div>
+            <div class="console" id="console"></div>
+          </div></div></div>
+        </section>
+
+        <p class="foot">连接由前台服务保活 · 退出本界面不影响会话</p>
+      </div>
+
+      <!-- 声音选择对话框 -->
+      <div class="scrim" id="audioScrim">
+        <div class="dialog">
+          <div class="d-icon"><i class="msr" data-icon="speaker"></i></div>
+          <h3>在车机侧播放声音？</h3>
+          <p>开启后手机媒体 / 导航声音将投到车机播放，手机本机静音。声音与画面同时传输负载较高，可能出现卡顿；仅看画面时建议关闭。</p>
+          <div class="d-actions">
+            <button class="tbtn" id="dlgCancel">取消</button>
+            <button class="tbtn" id="dlgVideoOnly">仅视频</button>
+            <button class="tbtn" id="dlgAudioOn">开启声音</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Snackbar -->
+      <div class="snackbar" id="snackbar"><i class="msr" data-icon="check_circle"></i><span id="snackText">已更新</span></div>
+
+      <!-- 假息屏演示 -->
+      <div class="dim-demo" id="dimDemo"><span>已假息屏 · 点击屏幕任意处恢复</span></div>
+
+    </div>
+  </div>
+  </div>
+</div>
+
+<script>
+/* ===================== 内联图标集（24 栅格 · stroke 风格） ===================== */
+const ICONS = {
+  wifi: '<circle cx="12" cy="18" r="1.5" fill="currentColor" stroke="none"/><path d="M8.8 14.8a4.6 4.6 0 0 1 6.4 0M5.9 11.6a8.8 8.8 0 0 1 12.2 0M3 8.4a13 13 0 0 1 18 0"/>',
+  bluetooth: '<path d="M6.5 7.5 17.5 16.5 12 21V3l5.5 4.5-11 9"/>',
+  signal: '<rect x="4" y="14.5" width="3.2" height="5.5" rx="1" fill="currentColor" stroke="none"/><rect x="10.4" y="10" width="3.2" height="10" rx="1" fill="currentColor" stroke="none"/><rect x="16.8" y="5" width="3.2" height="15" rx="1" fill="currentColor" stroke="none"/>',
+  speaker: '<path d="M4 9.8v4.4h3.2L12 18.4V5.6L7.2 9.8H4z"/><path d="M15.3 9.2a4 4 0 0 1 0 5.6M17.8 6.8a7.4 7.4 0 0 1 0 10.4"/>',
+  volume_off: '<path d="M4 9.8v4.4h3.2L12 18.4V5.6L7.2 9.8H4z"/><path d="m15.6 9.6 4.8 4.8m0-4.8-4.8 4.8"/>',
+  brightness: '<circle cx="12" cy="12" r="3.6"/><path d="M12 3.2v2.2M12 18.6v2.2M3.2 12h2.2M18.6 12h2.2M5.8 5.8l1.6 1.6M16.6 16.6l1.6 1.6M18.2 5.8l-1.6 1.6M7.4 16.6l-1.6 1.6"/>',
+  moon: '<path d="M20.2 13.6A8.4 8.4 0 0 1 10.4 3.8 8.4 8.4 0 1 0 20.2 13.6z"/>',
+  wallpaper: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="m3.8 16.8 4.4-4 3.9 3.3 3.1-2.7 5 4.2"/>',
+  terminal: '<rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="m7 9.5 3.4 2.5L7 14.5M12.8 15H17"/>',
+  doc: '<rect x="5.5" y="3.5" width="13" height="17" rx="2"/><path d="M9 8.5h6M9 12h6M9 15.5h3.5"/>',
+  chev_right: '<path d="m9.5 6 6 6-6 6"/>',
+  chev_down: '<path d="m6 9.5 6 6 6-6"/>',
+  check: '<path d="M5 12.6l4.4 4.4L19 7.4"/>',
+  play: '<path d="M9 5.8v12.4l10-6.2z" fill="currentColor" stroke="none"/>',
+  spinner: '<circle cx="12" cy="12" r="8.2" stroke-dasharray="36 16"/>',
+  power: '<path d="M12 3.2v8.3"/><path d="M7.4 6.1a7.6 7.6 0 1 0 9.2 0"/>',
+  music: '<path d="M9.6 18V6.6l8.8-2v11.2"/><circle cx="7.2" cy="18" r="2.6"/><circle cx="16" cy="15.8" r="2.6"/>',
+  refresh: '<path d="M19.2 6.8A8.2 8.2 0 1 0 20.2 12"/><path d="M19.8 2.8v4.4h-4.4"/>',
+  restart: '<path d="M4.8 6.8A8.2 8.2 0 1 1 3.8 12"/><path d="M4.2 2.8v4.4h4.4"/>',
+  trash: '<path d="M4.5 6.5h15M9.2 6.5V5a1.4 1.4 0 0 1 1.4-1.4h2.8A1.4 1.4 0 0 1 14.8 5v1.5M6.6 6.5l.7 12.1a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.7-12.1M10 10.6v5.6M14 10.6v5.6"/>',
+  copy: '<rect x="9" y="9" width="10.5" height="10.5" rx="2"/><path d="M6.5 14.8h-1A1.5 1.5 0 0 1 4 13.3V5a1.5 1.5 0 0 1 1.5-1.5h8.3A1.5 1.5 0 0 1 15.3 5v1"/>',
+  check_circle: '<circle cx="12" cy="12" r="8.4"/><path d="m8.4 12.4 2.5 2.5 4.7-5.2"/>',
+};
+function iconSvg(name){
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+         'stroke-linecap="round" stroke-linejoin="round">' + (ICONS[name] || '') + '</svg>';
+}
+function mountIcons(root){
+  const scope = root || document;
+  const list = scope.matches && scope.matches('i[data-icon]:not([data-mounted])')
+    ? [scope, ...scope.querySelectorAll('i[data-icon]:not([data-mounted])')]
+    : [...scope.querySelectorAll('i[data-icon]:not([data-mounted])')];
+  list.forEach(el => {
+    el.innerHTML = iconSvg(el.dataset.icon);
+    el.setAttribute('data-mounted', '1');
+  });
+}
+function setIcon(el, name, cls){
+  el.className = 'msr' + (cls ? ' ' + cls : '');
+  el.dataset.icon = name;
+  el.removeAttribute('data-mounted');
+  mountIcons(el);
+}
+mountIcons();
+
+/* ===================== 基础工具 ===================== */
+const $ = s => document.querySelector(s);
+const hero = $('#hero'), console_ = $('#console');
+let state = 'idle', audioOn = false, logOn = true;
+
+/* 时钟 */
+function tick(){
+  const d = new Date();
+  $('#clock').textContent = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+tick(); setInterval(tick, 5000);
+
+/* Snackbar */
+let snackTimer;
+function snack(msg){
+  $('#snackText').textContent = msg;
+  $('#snackbar').classList.add('show');
+  clearTimeout(snackTimer);
+  snackTimer = setTimeout(() => $('#snackbar').classList.remove('show'), 2400);
+}
+
+/* ===================== 日志台 ===================== */
+function stamp(){
+  const d = new Date();
+  return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' +
+         String(d.getSeconds()).padStart(2,'0');
+}
+function logLine(html, cls=''){
+  if (!logOn) return;
+  const div = document.createElement('div');
+  div.innerHTML = `<span class="t">${stamp()}</span> ${html}`;
+  if (cls) div.classList.add(cls);
+  console_.appendChild(div);
+  while (console_.children.length > 200) console_.firstChild.remove();
+  console_.scrollTop = console_.scrollHeight;
+}
+logLine('<span class="sys">CarPlay Sender Phase 0 就绪</span>');
+logLine('真车：蓝牙配对 + 加入车机热点 → 点「启动连接」');
+logLine('MEDIA: 通知使用权已授予（音乐卡可显示歌名）', 'ok');
+
+/* ===================== 状态机 ===================== */
+let connectTimer, durationTimer, connSeconds = 0;
+
+function setState(s){
+  state = s;
+  hero.dataset.state = s;
+  $('#heroState').textContent = { idle:'未连接', connecting:'正在连接', connected:'已连接' }[s];
+  const btn = $('#btnMain'), label = $('#btnMainLabel'), ic = $('#btnMainIcon');
+  const tag = $('#audioTag');
+  tag.className = 'audio-tag ' + (audioOn ? 'live' : 'muted');
+  tag.innerHTML = audioOn
+    ? '<i class="msr" data-icon="music"></i>车机侧声音 · 开启'
+    : '<i class="msr" data-icon="volume_off"></i>车机侧声音 · 关闭';
+  mountIcons(tag);
+  if (s === 'idle'){
+    $('#heroSub').textContent = '与车机蓝牙完成配对后，点击下方按钮发起无线连接';
+    btn.className = 'cta fill'; btn.disabled = false;
+    label.textContent = '启动连接';
+    setIcon(ic, 'play');
+    clearInterval(durationTimer);
+  } else if (s === 'connecting'){
+    $('#heroSub').textContent = '蓝牙 iAP2 握手 → 加入车机热点 → 建立 CarPlay 会话';
+    btn.className = 'cta fill'; btn.disabled = true;
+    label.textContent = '连接中…';
+    setIcon(ic, 'spinner', 'spin');
+  } else {
+    connSeconds = 0;
+    renderConnected();
+    clearInterval(durationTimer);
+    durationTimer = setInterval(renderConnected, 1000);
+    btn.className = 'cta outline-err'; btn.disabled = false;
+    label.textContent = '断开连接';
+    setIcon(ic, 'power');
+  }
+  document.querySelectorAll('#stateSeg button').forEach(b =>
+    b.classList.toggle('on', b.dataset.s === s));
+}
+function renderConnected(){
+  const m = String(Math.floor(connSeconds/60)).padStart(2,'0');
+  const sec = String(connSeconds%60).padStart(2,'0');
+  $('#heroSub').innerHTML = `<b>DiPlay 测试台</b> · ${m}:${sec} · 视频 4Mbps 推流中`;
+  connSeconds++;
+}
+
+/* 主按钮 → 弹声音选择 → connecting → connected */
+$('#btnMain').addEventListener('click', () => {
+  if (state === 'connected'){ disconnect(); return; }
+  if (state !== 'idle') return;
+  $('#audioScrim').classList.add('show');
+});
+function disconnect(){
+  clearInterval(connectTimer);
+  logLine('SESSION: 已断开（保活服务停止）');
+  setState('idle');
+  snack('连接已断开');
+}
+function beginStart(audio){
+  audioOn = audio;
+  $('#audioScrim').classList.remove('show');
+  logLine(`MODE: 本次连接${audio ? '开启车机侧声音' : '仅推视频（更流畅）'}`);
+  if (audio) logLine('MODE: 投屏权限已授予，音频通道待会话建立', 'ok');
+  setState('connecting');
+  logLine('BLE: iAP2 会话建立，等待车机回连…');
+  connectTimer = setTimeout(() => {
+    logLine('WIFI: 已加入 Audi_CarPlay_5G（5GHz）', 'ok');
+    setTimeout(() => {
+      logLine('<span class="ok">SESSION: CarPlay 会话已建立 · 虚拟屏就绪</span>', 'ok');
+      setState('connected');
+      snack('已连接到车机');
+    }, 1600);
+  }, 2200);
+}
+$('#dlgAudioOn').addEventListener('click', () => beginStart(true));
+$('#dlgVideoOnly').addEventListener('click', () => beginStart(false));
+$('#dlgCancel').addEventListener('click', () => $('#audioScrim').classList.remove('show'));
+$('#audioScrim').addEventListener('click', e => {
+  if (e.target === $('#audioScrim')) $('#audioScrim').classList.remove('show');
+});
+
+/* 评审控制：状态直切 + 弹窗/假息屏预览 */
+document.querySelectorAll('#stateSeg button').forEach(b =>
+  b.addEventListener('click', () => { clearInterval(connectTimer); setState(b.dataset.s); }));
+$('#btnDialog').addEventListener('click', () => $('#audioScrim').classList.add('show'));
+$('#btnDim').addEventListener('click', () => $('#dimDemo').classList.add('show'));
+$('#dimDemo').addEventListener('click', () => $('#dimDemo').classList.remove('show'));
+
+/* ===================== 其余交互 ===================== */
+/* 开关（M3） */
+document.querySelectorAll('.m3-switch').forEach(sw => {
+  sw.addEventListener('click', () => {
+    sw.classList.toggle('on');
+    if (sw.id === 'swAlwaysOn')
+      snack('常亮+暗幕已' + (sw.classList.contains('on') ? '开启' : '关闭'));
+    if (sw.id === 'swLog'){
+      logOn = sw.classList.contains('on');
+      snack('日志监听已' + (logOn ? '开启' : '关闭'));
+    }
+  });
+});
+
+/* 连接准备 */
+$('#btnWifi').addEventListener('click', () => {
+  logLine('WIFI: 打开系统 WLAN 设置，请选择 ' + $('#ssidInput').value);
+  snack('已跳转 WLAN 设置');
+});
+$('#btnAudio').addEventListener('click', () => {
+  const b = $('#btnAudio');
+  if (!b.classList.contains('done')){
+    b.textContent = '已授权'; b.classList.add('done');
+    $('#audioDesc').textContent = '投屏权限已就绪 · 连接时可选开启';
+    $('#readyCount').textContent = '3/3';
+    logLine('MODE: 投屏权限已授予（重启手机后需重新授权）', 'ok');
+    snack('投屏权限已授予');
+  }
+});
+
+/* 车机显示 */
+$('#rowDim').addEventListener('click', () => {
+  $('#dimDemo').classList.add('show');
+  logLine('DIMMER: 手动假息屏（点击屏幕恢复）');
+});
+$('#btnWallpaper').addEventListener('click', () => {
+  logLine('WALLPAPER: 壁纸已更新（会话中约 1 秒内上车）', 'ok');
+  snack('壁纸已更新');
+});
+$('#btnWallpaperReset').addEventListener('click', () => {
+  logLine('WALLPAPER: 已恢复内置默认（CarPlay 官方深色壁纸）', 'ok');
+  snack('已恢复默认壁纸');
+});
+
+/* 折叠卡 */
+document.querySelectorAll('[data-exp]').forEach(h =>
+  h.addEventListener('click', () => h.closest('.card').classList.toggle('open')));
+
+/* Shell */
+$('#btnShellRefresh').addEventListener('click', e => {
+  e.stopPropagation();
+  logLine('SHELL: 状态已刷新');
+  snack('Shell 状态已刷新');
+});
+$('#btnShellReset').addEventListener('click', e => {
+  e.stopPropagation();
+  logLine('<span class="warn">SHELL-RESET: letterbox/wm size/density 已复位 · 残留屏释放 2/2</span>', 'warn');
+  snack('已复位为系统默认');
+});
+
+/* 日志 */
+$('#btnClearLog').addEventListener('click', e => { e.stopPropagation(); console_.innerHTML=''; });
+$('#btnCopyLog').addEventListener('click', e => {
+  e.stopPropagation();
+  logLine('已复制 ' + console_.innerText.length + ' 字符日志', 'ok');
+  snack('日志已复制到剪贴板');
+});
+
+/* 设备缩放适配视口 */
+function fit(){
+  const wrap = document.querySelector('.device-wrap');
+  const scale = Math.min(1, (innerHeight - 120) / 902);
+  wrap.style.transform = 'scale(' + scale + ')';
+  wrap.style.transformOrigin = 'top center';
+  wrap.style.height = (902 * scale) + 'px';
+  wrap.style.marginBottom = (902 * scale - 902) + 'px';
+}
+fit(); addEventListener('resize', fit);
+
+setState('idle');
+</script>
+</body>
+</html>

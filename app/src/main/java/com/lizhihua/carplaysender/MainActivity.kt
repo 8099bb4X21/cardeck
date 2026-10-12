@@ -1,48 +1,91 @@
 package com.lizhihua.carplaysender
 
 import android.Manifest
+import android.animation.ObjectAnimator
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
-import android.widget.Toast
-import android.widget.Button
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.text.method.ScrollingMovementMethod
+import android.view.View
+import android.view.animation.LinearInterpolator
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import com.lizhihua.carplaysender.bt.Iap2BluetoothServer
-import com.lizhihua.carplaysender.net.CarPlayCtrlAdvertiser
-import com.lizhihua.carplaysender.net.CarPlayServiceBrowser
-import com.lizhihua.carplaysender.iap2.Iap2MessageIds
-import com.lizhihua.carplaysender.net.WifiCarPlayConnector
-import java.text.SimpleDateFormat
-import java.util.Date
+import androidx.core.graphics.drawable.DrawableCompat
+import com.lizhihua.carplaysender.ui.SignalWavesView
 import java.util.Locale
 
 /**
- * Phase 0 验证台：四步验证无线 CarPlay 发送端的网络链路。
- *  ① 加入接收端热点（WifiNetworkSpecifier，app 专属网络）
- *  ② mDNS 发现接收端的 _airplay._tcp（拿到 AirPlay 端点 + TXT）
- *  ③ 蓝牙监听 iAP2 UUID，等接收端（xcertplay）回连并转储链路层字节
- *  ④ 广播 _carplay-ctrl._tcp，验证接收端能反连手机控制通道
+ * 手机侧界面（Material 3 暗色重构，设计稿 design/phone-ui-proto.html）：
+ * 英雄卡承载连接状态与主操作；连接准备清单化；Shell 状态与日志折叠收纳。
+ * 会话管线（对象、日志缓冲）全部由 [SessionController] 持有——Activity 只是挂屏：
+ * 销毁重建不影响会话，重进界面日志自动续显；连接状态由 1s 轮询对账。
  */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var statusText: TextView
-    private lateinit var shellStateText: TextView
-    private lateinit var logText: TextView
+    private enum class HeroState { IDLE, CONNECTING, CONNECTED }
+
+    private lateinit var deviceSubtitle: TextView
+    private lateinit var shizukuChip: TextView
+    private lateinit var signalWaves: SignalWavesView
+    private lateinit var hubPlate: FrameLayout
+    private lateinit var hubCar: ImageView
+    private lateinit var hubCaption: TextView
+    private lateinit var heroStateText: TextView
+    private lateinit var heroSubline: TextView
+    private lateinit var heroProgress: View
+    private lateinit var ctaButton: LinearLayout
+    private lateinit var ctaIcon: ImageView
+    private lateinit var ctaLabel: TextView
+    private lateinit var audioTag: TextView
+    private lateinit var readyCount: TextView
     private lateinit var ssidInput: EditText
+    private lateinit var btDesc: TextView
+    private lateinit var btBadge: TextView
+    private lateinit var audioDesc: TextView
+    private lateinit var btnAudio: TextView
+    private lateinit var switchAlwaysOn: androidx.appcompat.widget.SwitchCompat
+    private lateinit var advBody: View
+    private lateinit var advChevron: ImageView
+    private lateinit var shellStateText: TextView
+    private lateinit var logBody: View
+    private lateinit var logChevron: ImageView
+    private lateinit var switchLog: androidx.appcompat.widget.SwitchCompat
+    private lateinit var logText: TextView
+    private lateinit var snackbar: TextView
+
+    // ---- 英雄卡状态机（1s 轮询 SessionController 对账）----
+    private var heroState: HeroState? = null
+    private var connectedAt = 0L
+    private var ctaSpinner: ObjectAnimator? = null
+    private var hubBlink: ObjectAnimator? = null
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val heroTick: Runnable = object : Runnable {
+        override fun run() {
+            if (isFinishing || isDestroyed) return
+            tickHero()
+            mainHandler.postDelayed(this, 1_000L)
+        }
+    }
 
     /**
-     * 会话管线（对象、日志缓冲）全部由 [SessionController] 持有——Activity 只是挂屏：
-     * 销毁重建不影响会话，重进界面日志自动续显（见 SessionController 类注释）。
+     * 挂屏注册：日志续显（含划掉界面重进时已有会话的历史日志）+ SSID 回填。
      */
     private val logListener: (String) -> Unit = { text ->
         runOnUiThread {
-            if (!isFinishing && !isDestroyed) logText.text = text
+            if (!isFinishing && !isDestroyed) renderConsole(text)
         }
     }
 
@@ -66,7 +109,7 @@ class MainActivity : AppCompatActivity() {
             log(
                 "WALLPAPER: ${if (ok) "壁纸已更新（会话进行中约 1 秒内上车；下次连接自动生效）" else "保存失败"}",
             )
-            Toast.makeText(this, if (ok) "壁纸已更新" else "保存失败", Toast.LENGTH_SHORT).show()
+            if (ok) snack("壁纸已更新") else snack("保存失败")
         }
 
     private val audioPermissionLauncher =
@@ -88,8 +131,8 @@ class MainActivity : AppCompatActivity() {
             log("MODE: ✓ 投屏权限已授予（重启手机后需重新授权）")
             // 会话已在进行中授权（授权晚于连接）：等投影就绪后动态补启音频通道
             Thread({
-                val deadline = android.os.SystemClock.uptimeMillis() + 5_000L
-                while (android.os.SystemClock.uptimeMillis() < deadline) {
+                val deadline = SystemClock.uptimeMillis() + 5_000L
+                while (SystemClock.uptimeMillis() < deadline) {
                     if (com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null) break
                     Thread.sleep(200)
                 }
@@ -109,7 +152,7 @@ class MainActivity : AppCompatActivity() {
     private val pendingStartAfterProjection = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /**
-     * 「启动连接」前的音频选择弹窗（2026-10-10 用户要求）：
+     * 「启动连接」前的音频选择弹窗：
      * 音频与视频同时推流会显著增加负载（实测 48k 立体声 PCM ≈1.5Mbps + 视频 ≈4Mbps），
      * 测试台出现画面卡顿与断连；真车链路能力未知。因此默认不推音频，需用户显式开启。
      */
@@ -161,7 +204,7 @@ class MainActivity : AppCompatActivity() {
                 permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
             }
             // 通知权限（API 33+）：前台服务通知可见；拒绝也不影响保活
-            if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            if (Build.VERSION.SDK_INT >= 33 &&
                 ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") !=
                 PackageManager.PERMISSION_GRANTED
             ) {
@@ -175,7 +218,37 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        statusText = findViewById(R.id.statusText)
+        deviceSubtitle = findViewById(R.id.deviceSubtitle)
+        shizukuChip = findViewById(R.id.shizukuChip)
+        signalWaves = findViewById(R.id.signalWaves)
+        hubPlate = findViewById(R.id.hubPlate)
+        hubCar = findViewById(R.id.hubCar)
+        hubCaption = findViewById(R.id.hubCaption)
+        heroStateText = findViewById(R.id.heroStateText)
+        heroSubline = findViewById(R.id.heroSubline)
+        heroProgress = findViewById(R.id.heroProgress)
+        ctaButton = findViewById(R.id.ctaButton)
+        ctaIcon = findViewById(R.id.ctaIcon)
+        ctaLabel = findViewById(R.id.ctaLabel)
+        audioTag = findViewById(R.id.audioTag)
+        readyCount = findViewById(R.id.readyCount)
+        ssidInput = findViewById(R.id.ssidInput)
+        btDesc = findViewById(R.id.btDesc)
+        btBadge = findViewById(R.id.btBadge)
+        audioDesc = findViewById(R.id.audioDesc)
+        btnAudio = findViewById(R.id.btnAudio)
+        switchAlwaysOn = findViewById(R.id.switchAlwaysOn)
+        advBody = findViewById(R.id.advBody)
+        advChevron = findViewById(R.id.advChevron)
+        shellStateText = findViewById(R.id.shellStateText)
+        logBody = findViewById(R.id.logBody)
+        logChevron = findViewById(R.id.logChevron)
+        switchLog = findViewById(R.id.switchLog)
+        logText = findViewById(R.id.logText)
+        snackbar = findViewById(R.id.snackbar)
+
+        deviceSubtitle.text = deviceName()
+        logText.movementMethod = ScrollingMovementMethod()
 
         // 进程重启兜底：若上次会话未正常退役，「常亮」改过的屏幕超时需要恢复
         run {
@@ -192,33 +265,30 @@ class MainActivity : AppCompatActivity() {
                 }.start()
             }
         }
-        logText = findViewById(R.id.logText)
-        ssidInput = findViewById(R.id.ssidInput)
 
         // 会话中枢（进程级）：登记 applicationContext + 创建会话对象；
-        // 挂屏注册：日志续显（含划掉界面重进时已有会话的历史日志）+ SSID 回填
+        // 挂屏注册：日志续显 + SSID 回填
         SessionController.ensure(this)
         SessionController.logListener = logListener
         SessionController.ssidSink = ssidSink
-        logText.text = SessionController.logText()
+        renderConsole(SessionController.logText())
 
         setUpUiControls()
     }
 
-    /** onCreate 的 UI 初始化尾部：开关/按钮/日志面板（从原 onCreate 拆出，保持结构清晰）。 */
+    /** onCreate 的 UI 初始化尾部：开关/按钮/折叠卡（会话逻辑不变，仅挂新界面）。 */
     private fun setUpUiControls() {
-        // 模式已简化为固定「隐形屏」（桌面/镜像模式已按需移除，2026-10-10）：
-        // 启动器（dock + 应用屏双虚拟屏）即唯一形态。
         val preferences = getSharedPreferences("settings", Context.MODE_PRIVATE)
-        // 清理旧版本遗留的模式偏好
+        // 清理旧版本遗留的模式偏好（模式已固定为「隐形屏」启动器）
         if (preferences.contains("mode")) {
             preferences.edit().remove("mode").apply()
         }
-        val alwaysOn = findViewById<android.widget.CheckBox>(R.id.switchAlwaysOn)
+
+        // ---- 常亮+暗幕 ----
         com.lizhihua.carplaysender.ui.ScreenDimmer.enabled =
             preferences.getBoolean("alwaysOn", true)
-        alwaysOn.isChecked = com.lizhihua.carplaysender.ui.ScreenDimmer.enabled
-        alwaysOn.setOnCheckedChangeListener { _, checked ->
+        switchAlwaysOn.isChecked = com.lizhihua.carplaysender.ui.ScreenDimmer.enabled
+        switchAlwaysOn.setOnCheckedChangeListener { _, checked ->
             com.lizhihua.carplaysender.ui.ScreenDimmer.enabled = checked
             preferences.edit().putBoolean("alwaysOn", checked).apply()
             if (checked) {
@@ -238,9 +308,31 @@ class MainActivity : AppCompatActivity() {
             log("MODE: 常亮+暗幕 ${if (checked) "开启" else "关闭"}")
         }
 
-        findViewById<Button>(R.id.btnProjection).setOnClickListener {
-            // 投屏权限的唯一用途现在是「车机侧声音」（播放捕获）：与 RECORD_AUDIO 一起请求。
-            // （镜像模式已移除，投屏不再用于画面。）
+        // ---- 英雄卡主操作 ----
+        ctaButton.setOnClickListener {
+            when (heroState) {
+                HeroState.CONNECTED -> SessionController.disconnect(this)
+                HeroState.IDLE -> showAudioChoiceDialog()
+                null, HeroState.CONNECTING -> {}
+            }
+        }
+
+        // ---- 连接准备 ----
+        findViewById<TextView>(R.id.btnWifi).setOnClickListener {
+            val ssid = ssidInput.text.toString().trim()
+            log(
+                "WiFi: 打开系统WLAN设置——请选择 \"$ssid\" 并输入热点密码连接；" +
+                    "若提示\"无法访问互联网\"请选择保持连接；连上后回来等待自动连接",
+            )
+            try {
+                startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
+            } catch (_: Exception) {
+                log("WiFi: 无法打开WLAN设置，请手动前往 设置 > WLAN")
+            }
+        }
+
+        // 车机侧声音授权（原「申请投屏权限」）：RECORD_AUDIO + MediaProjection 一起请求
+        btnAudio.setOnClickListener {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
                 PackageManager.PERMISSION_GRANTED
             ) {
@@ -250,91 +342,58 @@ class MainActivity : AppCompatActivity() {
             projectionLauncher.launch(manager.createScreenCaptureIntent())
         }
 
-        findViewById<Button>(R.id.btnWifi).setOnClickListener {
-            val ssid = ssidInput.text.toString().trim()
-            log(
-                "WiFi: 打开系统WLAN设置——请选择 \"$ssid\" 并输入热点密码连接；" +
-                    "若提示\"无法访问互联网\"请选择保持连接；连上后回来点②扫描",
-            )
-            try {
-                startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
-            } catch (_: Exception) {
-                log("WiFi: 无法打开WLAN设置，请手动前往 设置 > WLAN")
+        // ---- 车机显示 ----
+        findViewById<LinearLayout>(R.id.rowDim).setOnClickListener {
+            if (!com.lizhihua.carplaysender.ui.ScreenDimmer.isAttached()) {
+                snack("暗幕未就绪（连接成功后自动启用）")
+                return@setOnClickListener
             }
+            com.lizhihua.carplaysender.ui.ScreenDimmer.enterDimNow()
+            log("DIMMER: 手动假息屏（点击屏幕恢复）")
         }
 
-        findViewById<Button>(R.id.btnBluetooth).setOnClickListener {
-            showAudioChoiceDialog()
-        }
-
-        // ---- 车机壁纸（aspectFill 全屏；GL 合成器最底层）----
-        findViewById<Button>(R.id.btnWallpaperPick).setOnClickListener {
+        findViewById<TextView>(R.id.btnWallpaperPick).setOnClickListener {
             wallpaperPicker.launch(
                 androidx.activity.result.PickVisualMediaRequest(
                     androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly,
                 ),
             )
         }
-        findViewById<Button>(R.id.btnWallpaperReset).setOnClickListener {
+        findViewById<TextView>(R.id.btnWallpaperReset).setOnClickListener {
             val ok = com.lizhihua.carplaysender.ui.WallpaperStore.resetToDefault(this)
             log("WALLPAPER: ${if (ok) "已恢复内置默认（CarPlay 官方深色壁纸）" else "恢复失败"}")
-            Toast.makeText(this, if (ok) "已恢复默认壁纸" else "恢复失败", Toast.LENGTH_SHORT).show()
-        }
-        findViewById<Button>(R.id.btnDimNow).setOnClickListener {
-            if (!com.lizhihua.carplaysender.ui.ScreenDimmer.isAttached()) {
-                log("DIMMER: 暗幕未就绪（连接成功后自动启用；或打开「常亮+暗幕」开关）")
-                return@setOnClickListener
-            }
-            com.lizhihua.carplaysender.ui.ScreenDimmer.enterDimNow()
-            log("DIMMER: 手动假息屏（点击屏幕任意处恢复）")
+            snack(if (ok) "已恢复默认壁纸" else "恢复失败")
         }
 
-        findViewById<Button>(R.id.btnDisconnect).setOnClickListener {
-            // 操作 SessionController 持有的真管线对象——任意 Activity 实例都能断到真会话
-            SessionController.disconnect(this)
-        }
+        // ---- 折叠卡：高级 / 日志 ----
+        bindExpandable(R.id.advHeader, advBody, advChevron)
+        bindExpandable(R.id.logHeader, logBody, logChevron)
 
-        // ---- Shell 全局状态面板（调试/复位）----
-        // 展示调试期间可能被 shell 改动过、且影响全局的项（letterbox 宽高比由本 App
-        // 会话期间设置；force_resizable_activities 为开发者选项；overlay 为叠加屏实验
-        // 残留；wm size/density 为主屏覆盖；CarPlay 虚拟屏为会话/残留清单）。
-        // 「设为默认值」一键复位全部（下次连接会自动重新应用会话调优）。
-        shellStateText = findViewById(R.id.shellStateText)
-        findViewById<Button>(R.id.btnShellRefresh).setOnClickListener { refreshShellState() }
-        findViewById<Button>(R.id.btnShellReset).setOnClickListener { resetShellState() }
-        refreshShellState()
+        // ---- Shell 全局状态 ----
+        findViewById<View>(R.id.btnShellRefresh).setOnClickListener { refreshShellState() }
+        findViewById<View>(R.id.btnShellReset).setOnClickListener { resetShellState() }
+        refreshShellState(startupCheck = true)
 
-        // 日志开关（默认开；关闭后不采集、不显示日志区域；选择持久化）
-        val logSwitch = findViewById<android.widget.CheckBox>(R.id.switchLog)
-        val logHeader = findViewById<android.view.View>(R.id.logHeader)
+        // ---- 日志开关（默认开；关闭后不采集、不渲染；选择持久化） ----
         var logEnabled = preferences.getBoolean("logEnabled", true)
         SessionController.logEnabled = logEnabled
-        logSwitch.isChecked = logEnabled
-        fun applyLogVisibility() {
-            // 只隐藏日志内容：标题行必须常驻（否则关掉后无法再打开）
-            logHeader.visibility = android.view.View.VISIBLE
-            logText.visibility = if (logEnabled) android.view.View.VISIBLE else android.view.View.GONE
-        }
-        logSwitch.setOnCheckedChangeListener { _, checked ->
+        switchLog.isChecked = logEnabled
+        switchLog.setOnCheckedChangeListener { _, checked ->
             logEnabled = checked
             SessionController.logEnabled = checked
             preferences.edit().putBoolean("logEnabled", checked).apply()
-            applyLogVisibility()
+            renderConsole(SessionController.logText())
         }
-        applyLogVisibility()
-        findViewById<Button>(R.id.btnClearLog).setOnClickListener {
-            SessionController.clearLog()
-        }
-
-        findViewById<Button>(R.id.btnCopyLog).setOnClickListener {
+        findViewById<ImageView>(R.id.btnClearLog).setOnClickListener { SessionController.clearLog() }
+        findViewById<ImageView>(R.id.btnCopyLog).setOnClickListener {
             val text = SessionController.logText()
             if (text.isEmpty()) {
-                Toast.makeText(this, "日志为空", Toast.LENGTH_SHORT).show()
+                snack("日志为空")
                 return@setOnClickListener
             }
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             clipboard.setPrimaryClip(ClipData.newPlainText("CarPlay Sender 日志", text))
-            Toast.makeText(this, "已复制 ${text.length} 字符日志", Toast.LENGTH_SHORT).show()
+            snack("已复制 ${text.length} 字符日志")
         }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
@@ -361,13 +420,12 @@ class MainActivity : AppCompatActivity() {
             }
         }.start()
 
-        // 启动即检查：隐形屏模式 + 常亮开 + 无悬浮窗权限 → 主动请求
-        // （模式与开关都持久化，切换监听器不会在启动时触发，必须在这里补）
+        // 启动即检查：常亮开 + 无悬浮窗权限 → 主动请求
         if (com.lizhihua.carplaysender.ui.ScreenDimmer.enabled) {
             if (!android.provider.Settings.canDrawOverlays(this)) {
                 promptOverlayPermission("「常亮+暗幕」已开启。")
             } else {
-                // 立即就绪：假息屏按钮/自动暗幕不再依赖连接建立
+                // 立即就绪：假息屏/自动暗幕不再依赖连接建立
                 com.lizhihua.carplaysender.ui.ScreenDimmer.attach(this)
             }
         }
@@ -381,12 +439,251 @@ class MainActivity : AppCompatActivity() {
         log("测试台：两台手机蓝牙配对 -> 备用机跑 xcertplay 无线模式 -> 点「启动连接」等待回连")
     }
 
+    private fun bindExpandable(headerId: Int, body: View, chevron: ImageView) {
+        findViewById<View>(headerId).setOnClickListener {
+            val opening = body.visibility != View.VISIBLE
+            body.visibility = if (opening) View.VISIBLE else View.GONE
+            chevron.animate().rotation(if (opening) 180f else 0f).setDuration(250L).start()
+        }
+    }
+
+    // ==================== 英雄卡状态机 ====================
+
+    private fun tickHero() {
+        val s = when {
+            SessionController.videoSender?.isRunning == true -> HeroState.CONNECTED
+            SessionController.isSessionRunning() || SessionController.sessionStarting.get() ->
+                HeroState.CONNECTING
+            else -> HeroState.IDLE
+        }
+        if (s != heroState) {
+            if (s == HeroState.CONNECTED) connectedAt = SystemClock.elapsedRealtime()
+            heroState = s
+            applyHeroState(s)
+        }
+        updateConnectedSubline()
+        updateAudioTag()
+        updateReadyRow()
+        updateShizukuChip()
+    }
+
+    private fun applyHeroState(s: HeroState) {
+        signalWaves.setState(
+            when (s) {
+                HeroState.IDLE -> SignalWavesView.State.IDLE
+                HeroState.CONNECTING -> SignalWavesView.State.CONNECTING
+                HeroState.CONNECTED -> SignalWavesView.State.CONNECTED
+            },
+        )
+        val (plateColor, carColor) = when (s) {
+            HeroState.IDLE -> getColor(R.color.m3_surface_high) to getColor(R.color.m3_on_var)
+            HeroState.CONNECTING ->
+                getColor(R.color.m3_pri_container) to getColor(R.color.m3_on_pri_container)
+            HeroState.CONNECTED -> getColor(R.color.m3_primary) to getColor(R.color.m3_on_primary)
+        }
+        hubPlate.background.mutate().setTint(plateColor)
+        hubCar.setColorFilter(carColor)
+        hubCaption.setTextColor(
+            if (s == HeroState.IDLE) getColor(R.color.m3_mono_dim) else 0xFF5C8B96.toInt(),
+        )
+
+        hubBlink?.cancel()
+        hubBlink = null
+        hubCar.alpha = 1f
+        if (s == HeroState.CONNECTING) {
+            hubBlink = ObjectAnimator.ofFloat(hubCar, View.ALPHA, 1f, 0.45f).apply {
+                duration = 1_200L
+                repeatCount = ObjectAnimator.INFINITE
+                repeatMode = ObjectAnimator.REVERSE
+                start()
+            }
+        }
+
+        heroStateText.text = when (s) {
+            HeroState.IDLE -> "未连接"
+            HeroState.CONNECTING -> "正在连接"
+            HeroState.CONNECTED -> "已连接"
+        }
+        heroProgress.visibility = if (s == HeroState.CONNECTING) View.VISIBLE else View.GONE
+
+        when (s) {
+            HeroState.IDLE -> {
+                heroSubline.text = "与车机蓝牙完成配对后，点击下方按钮发起无线连接"
+                ctaButton.setBackgroundResource(R.drawable.bg_cta_fill)
+                ctaLabel.setTextColor(getColor(R.color.m3_on_primary))
+                ctaIcon.imageTintList = android.content.res.ColorStateList.valueOf(
+                    getColor(R.color.m3_on_primary),
+                )
+                ctaIcon.setImageResource(R.drawable.ic_play)
+                ctaLabel.text = "启动连接"
+                ctaButton.isEnabled = true
+                audioTag.visibility = View.GONE
+            }
+            HeroState.CONNECTING -> {
+                heroSubline.text = "蓝牙 iAP2 握手 → 加入车机热点 → 建立 CarPlay 会话"
+                ctaButton.setBackgroundResource(R.drawable.bg_cta_fill)
+                ctaLabel.setTextColor(0x73DDE5E5)
+                ctaIcon.imageTintList = android.content.res.ColorStateList.valueOf(0x73DDE5E5)
+                ctaIcon.setImageResource(R.drawable.ic_spinner)
+                ctaLabel.text = "连接中…"
+                ctaButton.isEnabled = false
+                audioTag.visibility = View.GONE
+            }
+            HeroState.CONNECTED -> {
+                ctaButton.setBackgroundResource(R.drawable.bg_cta_outline_err)
+                ctaLabel.setTextColor(getColor(R.color.m3_error))
+                ctaIcon.imageTintList = android.content.res.ColorStateList.valueOf(
+                    getColor(R.color.m3_error),
+                )
+                ctaIcon.setImageResource(R.drawable.ic_power)
+                ctaLabel.text = "断开连接"
+                ctaButton.isEnabled = true
+                audioTag.visibility = View.VISIBLE
+            }
+        }
+
+        ctaSpinner?.cancel()
+        ctaSpinner = null
+        ctaIcon.rotation = 0f
+        if (s == HeroState.CONNECTING) {
+            ctaSpinner = ObjectAnimator.ofFloat(ctaIcon, View.ROTATION, 0f, 360f).apply {
+                duration = 900L
+                repeatCount = ObjectAnimator.INFINITE
+                interpolator = LinearInterpolator()
+                start()
+            }
+        }
+    }
+
+    private fun updateConnectedSubline() {
+        if (heroState != HeroState.CONNECTED) return
+        val elapsed = SystemClock.elapsedRealtime() - connectedAt
+        val mm = elapsed / 60_000
+        val ss = elapsed % 60_000 / 1_000
+        val ssid = ssidInput.text.toString().trim().ifEmpty { "车机热点" }
+        heroSubline.text = String.format(Locale.US, "已连接 · %s · %02d:%02d · 视频推流中", ssid, mm, ss)
+    }
+
+    private fun updateAudioTag() {
+        if (heroState != HeroState.CONNECTED) return
+        val on = SessionController.audioEnabledForSession &&
+            SessionController.audioSender?.isRunning == true
+        val icon = ContextCompat.getDrawable(
+            this,
+            if (on) R.drawable.ic_music_small else R.drawable.ic_volume_off_small,
+        )!!
+        DrawableCompat.setTint(icon.mutate(), getColor(if (on) R.color.m3_ok else R.color.m3_outline))
+        audioTag.setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null)
+        audioTag.text = if (on) "车机侧声音 · 开启" else "车机侧声音 · 关闭"
+    }
+
+    /** 连接准备计数：热点 SSID / 蓝牙配对 / 投屏权限。 */
+    private fun updateReadyRow() {
+        var ready = 0
+        if (ssidInput.text.toString().trim().isNotEmpty()) ready++
+        val btGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
+            PackageManager.PERMISSION_GRANTED
+        var bondedCount = -1
+        if (btGranted) {
+            try {
+                val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
+                    .adapter
+                bondedCount = adapter?.bondedDevices?.size ?: -1
+            } catch (_: SecurityException) {
+                bondedCount = -1
+            }
+        }
+        if (bondedCount > 0) ready++
+        if (com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null) ready++
+
+        btBadge.visibility = if (bondedCount >= 0) View.VISIBLE else View.GONE
+        if (bondedCount >= 0) {
+            if (bondedCount > 0) {
+                btBadge.background.mutate().setTint(getColor(R.color.m3_ok_dot))
+                btBadge.text = "就绪"
+                btDesc.text = "已与 $bondedCount 台设备配对 · 连接自动回连"
+            } else {
+                btBadge.background.mutate().setTint(getColor(R.color.m3_amber))
+                btBadge.text = "未配对"
+                btDesc.text = "尚未配对——请先与车机蓝牙配对"
+            }
+        }
+        val projectionReady =
+            com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null
+        if (projectionReady) {
+            btnAudio.text = "已授权"
+            btnAudio.setTextColor(getColor(R.color.m3_ok))
+            audioDesc.text = "投屏权限已就绪 · 连接时可选开启"
+        } else {
+            btnAudio.text = "授权"
+            btnAudio.setTextColor(getColor(R.color.m3_primary))
+            audioDesc.text = "需要「投屏」权限，可选 · 关闭时车机无声音"
+        }
+        readyCount.text = "$ready/3"
+    }
+
+    /** 设备营销名（ro.product.marketname），取不到时退回 Build.MODEL。 */
+    private fun deviceName(): String =
+        try {
+            val sp = Class.forName("android.os.SystemProperties")
+            val get = sp.getMethod("get", String::class.java)
+            (get.invoke(null, "ro.product.marketname") as? String)
+                ?.takeIf { it.isNotBlank() } ?: Build.MODEL
+        } catch (_: Exception) {
+            Build.MODEL
+        }
+
+    private fun updateShizukuChip() {
+        val ready = com.lizhihua.carplaysender.shizuku.ShizukuGate.state(this) ==
+            com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
+        shizukuChip.text = if (ready) "车机服务在线" else "Shizuku 未就绪"
+        shizukuChip.compoundDrawables.getOrNull(0)?.let {
+            DrawableCompat.setTint(
+                it.mutate(),
+                getColor(if (ready) R.color.m3_ok_dot else R.color.m3_amber),
+            )
+        }
+        // 副标题与原型一致：设备名 · Shizuku 状态（点色随状态）
+        deviceSubtitle.text = "${deviceName()} · ${if (ready) "Shizuku 就绪" else "Shizuku 未就绪"}"
+        deviceSubtitle.compoundDrawables.getOrNull(0)?.let {
+            DrawableCompat.setTint(
+                it.mutate(),
+                getColor(if (ready) R.color.m3_ok_dot else R.color.m3_amber),
+            )
+        }
+    }
+
+    // ==================== 通用 UI 工具 ====================
+
     private fun log(message: String) {
         // 写入进程级缓冲（logcat + 文件 + 挂屏渲染均由 SessionController 统一处理）
         SessionController.appendLog(message)
-        runOnUiThread {
-            if (!isFinishing && !isDestroyed) statusText.text = SessionController.statusLine()
+    }
+
+    private fun renderConsole(text: String) {
+        logText.text =
+            if (SessionController.logEnabled) text else "日志采集已关闭（打开「监听日志」开关恢复）"
+        logText.post {
+            val layout = logText.layout ?: return@post
+            val bottom = layout.getLineBottom(layout.lineCount - 1) -
+                logText.height + logText.paddingBottom
+            logText.scrollTo(0, bottom.coerceAtLeast(0))
         }
+    }
+
+    private var snackRunnable: Runnable? = null
+
+    /** 自绘 M3 Snackbar（底部反色胶囊，替代 Toast）。 */
+    private fun snack(message: String) {
+        snackbar.text = message
+        snackbar.visibility = View.VISIBLE
+        snackbar.translationY = snackbar.height + 60f
+        snackbar.animate().translationY(0f).setDuration(260L).start()
+        snackRunnable?.let { mainHandler.removeCallbacks(it) }
+        snackRunnable = Runnable {
+            snackbar.animate().translationY(snackbar.height + 60f).setDuration(260L)
+                .withEndAction { snackbar.visibility = View.GONE }.start()
+        }.also { mainHandler.postDelayed(it, 2_400L) }
     }
 
     /**
@@ -395,21 +692,20 @@ class MainActivity : AppCompatActivity() {
      * 代次计数器而非显示屏 ID；真实 ID 在 "displayId=39, uniqueId='…'" 段里。
      */
     private fun parseCarPlayDisplays(dump: String): List<Pair<Int, String>> =
-        Regex("displayId=(\\d+), uniqueId='[^']*CarPlay(Dock|AppHi|App)")
+        Regex("displayId=(\\d+), uniqueId='[^']*CarPlay(Dock|AppHi|App|Map)")
             .findAll(dump)
             .map { it.groupValues[1].toInt() to "CarPlay${it.groupValues[2]}" }
             .distinctBy { it.first }
             .toList()
 
-    /** 读取 shell 全局状态（后台线程 + UI 回填）。 */
-    private fun refreshShellState() {
-        val view = shellStateText
-        view.text = "读取中…"
+    /** 读取 shell 全局状态（后台线程 + UI 回填）。[startupCheck] 时顺带做残留虚拟屏检测。 */
+    private fun refreshShellState(startupCheck: Boolean = false) {
+        shellStateText.text = "读取中…"
         Thread {
             if (com.lizhihua.carplaysender.shizuku.ShizukuGate.state(this) !=
                 com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
             ) {
-                runOnUiThread { view.text = "Shizuku 未就绪——shell 状态读取需要 Shizuku" }
+                runOnUiThread { shellStateText.text = "Shizuku 未就绪——shell 状态读取需要 Shizuku" }
                 return@Thread
             }
             fun sh(cmd: String) = com.lizhihua.carplaysender.shizuku.Shell.exec(cmd, 4_000L).output
@@ -419,8 +715,8 @@ class MainActivity : AppCompatActivity() {
             val overlay = sh("settings get global overlay_display_devices").ifBlank { "null" }
             val wmSize = sh("wm size").replace("\n", " / ").ifBlank { "?" }
             val wmDensity = sh("wm density").replace("\n", " / ").ifBlank { "?" }
-            val displays = parseCarPlayDisplays(sh("dumpsys display"))
-                .joinToString(", ") { "${it.second}(${it.first})" }
+            val carDisplays = parseCarPlayDisplays(sh("dumpsys display"))
+            val displays = carDisplays.joinToString(", ") { "${it.second}(${it.first})" }
             val timeout = sh("settings get system screen_off_timeout").ifBlank { "?" }
             val text = buildString {
                 appendLine("letterbox 宽高比: $letterbox  （1.05=会话调优生效；0.0=系统默认）")
@@ -431,19 +727,77 @@ class MainActivity : AppCompatActivity() {
                 appendLine("CarPlay 虚拟屏: " + displays.trim().replace("\n", ", ").ifEmpty { "无" })
                 appendLine("screen_off_timeout: $timeout  （App 常亮功能管理）")
             }
-            runOnUiThread { view.text = text.trim() }
+            runOnUiThread { shellStateText.text = text.trim() }
+            if (startupCheck) {
+                val residual = carDisplays.filter { it.first !in currentSessionDisplayIds() }
+                if (residual.isNotEmpty()) {
+                    log("SHELL: 启动检测到 ${residual.size} 个残留虚拟屏: " +
+                        residual.joinToString(", ") { "${it.second}(${it.first})" })
+                    runOnUiThread { promptResidualDisplays(residual) }
+                }
+            }
         }.start()
+    }
+
+    /** 当前会话持有的虚拟屏（不参与残留清理）。 */
+    private fun currentSessionDisplayIds(): Set<Int> = buildSet {
+        val launcher = com.lizhihua.carplaysender.launcher.VirtualLauncher
+        listOf(
+            launcher.dockDisplayId,
+            launcher.appDisplayId,
+            launcher.mapDisplayId,
+            launcher.gridDisplayId,
+        ).forEach { if (it >= 0) add(it) }
+    }
+
+    /** 启动检测到残留 CarPlay 虚拟屏：询问是否立即清理（上次会话异常退出遗留）。 */
+    private fun promptResidualDisplays(residual: List<Pair<Int, String>>) {
+        if (isFinishing || isDestroyed) return
+        val names = residual.joinToString("\n") { "· ${it.second}（displayId=${it.first}）" }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("检测到残留虚拟屏")
+            .setMessage(
+                "发现 ${residual.size} 个上次会话遗留的 CarPlay 虚拟屏：\n$names\n\n" +
+                    "残留屏会持续占用显示资源，并可能影响下次连接。是否立即清理？",
+            )
+            .setPositiveButton("清理") { _, _ ->
+                Thread {
+                    val released = releaseDisplays(residual.map { it.first })
+                    log("SHELL: 残留虚拟屏清理完成（释放 $released/${residual.size}）")
+                    runOnUiThread {
+                        snack("已释放 $released/${residual.size} 个残留屏")
+                        refreshShellState()
+                    }
+                }.start()
+            }
+            .setNegativeButton("暂不", null)
+            .show()
+    }
+
+    /** 释放指定虚拟屏（CarInputClient 懒绑定 + 3 秒短等）。后台线程调用，返回成功数。 */
+    private fun releaseDisplays(ids: List<Int>): Int {
+        if (ids.isEmpty()) return 0
+        var svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
+        if (svc == null) {
+            com.lizhihua.carplaysender.shizuku.CarInputClient.ensure(this)
+            val deadline = SystemClock.uptimeMillis() + 3_000L
+            while (svc == null && SystemClock.uptimeMillis() < deadline) {
+                Thread.sleep(150)
+                svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
+            }
+        }
+        val bound = svc ?: return 0
+        return ids.count { runCatching { bound.releaseDisplay(it) }.getOrDefault(false) }
     }
 
     /** 一键把 shell 全局状态复位为系统默认值（含残留虚拟屏释放，保留当前会话屏）。 */
     private fun resetShellState() {
-        val view = shellStateText
-        view.text = "复位中…"
+        shellStateText.text = "复位中…"
         Thread {
             if (com.lizhihua.carplaysender.shizuku.ShizukuGate.state(this) !=
                 com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
             ) {
-                runOnUiThread { view.text = "Shizuku 未就绪——shell 复位需要 Shizuku" }
+                runOnUiThread { shellStateText.text = "Shizuku 未就绪——shell 复位需要 Shizuku" }
                 return@Thread
             }
             fun sh(cmd: String) = com.lizhihua.carplaysender.shizuku.Shell.exec(cmd, 5_000L)
@@ -458,38 +812,20 @@ class MainActivity : AppCompatActivity() {
                 val r = sh(cmd)
                 if (r.ok) "✓ $name" else "✗ $name（${r.output.take(40)}）"
             }
-            // 残留虚拟屏释放：保留当前会话的 dock/app 屏，其余 CarPlay* 屏逐一释放
-            val keep = setOf(
-                com.lizhihua.carplaysender.launcher.VirtualLauncher.dockDisplayId,
-                com.lizhihua.carplaysender.launcher.VirtualLauncher.appDisplayId,
-            )
-            // uniqueId 尾数是代次计数器（≠ display id）！实际 id 取 "displayId=NN, uniqueId=…CarPlayXxx"
+            // 残留虚拟屏释放：保留当前会话的各屏，其余 CarPlay* 屏逐一释放
             val ids = parseCarPlayDisplays(sh("dumpsys display").output)
                 .map { it.first }
-                .filter { it !in keep }
+                .filter { it !in currentSessionDisplayIds() }
                 .toList()
-            // UserService 懒绑定：新进程里 service 可能还是 null——先 ensure 并短等
-            var svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
-            if (svc == null && ids.isNotEmpty()) {
-                com.lizhihua.carplaysender.shizuku.CarInputClient.ensure(this)
-                val deadline = android.os.SystemClock.uptimeMillis() + 3_000L
-                while (svc == null && android.os.SystemClock.uptimeMillis() < deadline) {
-                    Thread.sleep(150)
-                    svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
-                }
-            }
-            val bound = svc
-            val released = if (bound == null) 0 else ids.count { id ->
-                runCatching { bound.releaseDisplay(id) }.getOrDefault(false)
-            }
+            val released = releaseDisplays(ids)
             val summary = results.joinToString("；") + "；残留屏释放 $released/${ids.size}"
             log("SHELL-RESET: $summary")
             runOnUiThread {
-                view.text = "复位结果：\n" + results.joinToString("\n") +
+                shellStateText.text = "复位结果：\n" + results.joinToString("\n") +
                     "\n残留虚拟屏: 释放 $released/${ids.size}（保留当前会话屏）\n" +
                     "提示：letterbox 调优会在下次连接时自动重新应用"
+                refreshShellState()
             }
-            refreshShellState()
         }.start()
     }
 
@@ -521,22 +857,20 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun preferences(): android.content.SharedPreferences =
-        getSharedPreferences("settings", Context.MODE_PRIVATE)
+    override fun onResume() {
+        super.onResume()
+        mainHandler.post(heroTick)
+    }
 
-    /**
-     * 日志落盘（files/main_debug.log）：荣耀机型 logcat 被 HKS 加密，
-     * 该文件是 adb 侧唯一调试通道（run-as 读取）。2MB 上限自动滚动。
-     */
-    private fun appendDebugFile(message: String) {
-        // 与 CarPlayService 共用 DebugFileLog（同一把锁，避免同文件并发写交叉）
-        com.lizhihua.carplaysender.util.DebugFileLog.append(this, message)
+    override fun onPause() {
+        super.onPause()
+        mainHandler.removeCallbacks(heroTick)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         // 只解绑"挂屏"，不动会话——连接由前台服务保活、对象归 SessionController 持有；
-        // 显式断开请用「断开」按钮（任意实例都能断到真管线）。
+        // 显式断开请用「断开连接」按钮（任意实例都能断到真管线）。
         if (SessionController.logListener === logListener) SessionController.logListener = null
         if (SessionController.ssidSink === ssidSink) SessionController.ssidSink = null
     }
