@@ -496,6 +496,8 @@ object VirtualLauncher {
                 if (dockDisplayId >= 0) runCatching { svc.releaseDisplay(dockDisplayId) }
                 if (appDisplayId >= 0) runCatching { svc.releaseDisplay(appDisplayId) }
                 if (appHiDisplayId >= 0) runCatching { svc.releaseDisplay(appHiDisplayId) }
+                // 地图屏同样由 shell 持有：不释放会在断开后残留（重装后由启动检测兜底发现）
+                if (mapDisplayId >= 0) runCatching { svc.releaseDisplay(mapDisplayId) }
             }
             displaysViaService = false
         }

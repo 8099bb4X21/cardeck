@@ -171,6 +171,22 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    /**
+     * 「断开连接」确认弹窗（防误触）：断开会立即中断车机画面，
+     * 且投屏授权随保活服务停止而失效（下次要车机侧声音需重新授权）。
+     */
+    private fun promptDisconnect() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("断开连接？")
+            .setMessage(
+                "将停止车机推流并关闭保活服务，车机画面会立即中断。\n\n" +
+                    "注意：投屏授权会随服务停止失效，下次如需车机侧声音请重新授权。",
+            )
+            .setPositiveButton("断开") { _, _ -> SessionController.disconnect(this) }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
     private fun beginWithAudio(enabled: Boolean) {
         SessionController.audioEnabledForSession = enabled
         if (!enabled) {
@@ -311,7 +327,7 @@ class MainActivity : AppCompatActivity() {
         // ---- 英雄卡主操作 ----
         ctaButton.setOnClickListener {
             when (heroState) {
-                HeroState.CONNECTED -> SessionController.disconnect(this)
+                HeroState.CONNECTED -> promptDisconnect()
                 HeroState.IDLE -> showAudioChoiceDialog()
                 null, HeroState.CONNECTING -> {}
             }
