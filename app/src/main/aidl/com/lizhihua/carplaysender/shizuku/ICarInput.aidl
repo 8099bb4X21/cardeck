@@ -19,6 +19,10 @@ interface ICarInput {
     int createDisplay(String name, int width, int height, int dpi, in Surface surface);
     boolean releaseDisplay(int displayId);
 
+    // 动态调整虚拟屏尺寸（创建者才可调）：屏上应用的配置变更由系统派发，
+    // 应用自行 relayout——地图屏「分屏 ⇄ 全屏」切换即用此能力（任务不动，状态不丢）。
+    boolean resizeDisplay(int displayId, int width, int height, int dpi);
+
     boolean ping();
     String diag();
 }

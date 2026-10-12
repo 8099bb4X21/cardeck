@@ -57,10 +57,12 @@ object TouchRouter {
         // 主画面坐标 → 分流：
         //  横屏：dock 左侧竖条（x < dockW），app 在右（x 平移 dockW）
         //  竖屏：dock 底部横条（y > appHeight），app 在上
-        val inDock: Boolean
-        val targetDisplay: Int
-        val localX: Int
-        val localY: Int
+        //  地图屏（仪表盘/全屏，优先于应用区）：全屏=应用区全部；分屏=dock 右侧 tile 区域。
+        //  地图屏与流 1:1 创建，坐标直接平移；其余走活动应用屏（含超采样倍率换算）。
+        var inDock: Boolean
+        var targetDisplay = -1
+        var localX = 0
+        var localY = 0
         if (launcher.dockAtBottom) {
             val appH = launcher.appHeightPx
             inDock = contact.yPixels >= appH
@@ -69,11 +71,32 @@ object TouchRouter {
             localY = if (inDock) contact.yPixels - appH else contact.yPixels
         } else {
             inDock = contact.xPixels < dockW
-            // 活动应用屏（原生或超采样）：注入坐标是所注入虚显的物理像素
-            targetDisplay = if (inDock) launcher.dockDisplayId else launcher.activeAppDisplayId()
-            val scale = if (inDock) 1f else launcher.activeAppScale().coerceAtLeast(1f)
-            localX = if (inDock) contact.xPixels else ((contact.xPixels - dockW) * scale).toInt()
-            localY = (contact.yPixels * scale).toInt()
+            var routedToMap = false
+            if (!inDock && launcher.mapDisplayId >= 0 &&
+                (launcher.mapFullscreen || launcher.dashboardMode)
+            ) {
+                val tileX = contact.xPixels - dockW
+                val tileVisibleW = if (launcher.mapFullscreen) Int.MAX_VALUE else launcher.mapTileWidth
+                if (tileX in 0 until tileVisibleW) {
+                    inDock = false
+                    targetDisplay = launcher.mapDisplayId
+                    // 地图屏按应用区全尺寸创建；分屏时合成器采样其画面中央带区
+                    // （宽的一半居中），触摸坐标需加回同一偏移
+                    localX = if (launcher.mapFullscreen) {
+                        tileX
+                    } else {
+                        tileX + launcher.appAreaWidth / 4
+                    }
+                    localY = contact.yPixels
+                    routedToMap = true
+                }
+            }
+            if (!routedToMap) {
+                targetDisplay = if (inDock) launcher.dockDisplayId else launcher.activeAppDisplayId()
+                val scale = if (inDock) 1f else launcher.activeAppScale().coerceAtLeast(1f)
+                localX = if (inDock) contact.xPixels else ((contact.xPixels - dockW) * scale).toInt()
+                localY = (contact.yPixels * scale).toInt()
+            }
         }
         if (targetDisplay < 0) {
             diag("目标屏无效 dock=${launcher.dockDisplayId} app=${launcher.appDisplayId}")

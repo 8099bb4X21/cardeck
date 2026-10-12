@@ -220,6 +220,18 @@ class CarInputServiceImpl(private val context: Context) : ICarInput.Stub() {
         }
     }
 
+    override fun resizeDisplay(displayId: Int, width: Int, height: Int, dpi: Int): Boolean {
+        val vd = synchronized(virtualDisplays) { virtualDisplays[displayId] } ?: return false
+        return try {
+            vd.resize(width, height, dpi)
+            Log.i(TAG, "resizeDisplay id=$displayId -> ${width}x$height@$dpi")
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "resizeDisplay $displayId failed: $t")
+            false
+        }
+    }
+
     override fun releaseDisplay(displayId: Int): Boolean {
         val vd = synchronized(virtualDisplays) { virtualDisplays.remove(displayId) } ?: return false
         return try {

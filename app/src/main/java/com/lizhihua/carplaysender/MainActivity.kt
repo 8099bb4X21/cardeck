@@ -343,6 +343,24 @@ class MainActivity : AppCompatActivity() {
             permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
         }
 
+        // 通知使用权（媒体会话枚举，音乐卡数据源）：Shizuku 在场时静默授权
+        Thread {
+            if (com.lizhihua.carplaysender.shizuku.ShizukuGate.state(this) ==
+                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
+            ) {
+                val result = com.lizhihua.carplaysender.shizuku.Shell.exec(
+                    "cmd notification allow_listener " +
+                        com.lizhihua.carplaysender.media.MediaListenerService.componentName(this)
+                            .flattenToString(),
+                    timeoutMs = 4000,
+                )
+                log(
+                    if (result.ok) "MEDIA: 通知使用权已授予（音乐卡可显示歌名/播放状态）"
+                    else "MEDIA: 通知使用权授予失败——音乐卡无歌名，可在系统设置手动开「通知使用权」",
+                )
+            }
+        }.start()
+
         // 启动即检查：隐形屏模式 + 常亮开 + 无悬浮窗权限 → 主动请求
         // （模式与开关都持久化，切换监听器不会在启动时触发，必须在这里补）
         if (com.lizhihua.carplaysender.ui.ScreenDimmer.enabled) {

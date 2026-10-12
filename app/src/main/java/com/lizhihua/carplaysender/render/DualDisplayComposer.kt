@@ -34,6 +34,10 @@ class DualDisplayComposer(
     companion object {
         private const val TAG = "DualComposer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+
+        /** 仪表盘卡片边距（流像素；与 GridActivity CARD_MARGIN_PX 保持一致）。 */
+        private const val TILE_MARGIN = 16f
+        private const val TILE_CORNER_RADIUS = 24f
     }
 
     private val running = AtomicBoolean(false)
@@ -46,6 +50,10 @@ class DualDisplayComposer(
     /** 是否创建了超采样应用屏（start 时根据传入尺寸确定）。 */
     @Volatile
     private var hasHiInput = false
+
+    /** 是否创建了地图屏输入（start 时根据传入尺寸确定）。 */
+    @Volatile
+    private var hasMapInput = false
 
     /** 当前应用区显示的是超采样屏（true）还是原生屏（false）。触摸路由以它为准。 */
     @Volatile
@@ -69,8 +77,12 @@ class DualDisplayComposer(
     @Volatile
     private var appInput: Input? = null
 
+    /** 地图屏输入（GL 线程创建）。 */
     @Volatile
-    var onSurfacesReady: ((dock: Surface, app: Surface, appHi: Surface?) -> Unit)? = null
+    private var mapInput: Input? = null
+
+    @Volatile
+    var onSurfacesReady: ((dock: Surface, app: Surface, appHi: Surface?, map: Surface?) -> Unit)? = null
 
     @Throws(IllegalStateException::class)
     fun start(
@@ -80,15 +92,18 @@ class DualDisplayComposer(
         appHeightPx: Int,
         appHiWidthPx: Int = 0,
         appHiHeightPx: Int = 0,
+        mapWidthPx: Int = 0,
+        mapHeightPx: Int = 0,
     ) {
         if (running.getAndSet(true)) return
         hasHiInput = appHiWidthPx > 0 && appHiHeightPx > 0
+        hasMapInput = mapWidthPx > 0 && mapHeightPx > 0
         val ready = CountDownLatch(1)
         startLatch = ready
         var failure: IllegalStateException? = null
         glThread = Thread({
             try {
-                runGl(dockWidthPx, dockHeightPx, appWidthPx, appHeightPx, appHiWidthPx, appHiHeightPx)
+                runGl(dockWidthPx, dockHeightPx, appWidthPx, appHeightPx, appHiWidthPx, appHiHeightPx, mapWidthPx, mapHeightPx)
             } catch (error: IllegalStateException) {
                 failure = error
             } finally {
@@ -125,6 +140,21 @@ class DualDisplayComposer(
     /** 应用区当前活动屏（触摸路由/坐标换算以此为准）。 */
     fun isActiveAppHi(): Boolean = activeAppHi
 
+    /**
+     * 地图屏（tile）布局状态：HIDDEN=普通桌面；SPLIT=采样画面中央带区映射到
+     * 应用区左半（地图中心≈车辆位置，裁剪语义正确）；FULLSCREEN=整个应用区。
+     * 地图屏始终以全屏尺寸创建（应用窗口稳定，任务不迁移），分/全屏只是采样几何。
+     */
+    enum class TileLayout { HIDDEN, SPLIT, FULLSCREEN }
+
+    @Volatile
+    private var tileLayout = TileLayout.HIDDEN
+
+    /** 切换地图 tile 布局。 */
+    fun setTileLayout(layout: TileLayout) {
+        tileLayout = layout
+    }
+
     fun stop() {
         if (!running.getAndSet(false)) return
         glThread?.interrupt()
@@ -144,7 +174,16 @@ class DualDisplayComposer(
         var frameCount = 0
     }
 
-    private fun runGl(dockW: Int, dockH: Int, appW: Int, appH: Int, hiW: Int, hiH: Int) {
+    private fun runGl(
+        dockW: Int,
+        dockH: Int,
+        appW: Int,
+        appH: Int,
+        hiW: Int,
+        hiH: Int,
+        mapW: Int,
+        mapH: Int,
+    ) {
         // ---- EGL ----
         val display: EGLDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         checkEgl(display != EGL14.EGL_NO_DISPLAY, "eglGetDisplay")
@@ -203,6 +242,7 @@ class DualDisplayComposer(
         val dock = newInput(dockW, dockH)
         val app = newInput(appW, appH).also { appInput = it }
         val hi = if (hasHiInput) newInput(hiW, hiH).also { appHi = it } else null
+        val map = if (hasMapInput) newInput(mapW, mapH).also { mapInput = it } else null
 
         // ---- 着色器 ----
         val program = buildProgram(oes = true)
@@ -211,27 +251,55 @@ class DualDisplayComposer(
         val aTexCoord = GLES20.glGetAttribLocation(program, "aTexCoord")
         val uSTMatrix = GLES20.glGetUniformLocation(program, "uSTMatrix")
         val uTexture = GLES20.glGetUniformLocation(program, "uTexture")
+        val uClipEnabled = GLES20.glGetUniformLocation(program, "uClipEnabled")
+        val uClipRect = GLES20.glGetUniformLocation(program, "uClipRect")
+        val uClipRadius = GLES20.glGetUniformLocation(program, "uClipRadius")
         GLES20.glUniform1i(uTexture, 0)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
 
         val matrix = FloatArray(16)
-        fun drawInput(input: Input, x0: Float, x1: Float, y0: Float, y1: Float) {
+
+        /** [u0]/[u1]：横向纹理采样区间（地图分屏时采样缓冲中央带区用）。 */
+        fun drawInputUV(
+            input: Input,
+            x0: Float,
+            x1: Float,
+            y0: Float,
+            y1: Float,
+            u0: Float,
+            u1: Float,
+            cornerRadius: Float = 0f,
+        ) {
             input.surfaceTexture.getTransformMatrix(matrix)
             GLES20.glUniformMatrix4fv(uSTMatrix, 1, false, matrix, 0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, input.texture)
+            // 圆角裁剪（GL 坐标 y 翻转：传入矩形以左上原点表达，此处换算）
+            if (cornerRadius > 0f) {
+                GLES20.glUniform1i(uClipEnabled, 1)
+                GLES20.glUniform4f(
+                    uClipRect,
+                    x0, outHeight - y1, x1, outHeight - y0,
+                )
+                GLES20.glUniform1f(uClipRadius, cornerRadius)
+            } else {
+                GLES20.glUniform1i(uClipEnabled, 0)
+            }
             // 像素坐标 → 裁剪坐标（GL 左下原点；纹理翻转由 uSTMatrix 处理，勿重复翻转）
             fun px(v: Float) = v / outWidth * 2f - 1f
             fun py(v: Float) = v / outHeight * 2f - 1f
             val positions = floatBuffer(
                 px(x0), py(y0), px(x1), py(y0), px(x0), py(y1), px(x1), py(y1),
             )
-            val coords = floatBuffer(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
+            val coords = floatBuffer(u0, 0f, u1, 0f, u0, 1f, u1, 1f)
             GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, positions)
             GLES20.glEnableVertexAttribArray(aPos)
             GLES20.glVertexAttribPointer(aTexCoord, 2, GLES20.GL_FLOAT, false, 0, coords)
             GLES20.glEnableVertexAttribArray(aTexCoord)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
+
+        fun drawInput(input: Input, x0: Float, x1: Float, y0: Float, y1: Float) =
+            drawInputUV(input, x0, x1, y0, y1, u0 = 0f, u1 = 1f)
 
         fun composeFrame(fullRedraw: Boolean) {
             // 待切应用屏：目标屏出帧即切（帧号前进 / 已有内容 600ms 兜底 / 2s 超时兜底）
@@ -272,6 +340,14 @@ class DualDisplayComposer(
                     it.surfaceTexture.updateTexImage()
                 }
             }
+            map?.let {
+                if (it.hasNewFrame) {
+                    it.hasNewFrame = false
+                    it.hasContent = true
+                    it.frameCount++
+                    it.surfaceTexture.updateTexImage()
+                }
+            }
             val activeInput = if (activeAppHi) hi else app
             if (dockAtBottom) {
                 // 竖屏：dock 横条贴底（GL 坐标 y=0 为底边），app 在其余区域
@@ -284,8 +360,27 @@ class DualDisplayComposer(
                 if (activeInput?.hasContent == true) {
                     drawInput(activeInput, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
                 }
+                // 地图层叠在应用区之上（HIDDEN 不画）：
+                //  FULLSCREEN=整个应用区（采样全缓冲）；SPLIT=左半区域采样缓冲中央带区
+                //  （地图应用把车辆/当前位置渲染在画面中心，裁两侧即得到以车为中心的地图）。
+                val layout = tileLayout
+                if (map?.hasContent == true && layout != TileLayout.HIDDEN) {
+                    if (layout == TileLayout.FULLSCREEN) {
+                        drawInput(map!!, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
+                    } else {
+                        // 卡片形态：四周留边 + 圆角（与音乐卡一致）
+                        val tileW = (outWidth - dockW) / 2f - TILE_MARGIN * 2f
+                        drawInputUV(
+                            map!!,
+                            dockW + TILE_MARGIN, dockW + TILE_MARGIN + tileW,
+                            TILE_MARGIN, outHeight - TILE_MARGIN,
+                            u0 = 0.25f, u1 = 0.75f,
+                            cornerRadius = TILE_CORNER_RADIUS,
+                        )
+                    }
+                }
             }
-            if (fullRedraw || dock.hasContent || app.hasContent || hi?.hasContent == true) {
+            if (fullRedraw || dock.hasContent || app.hasContent || hi?.hasContent == true || map?.hasContent == true) {
                 EGL14.eglSwapBuffers(display, outputSurface)
             }
         }
@@ -295,7 +390,7 @@ class DualDisplayComposer(
         GLES20.glClearColor(0.04f, 0.07f, 0.09f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         EGL14.eglSwapBuffers(display, outputSurface)
-        onSurfacesReady?.invoke(dock.surface, app.surface, hi?.surface)
+        onSurfacesReady?.invoke(dock.surface, app.surface, hi?.surface, map?.surface)
         startLatch?.countDown()
 
         // ---- 合成循环 ----
@@ -321,6 +416,10 @@ class DualDisplayComposer(
             runCatching { app.surface.release() }
             runCatching { dock.surfaceTexture.release() }
             runCatching { app.surfaceTexture.release() }
+            map?.let {
+                runCatching { it.surface.release() }
+                runCatching { it.surfaceTexture.release() }
+            }
             hi?.let {
                 runCatching { it.surface.release() }
                 runCatching { it.surfaceTexture.release() }
@@ -347,7 +446,16 @@ class DualDisplayComposer(
             precision mediump float;
             varying vec2 vTexCoord;
             uniform samplerExternalOES uTexture;
+            uniform int uClipEnabled;
+            uniform vec4 uClipRect;
+            uniform float uClipRadius;
             void main() {
+                if (uClipEnabled == 1) {
+                    vec2 p = gl_FragCoord.xy;
+                    vec2 half2 = vec2(uClipRadius);
+                    vec2 c = clamp(p, uClipRect.xy + half2, uClipRect.zw - half2);
+                    if (distance(p, c) > uClipRadius) discard;
+                }
                 gl_FragColor = texture2D(uTexture, vTexCoord);
             }
             """.trimIndent()

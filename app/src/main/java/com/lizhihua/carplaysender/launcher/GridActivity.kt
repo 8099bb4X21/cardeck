@@ -2,7 +2,10 @@ package com.lizhihua.carplaysender.launcher
 
 import com.lizhihua.carplaysender.R
 
+import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.view.View
 import android.os.Bundle
 import android.view.ViewGroup
 import android.widget.GridLayout
@@ -47,6 +50,105 @@ class GridActivity : AppCompatActivity() {
     /** 壁纸变更监听（WallpaperStore 主线程回调；解码在本类自行切后台线程）。 */
     private val wallpaperListener = { _: Long -> refreshWallpaperIfChanged() }
 
+    /** 仪表盘模式面板（分屏时显示在应用区右半；左半由地图 tile 覆盖）。 */
+    private var dashboardView: android.view.View? = null
+
+    /** 仪表盘模式变化（VirtualLauncher 通知）。 */
+    private val dashboardListener = { dashboard: Boolean ->
+        runOnUiThread { applyDashboardMode(dashboard) }
+    }
+
+    /** 媒体状态监听（MediaSessionsState 主线程回调）。 */
+    private val mediaStateListener = {
+        runOnUiThread { renderMediaCard() }
+    }
+
+    /** 卡片视觉（暗幕透明度/模糊）——与 dock 一致（DockPrefs）。 */
+    private val dockPrefsListener = { runOnUiThread { applyDashCardChrome() } }
+
+    /**
+     * 应用卡片视觉：暗幕 alpha 与壁纸模糊半径（RenderEffect，半径随网格屏
+     * 密度放大 1.5 倍以与 dock 视觉一致）。
+     */
+    private fun applyDashCardChrome() {
+        val panel = dashboardView ?: return
+        val scrim = panel.findViewById<View>(R.id.dashScrim)
+        val alpha = (DockPrefs.scrimOpacity(this) * 255 / 100).coerceIn(0, 255)
+        scrim.background = android.graphics.drawable.ColorDrawable(
+            android.graphics.Color.argb(alpha, 0, 0, 0),
+        )
+        val wallpaper = panel.findViewById<ImageView>(R.id.dashWallpaper)
+        val percent = DockPrefs.blur(this)
+        if (percent <= 0) {
+            wallpaper.setRenderEffect(null)
+        } else {
+            val radius = percent / 100f * 40f * resources.displayMetrics.density
+            wallpaper.setRenderEffect(
+                android.graphics.RenderEffect.createBlurEffect(
+                    radius, radius, android.graphics.Shader.TileMode.CLAMP,
+                ),
+            )
+        }
+    }
+
+    /**
+     * 音乐卡壁纸：全画布切片中「音乐卡区域」的裁剪（与全屏壁纸同映射，
+     * 区域 = 地图卡右侧至卡片右边距）。
+     */
+    private fun refreshDashWallpaper() {
+        val panel = dashboardView ?: return
+        val wallpaper = panel.findViewById<ImageView>(R.id.dashWallpaper) ?: return
+        val params = wallpaper.layoutParams ?: return
+        val scale = VirtualLauncher.gridScale()
+        val canvasWidth = (VirtualLauncher.streamWidthPx * scale).toInt()
+        val canvasHeight = (VirtualLauncher.streamHeightPx * scale).toInt()
+        if (canvasWidth <= 0 || canvasHeight <= 0) return
+        Thread({
+            val bitmap = runCatching {
+                com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
+                    this@GridActivity, canvasWidth, canvasHeight,
+                )
+            }.getOrNull() ?: return@Thread
+            val margin = (CARD_MARGIN_PX * scale).toInt()
+            val cardX = ((VirtualLauncher.dockWidthPx + VirtualLauncher.mapTileWidth + CARD_MARGIN_PX) * scale).toInt()
+            val cropX = cardX.coerceAtMost(bitmap.width - 2)
+            val cropY = margin.coerceAtMost(bitmap.height - 2)
+            val cropW = (bitmap.width - cropX - margin).coerceAtLeast(2)
+            val cropH = (bitmap.height - cropY * 2).coerceAtLeast(2)
+            val slice = Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH)
+            runOnUiThread { wallpaper.setImageBitmap(slice) }
+        }, "wallpaper-dash").start()
+    }
+
+    /** 音乐卡渲染：标题/歌手/播放暂停按钮（播放中=暂停图标，暂停=播放图标）。 */
+    private fun renderMediaCard() {
+        val panel = dashboardView ?: return
+        val now = com.lizhihua.carplaysender.media.MediaSessionsState.nowPlaying
+        panel.findViewById<TextView>(R.id.dashMediaTitle).text =
+            now?.title?.takeIf { it.isNotBlank() } ?: "未在播放"
+        panel.findViewById<TextView>(R.id.dashMediaArtist).text =
+            now?.artist?.takeIf { it.isNotBlank() } ?: "媒体信息未连接"
+        panel.findViewById<ImageView>(R.id.dashPlayPause).setImageResource(
+            if (now?.playing == true) R.drawable.ic_media_pause else R.drawable.ic_media_play,
+        )
+    }
+
+    private fun applyDashboardMode(dashboard: Boolean) {
+        val panel = dashboardView ?: return
+        panel.visibility = if (dashboard) android.view.View.VISIBLE else android.view.View.GONE
+        pager = findViewById(R.id.gridPager)
+        findViewById<android.view.View>(R.id.gridPager).visibility =
+            if (dashboard) android.view.View.INVISIBLE else android.view.View.VISIBLE
+        dotsRow?.visibility = if (dashboard) android.view.View.GONE else android.view.View.VISIBLE
+    }
+
+    /** 音乐控制：系统媒体键（AudioManager 全局路由给活跃媒体会话，无需权限）。 */
+    private fun dispatchMediaKey(keyCode: Int) {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        audioManager.dispatchMediaKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, keyCode))
+        audioManager.dispatchMediaKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, keyCode))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_grid)
@@ -90,6 +192,62 @@ class GridActivity : AppCompatActivity() {
             // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
             com.lizhihua.carplaysender.ui.WallpaperStore.addListener(wallpaperListener)
             refreshWallpaperIfChanged()
+
+            // 仪表盘面板：卡片形态（四周留 CARD_MARGIN、圆角裁剪、壁纸模糊切片 +
+            // 暗幕，强度与 dock 一致——DockPrefs；左半由地图 tile 卡片覆盖）
+            val dash = layoutInflater.inflate(R.layout.view_dashboard, root, false)
+            val cardMargin = (CARD_MARGIN_PX * scale).toInt()
+            dash.layoutParams = android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            ).apply {
+                leftMargin = (VirtualLauncher.mapTileWidth * scale).toInt() + cardMargin
+                topMargin = cardMargin
+                rightMargin = cardMargin
+                bottomMargin = cardMargin
+            }
+            dash.outlineProvider = object : android.view.ViewOutlineProvider() {
+                override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, cardMargin * 1.4f)
+                }
+            }
+            dash.clipToOutline = true
+            root.addView(dash)
+            dashboardView = dash
+            dash.findViewById<ImageView>(R.id.dashPrev).setOnClickListener {
+                dispatchMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+            }
+            dash.findViewById<ImageView>(R.id.dashNext).setOnClickListener {
+                dispatchMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_NEXT)
+            }
+            dash.findViewById<ImageView>(R.id.dashPlayPause).setOnClickListener {
+                // 按当前状态显式发播放/暂停；乐观翻转图标（状态回调可能滞后），
+                // 400ms 后请求监听服务重新同步真实状态
+                val state = com.lizhihua.carplaysender.media.MediaSessionsState.nowPlaying
+                val playing = state?.playing == true
+                dispatchMediaKey(
+                    if (playing) android.view.KeyEvent.KEYCODE_MEDIA_PAUSE
+                    else android.view.KeyEvent.KEYCODE_MEDIA_PLAY,
+                )
+                com.lizhihua.carplaysender.media.MediaSessionsState.publish(
+                    com.lizhihua.carplaysender.media.MediaSessionsState.NowPlaying(
+                        state?.title, state?.artist, !playing,
+                    ),
+                )
+                dash.postDelayed(
+                    { com.lizhihua.carplaysender.media.MediaSessionsState.requestResync() },
+                    400,
+                )
+            }
+            dash.findViewById<TextView>(R.id.dashFullscreenMap).setOnClickListener {
+                Thread { VirtualLauncher.setMapFullscreen(!VirtualLauncher.mapFullscreen) }.start()
+            }
+            applyDashCardChrome()
+            com.lizhihua.carplaysender.media.MediaSessionsState.addListener(mediaStateListener)
+            renderMediaCard()
+            VirtualLauncher.addDashboardListener(dashboardListener)
+            VirtualLauncher.addMapLayoutListener { runOnUiThread { refreshDashWallpaper() } }
+            applyDashboardMode(VirtualLauncher.dashboardMode)
         }
 
         pager = findViewById<ViewPager2>(R.id.gridPager).apply {
@@ -252,6 +410,8 @@ class GridActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         com.lizhihua.carplaysender.ui.WallpaperStore.removeListener(wallpaperListener)
+        VirtualLauncher.removeDashboardListener(dashboardListener)
+        com.lizhihua.carplaysender.media.MediaSessionsState.removeListener(mediaStateListener)
         super.onDestroy()
     }
 
@@ -260,5 +420,6 @@ class GridActivity : AppCompatActivity() {
     private companion object {
         const val COLUMNS = 4 // CarPlay 规格：强制 4 列
         const val ROWS = 3
+        const val CARD_MARGIN_PX = 16 // 仪表盘卡片边距（流像素）
     }
 }

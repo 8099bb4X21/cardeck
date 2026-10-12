@@ -81,8 +81,20 @@ class DockActivity : AppCompatActivity() {
         batteryFill = findViewById(R.id.dockBatteryFill)
         appsContainer = findViewById(R.id.dockApps)
         wallpaperView = findViewById(R.id.dockWallpaper)
-        findViewById<ImageView>(R.id.dockHome).setOnClickListener {
-            Thread { VirtualLauncher.goGrid() }.start()
+        findViewById<ImageView>(R.id.dockHome).apply {
+            setOnClickListener { Thread { VirtualLauncher.onHomePressed() }.start() }
+            // 图标随模式切换：仪表盘激活=房屋（点按回桌面）；否则=田字格（点按进仪表盘）。
+            // 应用中与桌面同为田字格——两种场景下的动作都是进仪表盘，语义一致。
+            VirtualLauncher.addDashboardListener { dashboard ->
+                runOnUiThread {
+                    setImageResource(
+                        if (dashboard) R.drawable.ic_dock_home else R.drawable.ic_dock_dashboard,
+                    )
+                }
+            }
+            setImageResource(
+                if (VirtualLauncher.dashboardMode) R.drawable.ic_dock_home else R.drawable.ic_dock_dashboard,
+            )
         }
 
         VirtualLauncher.addRunningAppsListener(refreshListener)

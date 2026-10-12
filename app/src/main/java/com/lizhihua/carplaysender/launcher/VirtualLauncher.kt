@@ -124,6 +124,87 @@ object VirtualLauncher {
     var streamHeightPx: Int = 0
         private set
 
+    // ---- 地图屏（仪表盘分屏）：地图应用专属屏，分屏=tile 尺寸，全屏=应用区尺寸 ----
+
+    /** 地图屏 displayId（横屏车机且受信屏模式创建；-1 = 无）。 */
+    @Volatile
+    var mapDisplayId: Int = -1
+        private set
+
+    /** 地图屏 tile 尺寸（分屏形态；应用区左半）。 */
+    @Volatile
+    var mapTileWidth: Int = 0
+        private set
+
+    @Volatile
+    var mapTileHeight: Int = 0
+        private set
+
+    /** 应用区尺寸（全屏形态的地图屏目标尺寸）。 */
+    @Volatile
+    var appAreaWidth: Int = 0
+        private set
+
+    @Volatile
+    var appAreaHeight: Int = 0
+        private set
+
+    @Volatile
+    var mapFullscreen: Boolean = false
+        private set
+
+    /** 仪表盘（分屏）模式是否激活。 */
+    @Volatile
+    var dashboardMode: Boolean = false
+        private set
+
+    /** 仪表盘模式变化监听（GridActivity 切换布局）。 */
+    private val dashboardListeners = java.util.concurrent.CopyOnWriteArrayList<(Boolean) -> Unit>()
+
+    fun addDashboardListener(listener: (Boolean) -> Unit) {
+        dashboardListeners.add(listener)
+    }
+
+    fun removeDashboardListener(listener: (Boolean) -> Unit) {
+        dashboardListeners.remove(listener)
+    }
+
+    private fun notifyDashboard() {
+        dashboardListeners.forEach { runCatching { it(dashboardMode) } }
+    }
+
+    /** 地图 tile 布局变化监听（隐藏/分屏/全屏）。 */
+    private val mapLayoutListeners = java.util.concurrent.CopyOnWriteArrayList<(Boolean) -> Unit>()
+
+    fun addMapLayoutListener(listener: (Boolean) -> Unit) {
+        mapLayoutListeners.add(listener)
+    }
+
+    fun removeMapLayoutListener(listener: (Boolean) -> Unit) {
+        mapLayoutListeners.remove(listener)
+    }
+
+    private fun notifyMapLayout() {
+        mapLayoutListeners.forEach { runCatching { it(mapFullscreen) } }
+    }
+
+    /** 地图应用白名单（优先序：车机版高德 → 手机高德 → 百度 → 腾讯）。 */
+    val MAP_PACKAGES_PRIORITY = listOf(
+        "com.autonavi.amapauto",
+        "com.autonavi.minimap",
+        "com.baidu.BaiduMap",
+        "com.tencent.map",
+    )
+
+    fun isMapPackage(packageName: String): Boolean = packageName in MAP_PACKAGES_PRIORITY
+
+    /**
+     * 已安装的默认地图（用户显式设置优先——DefaultMapPrefs；否则按优先序取
+     * 第一个已安装者；null = 无任何地图应用）。
+     */
+    fun defaultMapComponent(context: Context): ComponentName? =
+        DefaultMapPrefs.resolve(context)
+
     /**
      * 桌面所在屏相对视频流的渲染倍率（原生屏=1，超采样屏=hiScale）。
      * 桌面内绘制「全流画布壁纸切片」时的尺寸/偏移换算用。
@@ -175,6 +256,14 @@ object VirtualLauncher {
             dockHeightPx = totalHeight
             appHeightPx = totalHeight
             appWidth = (totalWidth - thicknessPx).coerceAtLeast(200)
+        }
+        appAreaWidth = appWidth
+        appAreaHeight = appHeightPx
+        // 地图屏：始终按应用区全尺寸创建（应用窗口稳定，任务不迁移）。
+        // 分屏形态由合成器采样画面中央带区实现（地图中心≈车辆位置），无需 resize。
+        if (!dockAtBottom) {
+            mapTileWidth = appWidth / 2
+            mapTileHeight = appHeightPx
         }
         // 横屏应用屏的密度选择（2026-10-11 实测标定）：
         // 竖屏锁定应用（如头条）在横屏屏上被系统 letterbox 成窄条窗口，窗口逻辑宽度
@@ -229,7 +318,7 @@ object VirtualLauncher {
         val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom)
         this.composer = composer
         val displaysCreated = arrayOf(false)
-        composer.onSurfacesReady = { dockSurface, appSurface, appHiSurface ->
+        composer.onSurfacesReady = { dockSurface, appSurface, appHiSurface, mapSurface ->
             // 优先：Shizuku shell 创建受信虚拟屏（VIRTUAL_DISPLAY_FLAG_TRUSTED）——
             // 允许第三方应用的新任务落在该屏；解决「应用内跳转的任务被重定向到手机主屏」。
             var viaService = false
@@ -240,7 +329,8 @@ object VirtualLauncher {
                     val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
                     dm.displays
                         .filter {
-                            it.name == "CarPlayDock" || it.name == "CarPlayApp" || it.name == "CarPlayAppHi"
+                            it.name == "CarPlayDock" || it.name == "CarPlayApp" ||
+                                it.name == "CarPlayAppHi" || it.name == "CarPlayMap"
                         }
                         .forEach { stale ->
                             runCatching { svc!!.releaseDisplay(stale.displayId) }
@@ -257,6 +347,14 @@ object VirtualLauncher {
                     } else {
                         -1
                     }
+                    // 地图屏（全屏尺寸创建；分屏形态由合成器中央带区采样实现）
+                    val mapId = if (mapSurface != null && !dockAtBottom) {
+                        svc!!.createDisplay(
+                            "CarPlayMap", appWidth, appHeightPx, 200, mapSurface,
+                        )
+                    } else {
+                        -1
+                    }
                     if (dockId >= 0 && appId >= 0) {
                         dockDisplayId = dockId
                         appDisplayId = appId
@@ -265,12 +363,18 @@ object VirtualLauncher {
                         } else if (appHiSurface != null) {
                             log("LAUNCHER: 超采样屏创建失败——本次会话全部走原生屏")
                         }
+                        if (mapId >= 0) {
+                            mapDisplayId = mapId
+                        } else if (mapSurface != null) {
+                            log("LAUNCHER: 地图屏创建失败——仪表盘无地图 tile")
+                        }
                         viaService = true
                     } else {
                         // 半成功：释放已建的
                         if (dockId >= 0) runCatching { svc!!.releaseDisplay(dockId) }
                         if (appId >= 0) runCatching { svc!!.releaseDisplay(appId) }
                         if (appHiId >= 0) runCatching { svc!!.releaseDisplay(appHiId) }
+                        if (mapId >= 0) runCatching { svc!!.releaseDisplay(mapId) }
                     }
                 }.onFailure { log("LAUNCHER: 受信屏创建异常 ${it.message}") }
             }
@@ -338,6 +442,8 @@ object VirtualLauncher {
                 appHeightPx,
                 if (landscapeApp) appHiWidth else 0,
                 if (landscapeApp) appHiHeight else 0,
+                if (landscapeApp) appWidth else 0,
+                if (landscapeApp) appHeightPx else 0,
             )
             if (!displaysCreated[0]) {
                 log("LAUNCHER: 虚拟屏创建失败")
@@ -404,6 +510,16 @@ object VirtualLauncher {
         appDisplayId = -1
         appHiDisplayId = -1
         gridDisplayId = -1
+        mapDisplayId = -1
+        mapTileWidth = 0
+        mapTileHeight = 0
+        appAreaWidth = 0
+        appAreaHeight = 0
+        mapFullscreen = false
+        if (dashboardMode) {
+            dashboardMode = false
+            notifyDashboard()
+        }
         dockWidthPx = 0
         dockHeightPx = 0
         appHeightPx = 0
@@ -431,6 +547,144 @@ object VirtualLauncher {
         return ok
     }
 
+    // ---- 仪表盘（分屏）与 home 键模式循环 ----
+    //
+    // home 键语义（用户定义）：应用 → 仪表盘；桌面 → 仪表盘；仪表盘 → 桌面。
+    // 仪表盘 = 应用区左半为地图 tile（地图屏 resize 至 tile 尺寸）、右半为
+    // GridActivity 的音乐卡；地图任务常驻地图屏，全屏 ⇄ 分屏只 resize 不迁移，
+    // 导航等应用状态不丢。
+
+    /**
+     * dock 的 ⌂ 键：模式循环（仪表盘 ⇄ 桌面；应用/全屏地图 → 仪表盘）。
+     * 注意必须先复位 mapFullscreen——路由闸门依赖它，漏复位会把桌面触摸
+     * 继续送进已隐藏的地图屏（实测：桌面无法点击而日志注入成功的根因）。
+     */
+    fun onHomePressed() {
+        when {
+            mapFullscreen -> {
+                setMapFullscreen(false)
+                showDashboard()
+            }
+
+            dashboardMode -> showDesktop()
+            else -> showDashboard()
+        }
+    }
+
+    /** 进入仪表盘：地图屏缩回 tile、默认地图占屏（缺则启动）、桌面切分屏布局。 */
+    fun showDashboard() {
+        dashboardMode = true
+        notifyDashboard()
+        goGrid()
+        composer?.requestActiveApp(appHiDisplayId >= 0 && gridDisplayId == appHiDisplayId)
+        Thread({
+            ensureMapTask()
+            if (mapFullscreen) setMapFullscreen(false)
+            composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
+        }, "dashboard-enter").start()
+        logSink?.invoke("LAUNCHER: 仪表盘模式（地图 tile + 音乐卡）")
+    }
+
+    /** 回普通桌面：隐藏地图层并复位全屏标志，桌面恢复全宽图标网格（地图任务保留）。 */
+    fun showDesktop() {
+        dashboardMode = false
+        mapFullscreen = false
+        notifyDashboard()
+        goGrid()
+        composer?.setTileLayout(DualDisplayComposer.TileLayout.HIDDEN)
+        logSink?.invoke("LAUNCHER: 桌面模式（图标网格）")
+    }
+
+    /**
+     * 地图屏全屏 ⇄ 分屏：地图屏尺寸恒定（应用区大小），仅切换合成器的采样布局。
+     * 任务不迁移、不 resize，导航等状态天然连续。
+     */
+    fun setMapFullscreen(fullscreen: Boolean) {
+        if (mapDisplayId < 0 || mapFullscreen == fullscreen) return
+        mapFullscreen = fullscreen
+        composer?.setTileLayout(
+            if (fullscreen) DualDisplayComposer.TileLayout.FULLSCREEN
+            else DualDisplayComposer.TileLayout.SPLIT,
+        )
+        notifyMapLayout()
+        logSink?.invoke("LAUNCHER: 地图屏 ${if (fullscreen) "全屏" else "分屏"}")
+    }
+
+    /**
+     * 地图应用启动到地图屏（全屏形态）：resize 地图屏 → 启动 → 合成器全屏布局。
+     * 地图应用之间的切换（高德 ↔ 百度）也在同一块屏上进行，旧任务被清（互斥）。
+     */
+    private fun launchMapOnMapDisplay(component: ComponentName): Boolean {
+        dashboardMode = false
+        notifyDashboard()
+        setMapFullscreen(true)
+        val target = if (component.packageName == "com.autonavi.amapauto") {
+            "com.autonavi.amapauto/.MainMapActivity"
+        } else {
+            component.flattenToShortString()
+        }
+        // 同屏已有其他地图任务时清掉（白名单互斥；默认地图任务保留复用）
+        val ctx = appContextRef
+        val defaultPkg = ctx?.let { defaultMapComponent(it)?.packageName }
+        if (component.packageName != defaultPkg) {
+            taskIdsOnDisplayPkg(component.packageName, mapDisplayId).forEach { taskId ->
+                Shell.exec("am stack remove $taskId", timeoutMs = 4000)
+            }
+        }
+        val result = Shell.exec(
+            "am start -n $target --display $mapDisplayId -f 0x18000000",
+            timeoutMs = 8000,
+        )
+        val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
+        logSink?.invoke(
+            "LAUNCH(${component.packageName}): → 地图屏全屏 ok=$ok out=${result.output.take(80)}",
+        )
+        if (ok) {
+            synchronized(runningApps) { runningApps.add(component) }
+            notifyRunningAppsChanged()
+        }
+        return ok
+    }
+
+    /** 指定屏上指定包的任务 ID 列表（清屏用）。 */
+    private fun taskIdsOnDisplayPkg(pkg: String, displayId: Int): List<String> {
+        val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
+        var current = -1
+        val ids = ArrayList<String>()
+        for (line in dump.lineSequence()) {
+            displayRegex.find(line)?.let { current = it.groupValues[1].toInt() }
+            val task = taskRegex.find(line) ?: continue
+            if (current == displayId && task.groupValues[2] == pkg) {
+                ids += task.groupValues[1]
+            }
+        }
+        return ids
+    }
+
+    /**
+     * 确保默认地图在地图屏：am start 对既有任务=带回前台（状态保留，导航不断），
+     * 无任务=新启动。后台线程调用。
+     */
+    private fun ensureMapTask() {
+        if (mapDisplayId < 0) return
+        val ctx = appContextRef ?: return
+        val component = defaultMapComponent(ctx) ?: run {
+            logSink?.invoke("LAUNCHER: 未找到任何地图应用（白名单内）——地图 tile 空")
+            return
+        }
+        val target = if (component.packageName == "com.autonavi.amapauto") {
+            "com.autonavi.amapauto/.MainMapActivity"
+        } else {
+            component.flattenToShortString()
+        }
+        // 不带 MULTIPLE_TASK：任务已在地图屏时等价于带回前台
+        val result = Shell.exec("am start -n $target --display $mapDisplayId", timeoutMs = 8000)
+        logSink?.invoke(
+            "LAUNCHER: 默认地图 ${component.packageName} → 地图屏 ok=" +
+                (result.ok && result.output.contains("Starting:", ignoreCase = true)),
+        )
+    }
+
     /**
      * 启动/切换应用。
      * 目标屏按每应用超采样偏好路由（SupersamplePrefs）：
@@ -450,6 +704,11 @@ object VirtualLauncher {
      */
     fun launchApp(component: ComponentName): Boolean {
         if (appDisplayId < 0) return false
+        // 地图应用 → 地图屏全屏（任务常驻地图屏；从桌面 grid 点击同样去地图屏，
+        // 与仪表盘共用同一任务，导航状态不丢）
+        if (isMapPackage(component.packageName) && mapDisplayId >= 0) {
+            return launchMapOnMapDisplay(component)
+        }
         val ctx = appContextRef
         val wantHi = ctx != null && appHiDisplayId >= 0 &&
             SupersamplePrefs.shouldSupersample(ctx, component)

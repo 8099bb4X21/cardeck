@@ -64,6 +64,7 @@ class SettingsActivity : AppCompatActivity() {
 
         setupMenuSwitching()
         setupDockPrefsUI()
+        setupDefaultMapUI()
         updateCount()
     }
 
@@ -102,17 +103,74 @@ class SettingsActivity : AppCompatActivity() {
         })
     }
 
-    /** 左菜单切换：选中态样式 + 右栏内容显隐（三个菜单互斥）。 */
+    /**
+     * 默认地图：白名单内已安装的地图应用单选（写入 DefaultMapPrefs）。
+     * 选中即生效——仪表盘下次进入地图屏时使用新默认地图。
+     */
+    @android.annotation.SuppressLint("SetTextI18n")
+    private fun setupDefaultMapUI() {
+        val container = findViewById<LinearLayout>(R.id.mapOptions)
+        val installed = VirtualLauncher.MAP_PACKAGES_PRIORITY.mapNotNull { pkg ->
+            val launch = packageManager.getLaunchIntentForPackage(pkg) ?: return@mapNotNull null
+            val label = runCatching {
+                packageManager.getApplicationInfo(pkg, 0).loadLabel(packageManager).toString()
+            }.getOrDefault(pkg)
+            pkg to label
+        }
+        if (installed.isEmpty()) {
+            container.addView(TextView(this).apply {
+                text = "未安装任何受支持的地图应用（高德/百度/腾讯）"
+                setTextColor(0xFF8E8E93.toInt())
+                textSize = 13f
+            })
+            return
+        }
+        var current = DefaultMapPrefs.manualPackage(this)
+            ?: installed.firstOrNull()?.first
+        installed.forEach { (pkg, label) ->
+            val row = layoutInflater.inflate(R.layout.item_map_option, container, false)
+            val iconPx = (34 * resources.displayMetrics.density).toInt()
+            val appIcon = runCatching {
+                packageManager.getApplicationIcon(pkg)
+            }.getOrNull()
+            if (appIcon != null) {
+                row.findViewById<ImageView>(R.id.mapOptionIcon)
+                    .setImageBitmap(AppIcons.rounded(appIcon, iconPx))
+            }
+            row.findViewById<TextView>(R.id.mapOptionName).text = label
+            val radio = row.findViewById<ImageView>(R.id.mapOptionRadio)
+            fun refresh() {
+                radio.setImageResource(
+                    if (pkg == current) R.drawable.bg_radio_on else R.drawable.bg_radio_off,
+                )
+            }
+            refresh()
+            row.setOnClickListener {
+                current = pkg
+                DefaultMapPrefs.set(this, pkg)
+                for (i in 0 until container.childCount) {
+                    (container.getChildAt(i).tag as? (() -> Unit))?.invoke()
+                }
+                showToast("默认地图：$label")
+            }
+            row.tag = { refresh() }
+            container.addView(row)
+        }
+    }
+
+    /** 左菜单切换：选中态样式 + 右栏内容显隐（四个菜单互斥）。 */
     private fun setupMenuSwitching() {
         val menus = listOf(
             findViewById<LinearLayout>(R.id.menuDesktopApps),
             findViewById<LinearLayout>(R.id.menuSupersample),
             findViewById<LinearLayout>(R.id.menuDock),
+            findViewById<LinearLayout>(R.id.menuDefaultMap),
         )
         val contents = listOf(
             findViewById<View>(R.id.contentDesktopApps),
             findViewById<View>(R.id.contentSupersample),
             findViewById<View>(R.id.contentDock),
+            findViewById<View>(R.id.contentDefaultMap),
         )
         val ripple = runCatching {
             val out = android.util.TypedValue()

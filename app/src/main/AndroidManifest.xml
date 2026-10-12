@@ -74,6 +74,17 @@
             android:launchMode="singleTask"
             android:theme="@style/Theme.CarPlaySender.Launcher" />
 
+        <!-- 通知监听（媒体会话枚举）：音乐卡需要「通知使用权」；
+             Shizuku 在场时可由 cmd notification allow_listener 静默授权 -->
+        <service
+            android:name=".media.MediaListenerService"
+            android:exported="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <!-- 车机设置（双栏）：由桌面「车机设置」图标进入，仅应用内使用 -->
         <activity
             android:name=".launcher.SettingsActivity"
