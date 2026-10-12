@@ -17,9 +17,11 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 双虚拟屏 GL 合成器：dock 屏（左窄条）+ 应用屏（右侧）→ 拼接输出到编码器输入 Surface。
+ * 双虚拟屏 GL 合成器：dock 屏 + 应用屏（原生 / 超采样两块，按活动切换）→ 拼接输出到编码器输入 Surface。
  *
- * 两个 SurfaceTexture 作为各虚拟屏的输出；GL 线程轮询新帧标志，有新帧即重绘合成画面。
+ * 三路 SurfaceTexture 作为各虚拟屏的输出；GL 线程轮询新帧标志，有新帧即重绘合成画面。
+ * 应用区同一时刻只画两块应用屏中的**活动**一块（[requestActiveApp] 切换；超采样屏
+ * 等其画出首帧再切换，避免闪黑）。两块应用屏的内容持续消费（纹理保持最新）。
  * 输入 Surface 在 EGL/纹理就绪后经 [onSurfacesReady] 交给调用方去 createVirtualDisplay。
  */
 class DualDisplayComposer(
@@ -41,18 +43,52 @@ class DualDisplayComposer(
     @Volatile
     private var startLatch: CountDownLatch? = null
 
+    /** 是否创建了超采样应用屏（start 时根据传入尺寸确定）。 */
     @Volatile
-    var onSurfacesReady: ((dock: Surface, app: Surface) -> Unit)? = null
+    private var hasHiInput = false
+
+    /** 当前应用区显示的是超采样屏（true）还是原生屏（false）。触摸路由以它为准。 */
+    @Volatile
+    private var activeAppHi = false
+
+    /** 待切换的目标屏（true=超采样屏；null=无待切换）；切屏等目标出帧，避免闪黑/闪旧帧。 */
+    @Volatile
+    private var pendingTargetHi: Boolean? = null
+
+    @Volatile
+    private var pendingBaseFrame = 0
+
+    @Volatile
+    private var pendingSince = 0L
+
+    /** 超采样输入（GL 线程创建；start() 返回后对其他线程安全可读）。 */
+    @Volatile
+    private var appHi: Input? = null
+
+    /** 原生应用屏输入（同上；requestActiveApp 读其帧号作切换判据）。 */
+    @Volatile
+    private var appInput: Input? = null
+
+    @Volatile
+    var onSurfacesReady: ((dock: Surface, app: Surface, appHi: Surface?) -> Unit)? = null
 
     @Throws(IllegalStateException::class)
-    fun start(dockWidthPx: Int, dockHeightPx: Int, appWidthPx: Int, appHeightPx: Int) {
+    fun start(
+        dockWidthPx: Int,
+        dockHeightPx: Int,
+        appWidthPx: Int,
+        appHeightPx: Int,
+        appHiWidthPx: Int = 0,
+        appHiHeightPx: Int = 0,
+    ) {
         if (running.getAndSet(true)) return
+        hasHiInput = appHiWidthPx > 0 && appHiHeightPx > 0
         val ready = CountDownLatch(1)
         startLatch = ready
         var failure: IllegalStateException? = null
         glThread = Thread({
             try {
-                runGl(dockWidthPx, dockHeightPx, appWidthPx, appHeightPx)
+                runGl(dockWidthPx, dockHeightPx, appWidthPx, appHeightPx, appHiWidthPx, appHiHeightPx)
             } catch (error: IllegalStateException) {
                 failure = error
             } finally {
@@ -65,6 +101,29 @@ class DualDisplayComposer(
         ready.await()
         failure?.let { running.set(false); throw it }
     }
+
+    /**
+     * 切换应用区显示：false=原生屏，true=超采样屏。目标屏出帧后生效（期间继续显示原
+     * 画面）：等待「目标屏帧号前进」（新应用首帧）；600ms 兜底（目标屏有历史内容时
+     * 平滑切换）；2s 超时兜底（目标屏迟迟不出帧也要把画面切过去）。
+     * 无超采样屏（未创建）时恒为原生屏。
+     */
+    fun requestActiveApp(hi: Boolean) {
+        val target = if (!hasHiInput) false else hi
+        if (activeAppHi == target && pendingTargetHi == null) return
+        val targetInput = if (target) appHi else appInput
+        pendingBaseFrame = targetInput?.frameCount ?: 0
+        pendingSince = android.os.SystemClock.uptimeMillis()
+        pendingTargetHi = target
+        if (!hasHiInput) {
+            // 无超采样屏：无需等待，直接生效
+            activeAppHi = false
+            pendingTargetHi = null
+        }
+    }
+
+    /** 应用区当前活动屏（触摸路由/坐标换算以此为准）。 */
+    fun isActiveAppHi(): Boolean = activeAppHi
 
     fun stop() {
         if (!running.getAndSet(false)) return
@@ -79,9 +138,13 @@ class DualDisplayComposer(
         /** 是否已产出过至少一帧（未产出的输入不参与绘制，避免空纹理） */
         @Volatile
         var hasContent = false
+
+        /** 累计产出帧数（活动屏切换的「已出帧」判据）。 */
+        @Volatile
+        var frameCount = 0
     }
 
-    private fun runGl(dockW: Int, dockH: Int, appW: Int, appH: Int) {
+    private fun runGl(dockW: Int, dockH: Int, appW: Int, appH: Int, hiW: Int, hiH: Int) {
         // ---- EGL ----
         val display: EGLDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         checkEgl(display != EGL14.EGL_NO_DISPLAY, "eglGetDisplay")
@@ -138,7 +201,8 @@ class DualDisplayComposer(
         }
 
         val dock = newInput(dockW, dockH)
-        val app = newInput(appW, appH)
+        val app = newInput(appW, appH).also { appInput = it }
+        val hi = if (hasHiInput) newInput(hiW, hiH).also { appHi = it } else null
 
         // ---- 着色器 ----
         val program = buildProgram()
@@ -170,33 +234,58 @@ class DualDisplayComposer(
         }
 
         fun composeFrame(fullRedraw: Boolean) {
+            // 待切应用屏：目标屏出帧即切（帧号前进 / 已有内容 600ms 兜底 / 2s 超时兜底）
+            pendingTargetHi?.let { targetHi ->
+                val nowMs = android.os.SystemClock.uptimeMillis()
+                val target = if (targetHi) hi else app
+                val advanced = target != null && target.frameCount > pendingBaseFrame
+                if (advanced ||
+                    (target?.hasContent == true && nowMs - pendingSince >= 600L) ||
+                    nowMs - pendingSince >= 2_000L
+                ) {
+                    activeAppHi = targetHi
+                    pendingTargetHi = null
+                }
+            }
             GLES20.glViewport(0, 0, outWidth, outHeight)
             GLES20.glClearColor(0.04f, 0.07f, 0.09f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            // 只对有新帧的输入 updateTexImage；已有内容的输入沿用旧纹理（画面持久）
+            // 只对有新帧的输入 updateTexImage；已有内容的输入沿用旧纹理（画面持久）。
+            // 两块应用屏都持续消费（非活动屏也保持最新，切换时不闪旧帧）。
             if (dock.hasNewFrame) {
                 dock.hasNewFrame = false
                 dock.hasContent = true
+                dock.frameCount++
                 dock.surfaceTexture.updateTexImage()
             }
             if (app.hasNewFrame) {
                 app.hasNewFrame = false
                 app.hasContent = true
+                app.frameCount++
                 app.surfaceTexture.updateTexImage()
             }
+            hi?.let {
+                if (it.hasNewFrame) {
+                    it.hasNewFrame = false
+                    it.hasContent = true
+                    it.frameCount++
+                    it.surfaceTexture.updateTexImage()
+                }
+            }
+            val activeInput = if (activeAppHi) hi else app
             if (dockAtBottom) {
                 // 竖屏：dock 横条贴底（GL 坐标 y=0 为底边），app 在其余区域
                 if (dock.hasContent) drawInput(dock, 0f, outWidth.toFloat(), 0f, dockH.toFloat())
-                if (app.hasContent) {
-                    drawInput(app, 0f, outWidth.toFloat(), dockH.toFloat(), outHeight.toFloat())
+                if (activeInput?.hasContent == true) {
+                    drawInput(activeInput, 0f, outWidth.toFloat(), dockH.toFloat(), outHeight.toFloat())
                 }
             } else {
                 if (dock.hasContent) drawInput(dock, 0f, dockW.toFloat(), 0f, outHeight.toFloat())
-                if (app.hasContent) {
-                    drawInput(app, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
+                if (activeInput?.hasContent == true) {
+                    drawInput(activeInput, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
                 }
             }
-            if (fullRedraw || dock.hasContent || app.hasContent) {
+            if (fullRedraw || dock.hasContent || app.hasContent || hi?.hasContent == true) {
                 EGL14.eglSwapBuffers(display, outputSurface)
             }
         }
@@ -206,7 +295,7 @@ class DualDisplayComposer(
         GLES20.glClearColor(0.04f, 0.07f, 0.09f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         EGL14.eglSwapBuffers(display, outputSurface)
-        onSurfacesReady?.invoke(dock.surface, app.surface)
+        onSurfacesReady?.invoke(dock.surface, app.surface, hi?.surface)
         startLatch?.countDown()
 
         // ---- 合成循环 ----
@@ -232,6 +321,10 @@ class DualDisplayComposer(
             runCatching { app.surface.release() }
             runCatching { dock.surfaceTexture.release() }
             runCatching { app.surfaceTexture.release() }
+            hi?.let {
+                runCatching { it.surface.release() }
+                runCatching { it.surfaceTexture.release() }
+            }
             runCatching {
                 EGL14.eglMakeCurrent(
                     display,

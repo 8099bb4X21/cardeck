@@ -69,9 +69,9 @@ object TouchRouter {
             localY = if (inDock) contact.yPixels - appH else contact.yPixels
         } else {
             inDock = contact.xPixels < dockW
-            targetDisplay = if (inDock) launcher.dockDisplayId else launcher.appDisplayId
-            // 应用屏可能超采样（appScale>1）：注入坐标是应用虚显的物理像素，需按倍率换算
-            val scale = if (inDock) 1f else launcher.appScale.coerceAtLeast(1f)
+            // 活动应用屏（原生或超采样）：注入坐标是所注入虚显的物理像素
+            targetDisplay = if (inDock) launcher.dockDisplayId else launcher.activeAppDisplayId()
+            val scale = if (inDock) 1f else launcher.activeAppScale().coerceAtLeast(1f)
             localX = if (inDock) contact.xPixels else ((contact.xPixels - dockW) * scale).toInt()
             localY = (contact.yPixels * scale).toInt()
         }

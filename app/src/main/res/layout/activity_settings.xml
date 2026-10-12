@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 车机设置（双栏：左菜单 210dp / 右内容）——对照 design/launcher-proto.html。
-     尺寸折算：应用屏超采样 ×1.5 后密度 ≈301dpi，stream 像素 ≈ dp×1.25，故原型 px ÷ 1.25 = dp。 -->
+     尺寸折算：应用屏超采样 ×1.5 后密度 ≈301dpi，stream 像素 ≈ dp×1.25，故原型 px ÷ 1.25 = dp。
+     右栏内容按菜单切换（管理桌面应用 / 应用超采样）。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -47,6 +48,7 @@
             android:textStyle="bold" />
 
         <LinearLayout
+            android:id="@+id/menuDesktopApps"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="7dp"
@@ -72,6 +74,33 @@
                 android:textSize="14sp"
                 android:textStyle="bold" />
         </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/menuSupersample"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:background="?android:attr/selectableItemBackground"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="9dp">
+
+            <ImageView
+                android:layout_width="23dp"
+                android:layout_height="23dp"
+                android:background="@drawable/bg_menu_chip"
+                android:importantForAccessibility="no"
+                android:padding="5dp"
+                android:src="@drawable/ic_menu_zoom" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="9dp"
+                android:text="应用超采样"
+                android:textColor="#FF8E8E93"
+                android:textSize="14sp" />
+        </LinearLayout>
     </LinearLayout>
 
     <View
@@ -79,13 +108,15 @@
         android:layout_height="match_parent"
         android:background="#FF1E1E21" />
 
-    <!-- ===================== 右栏：内容 ===================== -->
+    <!-- ===================== 右栏：内容（按菜单切换） ===================== -->
     <FrameLayout
         android:layout_width="0dp"
         android:layout_height="match_parent"
         android:layout_weight="1">
 
+        <!-- 内容页 1：管理桌面应用 -->
         <LinearLayout
+            android:id="@+id/contentDesktopApps"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:orientation="vertical"
@@ -126,12 +157,77 @@
                 android:textColor="#FF8E8E93"
                 android:textSize="12sp" />
 
-            <androidx.recyclerview.widget.RecyclerView
-                android:id="@+id/appList"
+            <!-- 单列应用列表 + 右侧字母导航条（FrameLayout 叠放） -->
+            <FrameLayout
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
-                android:layout_weight="1"
-                android:scrollbars="vertical" />
+                android:layout_weight="1">
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/appList"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:scrollbars="vertical" />
+
+                <LinearLayout
+                    android:id="@+id/appListIndex"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="right|center_vertical"
+                    android:orientation="vertical"
+                    android:paddingLeft="6dp" />
+            </FrameLayout>
+        </LinearLayout>
+
+        <!-- 内容页 2：应用超采样 -->
+        <LinearLayout
+            android:id="@+id/contentSupersample"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:paddingLeft="20dp"
+            android:paddingRight="13dp"
+            android:paddingTop="14dp"
+            android:paddingBottom="10dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="应用超采样"
+                android:textColor="#FFF5F5F7"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="11dp"
+                android:text="超采样以 1.5× 分辨率渲染再缩回，竖屏应用顶部空带更小；横屏应用建议关闭（更清晰流畅）。自动 = 检测为竖屏应用时开启。"
+                android:textColor="#FF8E8E93"
+                android:textSize="12sp" />
+
+            <!-- 单列应用列表 + 右侧字母导航条 -->
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1">
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/ssList"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:scrollbars="vertical" />
+
+                <LinearLayout
+                    android:id="@+id/ssListIndex"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="right|center_vertical"
+                    android:orientation="vertical"
+                    android:paddingLeft="6dp" />
+            </FrameLayout>
         </LinearLayout>
 
         <!-- 轻提示（页内 Toast；淡入淡出由代码控制） -->

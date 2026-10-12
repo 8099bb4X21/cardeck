@@ -98,16 +98,35 @@ object VirtualLauncher {
         private set
 
     /**
-     * 应用屏超采样倍率（1=不超采样）。TouchRouter 注入坐标按此换算
-     * （注入坐标必须是应用虚显的物理像素）。
+     * 应用屏超采样倍率（超采样应用屏的渲染倍率；1=未创建超采样屏）。
+     * 触摸坐标按当前**活动应用屏**的倍率换算（见 [activeAppScale]）。
      */
     @Volatile
-    var appScale: Float = 1f
+    var hiScale: Float = 1f
+        private set
+
+    /** 超采样应用屏（横屏车机时存在；竖屏车机为 -1，全部走原生）。 */
+    @Volatile
+    var appHiDisplayId: Int = -1
+        private set
+
+    /** 主区桌面（GridActivity）所在屏：横屏=超采样屏（保持既有观感），竖屏=原生屏。 */
+    @Volatile
+    var gridDisplayId: Int = -1
         private set
 
     private var dockDisplay: VirtualDisplay? = null
     private var appDisplay: VirtualDisplay? = null
+    private var appHiDisplay: VirtualDisplay? = null
     private var composer: DualDisplayComposer? = null
+
+    /** 当前活动应用屏 ID（TouchRouter 注入目标）。 */
+    fun activeAppDisplayId(): Int =
+        if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) appHiDisplayId else appDisplayId
+
+    /** 当前活动应用屏的坐标倍率（超采样屏=hiScale，原生屏=1）。 */
+    fun activeAppScale(): Float =
+        if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) hiScale else 1f
 
     /**
      * 挂载：建 GL 合成器 → 就绪回调里建两块虚拟屏 → 拉起 Dock/Grid。
@@ -154,12 +173,21 @@ object VirtualLauncher {
         } else {
             1f
         }
-        val appDisplayWidth = (appWidth * appScaleFactor).toInt()
-        val appDisplayHeight = (appHeightPx * appScaleFactor).toInt()
-        this.appScale = appScaleFactor
-        val appDensity = if (landscapeApp) {
-            val letterboxWindowPx = appDisplayHeight / LETTERBOX_ASPECT_RATIO
+        val appHiWidth = (appWidth * appScaleFactor).toInt()
+        val appHiHeight = (appHeightPx * appScaleFactor).toInt()
+        this.hiScale = appScaleFactor
+        val appHiDensity = if (landscapeApp) {
+            val letterboxWindowPx = appHiHeight / LETTERBOX_ASPECT_RATIO
             (letterboxWindowPx / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(180, 640)
+        } else {
+            densityDpi
+        }
+        // 原生应用屏密度：与超采样屏保持**相同逻辑尺寸**（应用布局不受所在屏影响，
+        // 超采样只是渲染分辨率差异）。横屏：原生 1034×540 @~200dpi = 827×432dp，
+        // 与超采样屏（1551×810 @301dpi）的 824×431dp 等值；竖屏车机：直接用流密度。
+        val appNativeDensity = if (landscapeApp) {
+            val hiLogicalHeightDp = appHiHeight * 160f / appHiDensity
+            (appHeightPx * 160f / hiLogicalHeightDp).toInt().coerceIn(160, 640)
         } else {
             densityDpi
         }
@@ -183,7 +211,7 @@ object VirtualLauncher {
         val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom)
         this.composer = composer
         val displaysCreated = arrayOf(false)
-        composer.onSurfacesReady = { dockSurface, appSurface ->
+        composer.onSurfacesReady = { dockSurface, appSurface, appHiSurface ->
             // 优先：Shizuku shell 创建受信虚拟屏（VIRTUAL_DISPLAY_FLAG_TRUSTED）——
             // 允许第三方应用的新任务落在该屏；解决「应用内跳转的任务被重定向到手机主屏」。
             var viaService = false
@@ -193,7 +221,9 @@ object VirtualLauncher {
                     // （新宽度/新 surface 不生效——2026-10-11 dock 改宽后视觉无变化的根因）
                     val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
                     dm.displays
-                        .filter { it.name == "CarPlayDock" || it.name == "CarPlayApp" }
+                        .filter {
+                            it.name == "CarPlayDock" || it.name == "CarPlayApp" || it.name == "CarPlayAppHi"
+                        }
                         .forEach { stale ->
                             runCatching { svc!!.releaseDisplay(stale.displayId) }
                                 .onSuccess { log("LAUNCHER: 已释放残留虚拟屏 ${stale.name}#${stale.displayId}") }
@@ -201,22 +231,38 @@ object VirtualLauncher {
                     Thread.sleep(150) // 等系统完成注销
                     val dockId = svc!!.createDisplay("CarPlayDock", dockWidthPx, dockHeightPx, densityDpi, dockSurface)
                     val appId = svc!!.createDisplay(
-                        "CarPlayApp", appDisplayWidth, appDisplayHeight, appDensity, appSurface,
+                        "CarPlayApp", appWidth, appHeightPx, appNativeDensity, appSurface,
                     )
+                    // 超采样屏（竖屏车机无、应用侧回退时也无）
+                    val appHiId = if (appHiSurface != null) {
+                        svc!!.createDisplay("CarPlayAppHi", appHiWidth, appHiHeight, appHiDensity, appHiSurface)
+                    } else {
+                        -1
+                    }
                     if (dockId >= 0 && appId >= 0) {
                         dockDisplayId = dockId
                         appDisplayId = appId
+                        if (appHiId >= 0) {
+                            appHiDisplayId = appHiId
+                        } else if (appHiSurface != null) {
+                            log("LAUNCHER: 超采样屏创建失败——本次会话全部走原生屏")
+                        }
                         viaService = true
                     } else {
                         // 半成功：释放已建的
                         if (dockId >= 0) runCatching { svc!!.releaseDisplay(dockId) }
                         if (appId >= 0) runCatching { svc!!.releaseDisplay(appId) }
+                        if (appHiId >= 0) runCatching { svc!!.releaseDisplay(appHiId) }
                     }
                 }.onFailure { log("LAUNCHER: 受信屏创建异常 ${it.message}") }
             }
             if (viaService) {
                 displaysViaService = true
-                log("LAUNCHER: 双屏创建(受信) dock=$dockDisplayId(${dockWidthPx}px) app=$appDisplayId(${appDisplayWidth}x$appDisplayHeight scale=x$appScaleFactor @${appDensity}dpi)")
+                log(
+                    "LAUNCHER: 三屏创建(受信) dock=$dockDisplayId(${dockWidthPx}px) " +
+                        "app=$appDisplayId(${appWidth}x$appHeightPx @${appNativeDensity}dpi) " +
+                        "appHi=$appHiDisplayId(${appHiWidth}x$appHiHeight @${appHiDensity}dpi scale=x$appScaleFactor)",
+                )
             } else {
                 // 回退：应用侧 PUBLIC 屏（应用内跳转任务会逃逸到手机主屏，尽量可用的降级形态）
                 val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -233,23 +279,48 @@ object VirtualLauncher {
                 )
                 appDisplay = dm.createVirtualDisplay(
                     "CarPlayApp",
-                    appDisplayWidth,
-                    appDisplayHeight,
-                    appDensity,
+                    appWidth,
+                    appHeightPx,
+                    appNativeDensity,
                     appSurface,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
                         DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
                     null,
                     null,
                 )
+                if (appHiSurface != null) {
+                    appHiDisplay = dm.createVirtualDisplay(
+                        "CarPlayAppHi",
+                        appHiWidth,
+                        appHiHeight,
+                        appHiDensity,
+                        appHiSurface,
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
+                            DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                        null,
+                        null,
+                    )
+                    appHiDisplayId = appHiDisplay?.display?.displayId ?: -1
+                }
                 dockDisplayId = dockDisplay?.display?.displayId ?: -1
                 appDisplayId = appDisplay?.display?.displayId ?: -1
-                log("LAUNCHER: 双屏创建(回退) dock=$dockDisplayId(${dockWidthPx}px) app=$appDisplayId(${appDisplayWidth}x$appDisplayHeight scale=x$appScaleFactor @${appDensity}dpi)")
+                log(
+                    "LAUNCHER: 三屏创建(回退) dock=$dockDisplayId(${dockWidthPx}px) " +
+                        "app=$appDisplayId(${appWidth}x$appHeightPx @${appNativeDensity}dpi) " +
+                        "appHi=$appHiDisplayId(${appHiWidth}x$appHiHeight @${appHiDensity}dpi scale=x$appScaleFactor)",
+                )
             }
             displaysCreated[0] = dockDisplayId >= 0 && appDisplayId >= 0
         }
         return try {
-            composer.start(dockWidthPx, dockHeightPx, appDisplayWidth, appDisplayHeight)
+            composer.start(
+                dockWidthPx,
+                dockHeightPx,
+                appWidth,
+                appHeightPx,
+                if (landscapeApp) appHiWidth else 0,
+                if (landscapeApp) appHiHeight else 0,
+            )
             if (!displaysCreated[0]) {
                 log("LAUNCHER: 虚拟屏创建失败")
                 detach()
@@ -257,13 +328,22 @@ object VirtualLauncher {
             }
             // 应用屏方向策略：高德等横屏应用在竖屏虚拟屏上会被 letterbox
             Shell.exec("cmd window set-ignore-orientation-request -d $appDisplayId reset")
+            if (appHiDisplayId >= 0) {
+                Shell.exec("cmd window set-ignore-orientation-request -d $appHiDisplayId reset")
+            }
             // 放宽竖屏应用的 letterbox 窗口（默认窄条 → 手机宽度）；断开时还原（detach）
             Shell.exec("cmd window set-letterbox-style --aspectRatio $LETTERBOX_ASPECT_RATIO")
-            log("LAUNCHER: letterbox 宽高比=$LETTERBOX_ASPECT_RATIO appDensity=${appDensity}dpi")
+            log(
+                "LAUNCHER: letterbox 宽高比=$LETTERBOX_ASPECT_RATIO " +
+                    "appDensity=${appNativeDensity}dpi appHiDensity=${appHiDensity}dpi",
+            )
             val dockOk = startOn(dockDisplayId, "com.lizhihua.carplaysender/.launcher.DockActivity")
-            val gridOk = startOn(appDisplayId, "com.lizhihua.carplaysender/.launcher.GridActivity")
+            gridDisplayId = if (appHiDisplayId >= 0) appHiDisplayId else appDisplayId
+            val gridOk = startOn(gridDisplayId, "com.lizhihua.carplaysender/.launcher.GridActivity")
             appContextRef = context.applicationContext
-            log("LAUNCHER: dock=$dockOk grid=$gridOk appDensity=${appDensity}dpi")
+            log("LAUNCHER: dock=$dockOk grid=$gridOk gridDisplay=$gridDisplayId")
+            // 桌面在超采样屏时默认活动屏 = 超采样屏（启动即显示桌面）
+            if (appHiDisplayId >= 0) composer.requestActiveApp(true)
             startShizukuHealer()
             // 暗幕组件就绪（常亮+暗幕功能；主界面开关控制启停）
             com.lizhihua.carplaysender.ui.ScreenDimmer.attach(context)
@@ -286,6 +366,7 @@ object VirtualLauncher {
             if (svc != null) {
                 if (dockDisplayId >= 0) runCatching { svc.releaseDisplay(dockDisplayId) }
                 if (appDisplayId >= 0) runCatching { svc.releaseDisplay(appDisplayId) }
+                if (appHiDisplayId >= 0) runCatching { svc.releaseDisplay(appHiDisplayId) }
             }
             displaysViaService = false
         }
@@ -299,13 +380,17 @@ object VirtualLauncher {
         dockDisplay = null
         runCatching { appDisplay?.release() }
         appDisplay = null
+        runCatching { appHiDisplay?.release() }
+        appHiDisplay = null
         dockDisplayId = -1
         appDisplayId = -1
+        appHiDisplayId = -1
+        gridDisplayId = -1
         dockWidthPx = 0
         dockHeightPx = 0
         appHeightPx = 0
         dockAtBottom = false
-        appScale = 1f
+        hiScale = 1f
     }
 
     private fun startOn(displayId: Int, component: String): Boolean {
@@ -317,19 +402,27 @@ object VirtualLauncher {
         return result.ok && result.output.contains("Starting:", ignoreCase = true)
     }
 
-    /** 回桌面：GridActivity 任务带回前台（后台应用保留）。 */
+    /** 回桌面：GridActivity 任务带回前台（后台应用保留）；合成器切回桌面所在屏。 */
     fun goGrid(): Boolean {
-        val ok = startOn(appDisplayId, "com.lizhihua.carplaysender/.launcher.GridActivity")
+        val grid = if (gridDisplayId >= 0) gridDisplayId else appDisplayId
+        val ok = startOn(grid, "com.lizhihua.carplaysender/.launcher.GridActivity")
+        composer?.requestActiveApp(appHiDisplayId >= 0 && grid == appHiDisplayId)
         if (!ok) Log.w(TAG, "回桌面失败")
         return ok
     }
 
     /**
      * 启动/切换应用。
+     * 目标屏按每应用超采样偏好路由（SupersamplePrefs）：
+     *  - 超采样开启（或自动判定为竖屏应用）→ 超采样屏（1551×810 缩回，固定像素顶带占比小）
+     *  - 超采样关闭（横屏/地图类）→ 原生屏（1:1 渲染，更清晰、GPU 开销 1/2.25）
+     *
      * 本 ROM（MagicOS）实测行为：`am start --display X` 对已有任务只做"带到前台"，
-     * 不落到 X 屏；`am task move` 静默无效。可靠做法：
-     *  1) 车机屏已有该包任务 → 普通启动带回前台（复用，保留任务栈）
-     *  2) 车机屏没有该包任务 → `-f 0x18000000`（NEW_TASK|MULTIPLE_TASK）在车机屏新建实例
+     * 不落到 X 屏；`am task move` 静默无效；`am task remove` 不存在，清任务用
+     * `am stack remove <taskId>`（本版本 RootTask id == taskId）。可靠做法：
+     *  1) 目标屏已有该包任务 → 普通启动带回前台（复用，保留任务栈）
+     *  2) 目标屏没有 → 先清掉该包在**另一个应用屏**上的任务（偏好切换后避免双实例），
+     *     再 `-f 0x18000000`（NEW_TASK|MULTIPLE_TASK）在目标屏新建实例
      *
      * 已知局限（2026-10-10 实测）：应用在手机侧也有实例时，进程基准密度停留在
      * 手机屏（560dpi），车机屏渲染文字偏大（≈2.2 倍）。唯一根治是强制重启该进程，
@@ -337,31 +430,48 @@ object VirtualLauncher {
      */
     fun launchApp(component: ComponentName): Boolean {
         if (appDisplayId < 0) return false
+        val ctx = appContextRef
+        val wantHi = ctx != null && appHiDisplayId >= 0 &&
+            SupersamplePrefs.shouldSupersample(ctx, component)
+        val targetDisplay = if (wantHi) appHiDisplayId else appDisplayId
+        val onTarget = packagesOnDisplay(component.packageName, targetDisplay)
+        if (!onTarget) {
+            // 偏好切换后清理另一块应用屏上的旧任务（不同屏双实例会各自维护状态，易混淆）
+            val otherDisplay = if (targetDisplay == appHiDisplayId) appDisplayId else appHiDisplayId
+            if (otherDisplay >= 0 && packagesOnDisplay(component.packageName, otherDisplay)) {
+                taskIdsOnDisplay(component.packageName, otherDisplay).forEach { taskId ->
+                    Shell.exec("am stack remove $taskId", timeoutMs = 4000)
+                    Log.i(TAG, "清理旧屏任务 pkg=${component.packageName} task=$taskId display=$otherDisplay")
+                }
+            }
+        }
         val target =
             if (component.packageName == "com.autonavi.amapauto") {
                 "com.autonavi.amapauto/.MainMapActivity --windowingMode 1"
             } else {
                 component.flattenToShortString()
             }
-        val onApp = packagesOnDisplay(component.packageName, appDisplayId)
-        val result = if (onApp) {
-            Shell.exec("am start -n $target --display $appDisplayId", timeoutMs = 8000)
+        val result = if (onTarget) {
+            Shell.exec("am start -n $target --display $targetDisplay", timeoutMs = 8000)
         } else {
-            // MULTIPLE_TASK：即使该应用在其他屏有任务，也强制在车机屏新建实例
-            Shell.exec("am start -n $target --display $appDisplayId -f 0x18000000", timeoutMs = 8000)
+            // MULTIPLE_TASK：即使该应用在其他屏有任务，也强制在目标屏新建实例
+            Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
         }
         var ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
-        if (!ok && onApp) {
+        if (!ok && onTarget) {
             // 复用路径失败（任务可能已被系统移走）：退回 MULTIPLE_TASK 新建
-            val retry = Shell.exec("am start -n $target --display $appDisplayId -f 0x18000000", timeoutMs = 8000)
+            val retry = Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
             ok = retry.ok && retry.output.contains("Starting:", ignoreCase = true)
         }
         logSink?.invoke(
-            "LAUNCH(${component.packageName}): onApp=$onApp ok=$ok out=${result.output.take(80)}",
+            "LAUNCH(${component.packageName}): hi=$wantHi disp=$targetDisplay onTarget=$onTarget ok=$ok " +
+                "out=${result.output.take(80)}",
         )
         if (ok) {
             synchronized(runningApps) { runningApps.add(component) }
             notifyRunningAppsChanged()
+            // 合成器切到目标屏（超采样屏等其出帧再切；原生屏即时切换）
+            composer?.requestActiveApp(targetDisplay == appHiDisplayId)
         } else {
             Log.w(TAG, "启动失败：${result.output.take(120)}")
         }
@@ -405,6 +515,9 @@ object VirtualLauncher {
     /** 排序键：全名转拼音小写、仅保留字母数字（数字 < 字母，即 # 组自然在前）。 */
     private fun pinyinKey(label: String): String =
         toLatin(label).lowercase().filter { it.isLetterOrDigit() }
+
+    /** 拼音排序键（设置页等外部列表按字母分组排序用）。 */
+    fun sortKeyOf(label: String): String = pinyinKey(label)
 
     /** 应用排序：按拼音键字典序（数字组在前，随后 A-Z，汉字按拼音并入对应字母）。 */
     private fun appComparator(): Comparator<AppEntry> =
@@ -485,6 +598,21 @@ object VirtualLauncher {
             if (current == displayId && task.groupValues[2] == pkg) return true
         }
         return false
+    }
+
+    /** 列出包在指定 display 上的任务 ID（偏好切换后清理旧屏任务用）。 */
+    private fun taskIdsOnDisplay(pkg: String, displayId: Int): List<String> {
+        val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
+        var current = -1
+        val ids = ArrayList<String>()
+        for (line in dump.lineSequence()) {
+            displayRegex.find(line)?.let { current = it.groupValues[1].toInt() }
+            val task = taskRegex.find(line) ?: continue
+            if (current == displayId && task.groupValues[2] == pkg) {
+                ids += task.groupValues[1]
+            }
+        }
+        return ids
     }
 
     data class AppEntry(

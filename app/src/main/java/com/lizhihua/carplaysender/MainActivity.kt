@@ -349,7 +349,7 @@ class MainActivity : AppCompatActivity() {
      * 代次计数器而非显示屏 ID；真实 ID 在 "displayId=39, uniqueId='…'" 段里。
      */
     private fun parseCarPlayDisplays(dump: String): List<Pair<Int, String>> =
-        Regex("displayId=(\\d+), uniqueId='[^']*CarPlay(Dock|App)")
+        Regex("displayId=(\\d+), uniqueId='[^']*CarPlay(Dock|AppHi|App)")
             .findAll(dump)
             .map { it.groupValues[1].toInt() to "CarPlay${it.groupValues[2]}" }
             .distinctBy { it.first }
