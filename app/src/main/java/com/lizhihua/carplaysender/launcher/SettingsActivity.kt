@@ -340,18 +340,14 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
         rebuild()
-        // 行集合随勾选变化：列表滚动/数据变化时重建导航条（轻量：仅若干 TextView）
-        var lastSignature = ""
-        list.addOnScrollListener(object : RecyclerView.OnScrollListener() {
-            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                val signature = rowsProvider().joinToString(",") { row ->
-                    if (row is Row.Header) row.key else ""
-                }
-                if (signature != lastSignature) {
-                    lastSignature = signature
-                    rebuild()
-                }
-            }
+        // 行集合随数据变化重建（notifyDataSetChanged 触发 onChanged）：
+        // 首次异步扫描完成、勾选导致分组移动都会即时刷新导航条
+        list.adapter?.registerAdapterDataObserver(object : RecyclerView.AdapterDataObserver() {
+            override fun onChanged() = rebuild()
+            override fun onItemRangeChanged(positionStart: Int, itemCount: Int) = rebuild()
+            override fun onItemRangeInserted(positionStart: Int, itemCount: Int) = rebuild()
+            override fun onItemRangeRemoved(positionStart: Int, itemCount: Int) = rebuild()
+            override fun onItemRangeMoved(fromPosition: Int, toPosition: Int, itemCount: Int) = rebuild()
         })
     }
 

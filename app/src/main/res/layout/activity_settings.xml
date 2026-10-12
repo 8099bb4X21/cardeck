@@ -221,6 +221,8 @@
                     android:id="@+id/appList"
                     android:layout_width="match_parent"
                     android:layout_height="match_parent"
+                    android:clipToPadding="false"
+                    android:paddingRight="26dp"
                     android:scrollbars="vertical" />
 
                 <LinearLayout
@@ -272,6 +274,8 @@
                     android:id="@+id/ssList"
                     android:layout_width="match_parent"
                     android:layout_height="match_parent"
+                    android:clipToPadding="false"
+                    android:paddingRight="26dp"
                     android:scrollbars="vertical" />
 
                 <LinearLayout
