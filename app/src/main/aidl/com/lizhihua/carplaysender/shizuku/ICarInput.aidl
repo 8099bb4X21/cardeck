@@ -16,7 +16,9 @@ interface ICarInput {
 
     // 受信虚拟屏（shell 权限）：第三方应用的新任务可落在其上，
     // 解决「应用内跳转的任务被重定向到手机主屏」问题（AOSP 安全策略）。
-    int createDisplay(String name, int width, int height, int dpi, in Surface surface);
+    // trusted=false：不声明 FLAG_TRUSTED——第三方任务无法被系统安置到该屏
+    // （dock 屏只承载自有 DockActivity，去掉受信可杜绝其它应用任务逃逸上来）。
+    int createDisplay(String name, int width, int height, int dpi, in Surface surface, boolean trusted);
     boolean releaseDisplay(int displayId);
 
     // 动态调整虚拟屏尺寸（创建者才可调）：屏上应用的配置变更由系统派发，

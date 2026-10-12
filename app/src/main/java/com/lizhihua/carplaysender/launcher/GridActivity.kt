@@ -63,8 +63,16 @@ class GridActivity : AppCompatActivity() {
         runOnUiThread { renderMediaCard() }
     }
 
+    /** 全画布位图就绪（WallpaperStore 首次构建/重建后回调）。 */
+    private val canvasReadyListener = { _: Long -> runOnUiThread { refreshDashWallpaper() } }
+
     /** 卡片视觉（暗幕透明度/模糊）——与 dock 一致（DockPrefs）。 */
-    private val dockPrefsListener = { runOnUiThread { applyDashCardChrome() } }
+    private val dockPrefsListener = {
+        runOnUiThread {
+            applyDashCardChrome()
+            refreshDashWallpaper()
+        }
+    }
 
     /**
      * 应用卡片视觉：暗幕 alpha 与壁纸模糊半径（RenderEffect，半径随网格屏
@@ -115,8 +123,13 @@ class GridActivity : AppCompatActivity() {
             val cropY = margin.coerceAtMost(bitmap.height - 2)
             val cropW = (bitmap.width - cropX - margin).coerceAtLeast(2)
             val cropH = (bitmap.height - cropY * 2).coerceAtLeast(2)
-            val slice = Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH)
-            runOnUiThread { wallpaper.setImageBitmap(slice) }
+            runOnUiThread {
+                wallpaper.setImageBitmap(
+                    Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH),
+                )
+                // 位图就绪后重申 RenderEffect（视图特效在位图更新后仍需生效）
+                applyDashCardChrome()
+            }
         }, "wallpaper-dash").start()
     }
 
@@ -243,7 +256,11 @@ class GridActivity : AppCompatActivity() {
                 Thread { VirtualLauncher.setMapFullscreen(!VirtualLauncher.mapFullscreen) }.start()
             }
             applyDashCardChrome()
+            // dock 栏设置滑条 → 音乐卡外观即时联动（透明度/模糊与 dock 一致）
+            DockPrefs.addListener(dockPrefsListener)
             com.lizhihua.carplaysender.media.MediaSessionsState.addListener(mediaStateListener)
+            // 桌面画布位图就绪 → 音乐卡切片重刷新（首次构建完成的事件驱动更新）
+            com.lizhihua.carplaysender.ui.WallpaperStore.addCanvasReadyListener(canvasReadyListener)
             renderMediaCard()
             VirtualLauncher.addDashboardListener(dashboardListener)
             VirtualLauncher.addMapLayoutListener { runOnUiThread { refreshDashWallpaper() } }
@@ -412,6 +429,8 @@ class GridActivity : AppCompatActivity() {
         com.lizhihua.carplaysender.ui.WallpaperStore.removeListener(wallpaperListener)
         VirtualLauncher.removeDashboardListener(dashboardListener)
         com.lizhihua.carplaysender.media.MediaSessionsState.removeListener(mediaStateListener)
+        DockPrefs.removeListener(dockPrefsListener)
+        com.lizhihua.carplaysender.ui.WallpaperStore.removeCanvasReadyListener(canvasReadyListener)
         super.onDestroy()
     }
 

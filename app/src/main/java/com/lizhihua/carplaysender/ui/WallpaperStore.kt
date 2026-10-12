@@ -115,6 +115,17 @@ object WallpaperStore {
     private val canvasCache = HashMap<String, Bitmap>()
     private var canvasCacheVersion = -1L
 
+    /** 画布位图就绪监听（首次构建/版本更换重建后回调；参数 = 画布版本号）。 */
+    private val canvasReadyListeners = java.util.concurrent.CopyOnWriteArrayList<(Long) -> Unit>()
+
+    fun addCanvasReadyListener(listener: (Long) -> Unit) {
+        canvasReadyListeners.add(listener)
+    }
+
+    fun removeCanvasReadyListener(listener: (Long) -> Unit) {
+        canvasReadyListeners.remove(listener)
+    }
+
     /**
      * 按「整个视频流画布」做 aspectFill 的壁纸位图（调用方把切片偏移到自己的窗口位置）。
      * 按尺寸+版本缓存（桌面与 dock 各一份）；后台线程调用，返回的位图只读。
@@ -148,6 +159,7 @@ object WallpaperStore {
         canvas.drawBitmap(source, null, dest, paint)
         canvasCacheVersion = version
         canvasCache[key] = bitmap
+        canvasReadyListeners.forEach { runCatching { it(version) } }
         return bitmap
     }
 }

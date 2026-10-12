@@ -183,7 +183,14 @@ class CarInputServiceImpl(private val context: Context) : ICarInput.Stub() {
         }
     }
 
-    override fun createDisplay(name: String, width: Int, height: Int, dpi: Int, surface: Surface): Int {
+    override fun createDisplay(
+        name: String,
+        width: Int,
+        height: Int,
+        dpi: Int,
+        surface: Surface,
+        trusted: Boolean,
+    ): Int {
         return try {
             fileLog("createDisplay $name ${width}x$height@$dpi start")
             // 关键：必须用「shell 包的 Context」——系统检查 packageName 与调用 uid(2000) 匹配，
@@ -199,7 +206,7 @@ class CarInputServiceImpl(private val context: Context) : ICarInput.Stub() {
             // VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6（@hide）：
             // 不声明时应用看到 "-touch" 配置（无触摸设备）→ 部分应用（如头条）
             // 切 TV/桌面式大头部布局（2026-10-11 实测：搜索区占满半屏的根因）。
-            val flags = FLAG_TRUSTED or
+            val flags = (if (trusted) FLAG_TRUSTED else 0) or
                 FLAG_SUPPORTS_TOUCH or
                 android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
             fileLog("flags=0x${flags.toString(16)}")

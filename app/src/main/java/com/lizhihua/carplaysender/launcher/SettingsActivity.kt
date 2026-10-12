@@ -33,8 +33,21 @@ class SettingsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_settings)
 
-        apps = VirtualLauncher.launchableApps(this)
+        // 共享缓存即时填充（桌面已扫描时秒开）；冷启动异步扫描，页面先渲染
+        apps = VirtualLauncher.cachedApps(this)
         selected += DesktopApps.selected(this, apps)
+        if (apps.isEmpty()) {
+            Thread({
+                val scanned = VirtualLauncher.launchableApps(this)
+                runOnUiThread {
+                    apps = scanned
+                    selected.clear()
+                    selected += DesktopApps.selected(this, apps)
+                    findViewById<RecyclerView>(R.id.appList).adapter?.notifyDataSetChanged()
+                    findViewById<RecyclerView>(R.id.ssList).adapter?.notifyDataSetChanged()
+                }
+            }, "settings-scan").start()
+        }
 
         countText = findViewById(R.id.settingsCount)
         toastView = findViewById(R.id.settingsToast)

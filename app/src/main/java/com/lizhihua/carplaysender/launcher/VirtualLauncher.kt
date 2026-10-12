@@ -337,20 +337,25 @@ object VirtualLauncher {
                                 .onSuccess { log("LAUNCHER: 已释放残留虚拟屏 ${stale.name}#${stale.displayId}") }
                         }
                     Thread.sleep(150) // 等系统完成注销
-                    val dockId = svc!!.createDisplay("CarPlayDock", dockWidthPx, dockHeightPx, densityDpi, dockSurface)
+                    // dock 屏不声明受信：只承载自有 DockActivity，杜绝第三方任务逃逸上来
+                    val dockId = svc!!.createDisplay(
+                        "CarPlayDock", dockWidthPx, dockHeightPx, densityDpi, dockSurface, false,
+                    )
                     val appId = svc!!.createDisplay(
-                        "CarPlayApp", appWidth, appHeightPx, appNativeDensity, appSurface,
+                        "CarPlayApp", appWidth, appHeightPx, appNativeDensity, appSurface, true,
                     )
                     // 超采样屏（竖屏车机无、应用侧回退时也无）
                     val appHiId = if (appHiSurface != null) {
-                        svc!!.createDisplay("CarPlayAppHi", appHiWidth, appHiHeight, appHiDensity, appHiSurface)
+                        svc!!.createDisplay(
+                            "CarPlayAppHi", appHiWidth, appHiHeight, appHiDensity, appHiSurface, true,
+                        )
                     } else {
                         -1
                     }
                     // 地图屏（全屏尺寸创建；分屏形态由合成器中央带区采样实现）
                     val mapId = if (mapSurface != null && !dockAtBottom) {
                         svc!!.createDisplay(
-                            "CarPlayMap", appWidth, appHeightPx, 200, mapSurface,
+                            "CarPlayMap", appWidth, appHeightPx, 200, mapSurface, true,
                         )
                     } else {
                         -1
@@ -757,27 +762,6 @@ object VirtualLauncher {
         return ok
     }
 
-    /** 可启动应用清单（排除本应用）。 */
-    fun launchableApps(context: Context): List<AppEntry> {
-        val pm = context.packageManager
-        val intent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
-            addCategory(android.content.Intent.CATEGORY_LAUNCHER)
-        }
-        return pm.queryIntentActivities(intent, 0)
-            .asSequence()
-            .map { it.activityInfo }
-            .filter { it.packageName != context.packageName }
-            .map { info ->
-                AppEntry(
-                    component = ComponentName(info.packageName, info.name),
-                    label = info.loadLabel(pm).toString(),
-                    icon = info.loadIcon(pm),
-                )
-            }
-            .take(200)
-            .toList()
-            .sortedWith(appComparator())
-    }
 
     // ICU 汉字→拼音转写（Android 内置，无需第三方拼音库）。
     // "Han-Latin" 输出带声调，追加 Latin-ASCII 去音调（gāo → gao）。
@@ -798,11 +782,42 @@ object VirtualLauncher {
     /** 拼音排序键（设置页等外部列表按字母分组排序用）。 */
     fun sortKeyOf(label: String): String = pinyinKey(label)
 
-    /** 应用排序：按拼音键字典序（数字组在前，随后 A-Z，汉字按拼音并入对应字母）。 */
-    private fun appComparator(): Comparator<AppEntry> =
-        Comparator { a, b -> pinyinKey(a.label).compareTo(pinyinKey(b.label)) }
+    @Volatile
+    private var appsCache: List<AppEntry>? = null
 
-    /** 字母导航条分组键：数字→"#"，ASCII 字母→大写字母，汉字→拼音首字母。 */
+    /** 应用清单缓存（桌面与车机设置共享；安装/卸载广播时失效）。 */
+    fun cachedApps(context: Context): List<AppEntry> =
+        appsCache ?: scanLaunchableApps(context).also { appsCache = it }
+
+    fun invalidateAppsCache() {
+        appsCache = null
+    }
+
+    fun launchableApps(context: Context): List<AppEntry> = scanLaunchableApps(context)
+
+    private fun scanLaunchableApps(context: Context): List<AppEntry> {
+        val pm = context.packageManager
+        val intent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
+            addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+        }
+        // 拼音键每应用只算一次（此前在比较器里逐对重复转写，150 应用 ≈ 上千次 ICU 调用）
+        return pm.queryIntentActivities(intent, 0)
+            .asSequence()
+            .map { it.activityInfo }
+            .filter { it.packageName != context.packageName }
+            .map { info ->
+                val label = info.loadLabel(pm).toString()
+                AppEntry(
+                    component = ComponentName(info.packageName, info.name),
+                    label = label,
+                    icon = info.loadIcon(pm),
+                ) to pinyinKey(label)
+            }
+            .take(200)
+            .toList()
+            .sortedBy { it.second }
+            .map { it.first }
+    }    /** 字母导航条分组键：数字→"#"，ASCII 字母→大写字母，汉字→拼音首字母。 */
     fun indexLetterOf(label: String): String {
         val first = label.firstOrNull() ?: return "#"
         return when {
