@@ -115,6 +115,22 @@ object VirtualLauncher {
     var gridDisplayId: Int = -1
         private set
 
+    /** 视频流画布尺寸（桌面壁纸切片的 aspectFill 映射基准）。 */
+    @Volatile
+    var streamWidthPx: Int = 0
+        private set
+
+    @Volatile
+    var streamHeightPx: Int = 0
+        private set
+
+    /**
+     * 桌面所在屏相对视频流的渲染倍率（原生屏=1，超采样屏=hiScale）。
+     * 桌面内绘制「全流画布壁纸切片」时的尺寸/偏移换算用。
+     */
+    fun gridScale(): Float =
+        if (gridDisplayId >= 0 && gridDisplayId == appHiDisplayId) hiScale else 1f
+
     private var dockDisplay: VirtualDisplay? = null
     private var appDisplay: VirtualDisplay? = null
     private var appHiDisplay: VirtualDisplay? = null
@@ -146,6 +162,8 @@ object VirtualLauncher {
         val thicknessPx = (DOCK_WIDTH_DP * density).toInt().coerceAtLeast(80)
         // 车机方向决定 dock 位置：横屏 → 左侧竖条；竖屏 → 底部横条（2026-10-11 用户要求）
         dockAtBottom = totalHeight > totalWidth
+        streamWidthPx = totalWidth
+        streamHeightPx = totalHeight
         val appWidth: Int
         if (dockAtBottom) {
             dockWidthPx = totalWidth
@@ -391,6 +409,8 @@ object VirtualLauncher {
         appHeightPx = 0
         dockAtBottom = false
         hiScale = 1f
+        streamWidthPx = 0
+        streamHeightPx = 0
     }
 
     private fun startOn(displayId: Int, component: String): Boolean {

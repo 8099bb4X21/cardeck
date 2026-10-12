@@ -55,6 +55,13 @@ class DockActivity : AppCompatActivity() {
         }
     }
 
+    /** 壁纸背景（全流画布切片，与桌面同源同路径——交界处逐像素连续）。 */
+    private var wallpaperView: ImageView? = null
+    private var wallpaperShownVersion = -1L
+
+    /** 壁纸变更监听（WallpaperStore 主线程回调；解码在本类自行切后台线程）。 */
+    private val wallpaperListener = { _: Long -> refreshWallpaperIfChanged() }
+
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) = updateBattery(intent)
     }
@@ -70,6 +77,7 @@ class DockActivity : AppCompatActivity() {
         batteryBar = findViewById(R.id.dockBatteryBar)
         batteryFill = findViewById(R.id.dockBatteryFill)
         appsContainer = findViewById(R.id.dockApps)
+        wallpaperView = findViewById(R.id.dockWallpaper)
         findViewById<ImageView>(R.id.dockHome).setOnClickListener {
             Thread { VirtualLauncher.goGrid() }.start()
         }
@@ -80,6 +88,10 @@ class DockActivity : AppCompatActivity() {
         // dock 虚拟屏与视频流 1:1 合成：字号按物理像素收紧（荣耀 ROM 上 XML autoSize
         // 对窄 dock 不生效，必须布局完成后按实测宽度手工缩字号；起点 22px 对照原型）
         clockView?.post { fitClockText(clockView!!) }
+        setupWallpaper()
+        // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
+        com.lizhihua.carplaysender.ui.WallpaperStore.addListener(wallpaperListener)
+        refreshWallpaperIfChanged()
         // 系统受保护广播：ACTION_BATTERY_CHANGED 为 sticky，注册即回填当前电量
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
     }
@@ -88,6 +100,7 @@ class DockActivity : AppCompatActivity() {
         VirtualLauncher.removeRunningAppsListener(refreshListener)
         pollHandler.removeCallbacksAndMessages(null)
         clockHandler.removeCallbacks(clockTicker)
+        com.lizhihua.carplaysender.ui.WallpaperStore.removeListener(wallpaperListener)
         runCatching { unregisterReceiver(batteryReceiver) }
         super.onDestroy()
     }
@@ -95,6 +108,60 @@ class DockActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refresh()
+    }
+
+    /**
+     * 壁纸切片：dock 窗口内画「全流画布壁纸」中本条带对应的部分。
+     * dock 虚拟屏与流 1:1（420dpi），canvas 视图 = 流画布尺寸：
+     *  - 侧栏（横屏车机）：流左条，偏移 (0, 0)
+     *  - 底栏（竖屏车机）：流底条，偏移 (0, -(appHeight))
+     * 窗口必须不透明：半透明窗口下系统会往这块虚拟屏合成手机自身壁纸
+     * （曾致 dock 显示手机壁纸、与桌面壁纸错位——2026-10-12 实测根因）。
+     */
+    private fun setupWallpaper() {
+        val launcher = VirtualLauncher
+        val streamW = launcher.streamWidthPx
+        val streamH = launcher.streamHeightPx
+        if (streamW <= 0 || streamH <= 0) return
+        val view = wallpaperView ?: return
+        val params = view.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (barForm) {
+            params.topMargin = -(streamH - launcher.dockHeightPx)
+        } else {
+            params.leftMargin = 0
+            params.topMargin = 0
+        }
+        params.width = streamW
+        params.height = streamH
+        view.layoutParams = params
+        refreshWallpaperIfChanged()
+    }
+
+    /** 壁纸版本变化时后台重解码并换图（手机侧更换后 ≤1 分钟内 dock 更新）。 */
+    private fun refreshWallpaperIfChanged() {
+        val view = wallpaperView ?: return
+        val current = com.lizhihua.carplaysender.ui.WallpaperStore.version
+        if (current == wallpaperShownVersion) return
+        wallpaperShownVersion = current
+        val params = view.layoutParams as? FrameLayout.LayoutParams ?: return
+        Thread({
+            val bitmap = runCatching {
+                com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
+                    this@DockActivity,
+                    params.width,
+                    params.height,
+                )
+            }.getOrNull()
+            if (bitmap != null) {
+                VirtualLauncher.logSink?.invoke(
+                    "WALLPAPER-DOCK: bitmap=${bitmap.width}x${bitmap.height} " +
+                        "view=${params.width}x${params.height} top=${params.topMargin}",
+                )
+                runOnUiThread { view.setImageBitmap(bitmap) }
+            } else {
+                VirtualLauncher.logSink?.invoke("WALLPAPER-DOCK: 解码失败")
+            }
+        }, "wallpaper-dock").start()
     }
 
     /** 逐级缩小字号直至文本宽度放得下（px 单位；行程 22→12px，对照设计原型）。 */

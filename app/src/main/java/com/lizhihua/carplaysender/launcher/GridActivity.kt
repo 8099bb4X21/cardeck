@@ -40,6 +40,13 @@ class GridActivity : AppCompatActivity() {
     /** 应用清单缓存（每次 resume 重扫 packageManager 会拖慢回桌面——仅在首次载入时扫描）。 */
     private var appsCache: List<VirtualLauncher.AppEntry>? = null
 
+    /** 壁纸背景层（对齐全流画布的切片；版本变化时后台换图）。 */
+    private var wallpaperView: ImageView? = null
+    private var wallpaperShownVersion = -1L
+
+    /** 壁纸变更监听（WallpaperStore 主线程回调；解码在本类自行切后台线程）。 */
+    private val wallpaperListener = { _: Long -> refreshWallpaperIfChanged() }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_grid)
@@ -53,6 +60,38 @@ class GridActivity : AppCompatActivity() {
         cellHeightPx = (dm.heightPixels - chromeVerticalPx) / ROWS
         iconSizePx = (cellHeightPx * 0.63f).toInt().coerceAtMost((cellWidthPx * 0.72f).toInt())
 
+        // 壁纸背景（index 0 = 最底）：窗口必须不透明——透明窗口压在应用窗口前面时
+        // 会把应用内容透出来（点 home 后桌面图标叠在头条上的根因）。
+        // 切片映射：把「整个视频流画布」的 aspectFill 壁纸按 dock 位置偏移，
+        // 本窗口正好露出应用区的切片，与 dock 处的切片逐像素连续（同一渲染路径）。
+        val scale = VirtualLauncher.gridScale()
+        val canvasWidth = (VirtualLauncher.streamWidthPx * scale).toInt()
+        val canvasHeight = (VirtualLauncher.streamHeightPx * scale).toInt()
+        if (canvasWidth > 0 && canvasHeight > 0) {
+            val root = findViewById<android.view.ViewGroup>(android.R.id.content)
+            wallpaperView = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.FIT_XY
+                layoutParams = android.widget.FrameLayout.LayoutParams(
+                    canvasWidth,
+                    canvasHeight,
+                ).apply {
+                    if (VirtualLauncher.dockAtBottom) {
+                        // 竖屏车机：dock 在底部，桌面切片 = 画布顶部
+                        leftMargin = 0
+                        topMargin = 0
+                    } else {
+                        // 横屏车机：dock 在左侧，桌面切片 = 画布右部
+                        leftMargin = -(VirtualLauncher.dockWidthPx * scale).toInt()
+                        topMargin = 0
+                    }
+                }
+            }
+            root.addView(wallpaperView, 0)
+            // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
+            com.lizhihua.carplaysender.ui.WallpaperStore.addListener(wallpaperListener)
+            refreshWallpaperIfChanged()
+        }
+
         pager = findViewById<ViewPager2>(R.id.gridPager).apply {
             offscreenPageLimit = 2
             adapter = PageAdapter()
@@ -63,10 +102,44 @@ class GridActivity : AppCompatActivity() {
         })
     }
 
+    /** 壁纸版本变化时后台重解码并换图（手机侧换壁纸后 ≤2s 桌面更新）。 */
+    private fun refreshWallpaperIfChanged() {
+        val view = wallpaperView ?: return
+        val current = com.lizhihua.carplaysender.ui.WallpaperStore.version
+        if (current == wallpaperShownVersion) return
+        wallpaperShownVersion = current
+        val params = view.layoutParams as? android.widget.FrameLayout.LayoutParams
+        Thread({
+            val bitmap = runCatching {
+                com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
+                    this@GridActivity,
+                    params?.width ?: 0,
+                    params?.height ?: 0,
+                )
+            }.getOrNull()
+            if (bitmap != null) {
+                // 诊断：bitmap 三点采样（中线上 25%/50%/75% 宽）——区分「bitmap 内容缺失」
+                // 与「视图/合成问题」（本机 logcat 受抑制，走 logSink 落文件日志）
+                val samples = listOf(0.25f, 0.5f, 0.75f).joinToString(",") {
+                    "%06x".format(bitmap.getPixel((bitmap.width * it).toInt(), bitmap.height / 2))
+                }
+                VirtualLauncher.logSink?.invoke(
+                    "WALLPAPER-GRID: bitmap=${bitmap.width}x${bitmap.height} " +
+                        "view=${params?.width}x${params?.height} left=${params?.leftMargin} " +
+                        "samples=[$samples]",
+                )
+                runOnUiThread { view.setImageBitmap(bitmap) }
+            } else {
+                VirtualLauncher.logSink?.invoke("WALLPAPER-GRID: 解码失败")
+            }
+        }, "wallpaper-grid").start()
+    }
+
     override fun onResume() {
         super.onResume()
         // 也覆盖从设置页返回：勾选变化即时反映
         reload()
+        refreshWallpaperIfChanged()
     }
 
     /** 重新读取应用清单与桌面选择（首帧与每次回到桌面时调用）。 */
@@ -175,6 +248,11 @@ class GridActivity : AppCompatActivity() {
             (row.getChildAt(i).background as? android.graphics.drawable.GradientDrawable)
                 ?.setColor(if (i == selected) 0xFFFFFFFF.toInt() else 0x66FFFFFF.toInt())
         }
+    }
+
+    override fun onDestroy() {
+        com.lizhihua.carplaysender.ui.WallpaperStore.removeListener(wallpaperListener)
+        super.onDestroy()
     }
 
     override fun onBackPressed() = Unit // 桌面不退出

@@ -205,7 +205,7 @@ class DualDisplayComposer(
         val hi = if (hasHiInput) newInput(hiW, hiH).also { appHi = it } else null
 
         // ---- 着色器 ----
-        val program = buildProgram()
+        val program = buildProgram(oes = true)
         GLES20.glUseProgram(program)
         val aPos = GLES20.glGetAttribLocation(program, "aPos")
         val aTexCoord = GLES20.glGetAttribLocation(program, "aTexCoord")
@@ -339,7 +339,28 @@ class DualDisplayComposer(
         }
     }
 
-    private fun buildProgram(): Int {
+    /** [oes]=true：外部纹理采样（SurfaceTexture）；false：普通 2D 采样（壁纸位图）。 */
+    private fun buildProgram(oes: Boolean): Int {
+        val fragment = if (oes) {
+            """
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            varying vec2 vTexCoord;
+            uniform samplerExternalOES uTexture;
+            void main() {
+                gl_FragColor = texture2D(uTexture, vTexCoord);
+            }
+            """.trimIndent()
+        } else {
+            """
+            precision mediump float;
+            varying vec2 vTexCoord;
+            uniform sampler2D uTexture;
+            void main() {
+                gl_FragColor = texture2D(uTexture, vTexCoord);
+            }
+            """.trimIndent()
+        }
         val vertex = """
             attribute vec2 aPos;
             attribute vec2 aTexCoord;
@@ -348,15 +369,6 @@ class DualDisplayComposer(
             void main() {
                 gl_Position = vec4(aPos, 0.0, 1.0);
                 vTexCoord = (uSTMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
-            }
-        """.trimIndent()
-        val fragment = """
-            #extension GL_OES_EGL_image_external : require
-            precision mediump float;
-            varying vec2 vTexCoord;
-            uniform samplerExternalOES uTexture;
-            void main() {
-                gl_FragColor = texture2D(uTexture, vTexCoord);
             }
         """.trimIndent()
 

@@ -55,6 +55,20 @@ class MainActivity : AppCompatActivity() {
             log("BLUETOOTH_CONNECT 授权: $granted")
         }
 
+    /** 车机壁纸选择（Photo Picker；无需存储权限）。选中即持久化并通知合成器换图。 */
+    private val wallpaperPicker =
+        registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri == null) {
+                log("WALLPAPER: 未选择图片")
+                return@registerForActivityResult
+            }
+            val ok = com.lizhihua.carplaysender.ui.WallpaperStore.setFromUri(this, uri)
+            log(
+                "WALLPAPER: ${if (ok) "壁纸已更新（会话进行中约 1 秒内上车；下次连接自动生效）" else "保存失败"}",
+            )
+            Toast.makeText(this, if (ok) "壁纸已更新" else "保存失败", Toast.LENGTH_SHORT).show()
+        }
+
     private val audioPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             log("MODE: RECORD_AUDIO 授权: $granted（音频通道需要）")
@@ -251,6 +265,20 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnBluetooth).setOnClickListener {
             showAudioChoiceDialog()
+        }
+
+        // ---- 车机壁纸（aspectFill 全屏；GL 合成器最底层）----
+        findViewById<Button>(R.id.btnWallpaperPick).setOnClickListener {
+            wallpaperPicker.launch(
+                androidx.activity.result.PickVisualMediaRequest(
+                    androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly,
+                ),
+            )
+        }
+        findViewById<Button>(R.id.btnWallpaperReset).setOnClickListener {
+            val ok = com.lizhihua.carplaysender.ui.WallpaperStore.resetToDefault(this)
+            log("WALLPAPER: ${if (ok) "已恢复内置默认（CarPlay 官方深色壁纸）" else "恢复失败"}")
+            Toast.makeText(this, if (ok) "已恢复默认壁纸" else "恢复失败", Toast.LENGTH_SHORT).show()
         }
         findViewById<Button>(R.id.btnDimNow).setOnClickListener {
             if (!com.lizhihua.carplaysender.ui.ScreenDimmer.isAttached()) {

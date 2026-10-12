@@ -1,73 +1,92 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- CarPlay 底部 dock（竖屏车机时使用）：⌂ | 运行中应用横排 | 时间/电量。
-     尺寸用 px（dock 虚拟屏与视频流 1:1 合成；对照设计原型）。 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+     尺寸用 px（dock 虚拟屏与视频流 1:1 合成；对照设计原型）。
+     壁纸：DockActivity 往 dockWallpaper 塞「全流画布切片」（与桌面同源同路径）；
+     窗口不透明（半透明窗口会透出系统合成的手机壁纸——见 activity_dock_sidebar 注释）。 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="horizontal"
-    android:gravity="center_vertical"
-    android:background="#000000"
-    android:paddingLeft="6px"
-    android:paddingRight="10px"
-    android:paddingTop="4px"
-    android:paddingBottom="4px">
+    android:background="#FF000000">
 
     <ImageView
-        android:id="@+id/dockHome"
-        android:layout_width="56px"
-        android:layout_height="56px"
-        android:background="?android:attr/selectableItemBackgroundBorderless"
-        android:contentDescription="回到桌面"
-        android:padding="8px"
-        android:scaleType="fitCenter"
-        android:src="@drawable/ic_dock_home" />
+        android:id="@+id/dockWallpaper"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY" />
 
     <View
-        android:layout_width="1px"
+        android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:layout_marginLeft="6px"
-        android:layout_marginTop="6px"
-        android:layout_marginBottom="6px"
-        android:background="#3A3A3C" />
-
-    <HorizontalScrollView
-        android:layout_width="0dp"
-        android:layout_height="match_parent"
-        android:layout_weight="1"
-        android:layout_marginLeft="6px"
-        android:scrollbars="none">
-
-        <LinearLayout
-            android:id="@+id/dockApps"
-            android:layout_width="wrap_content"
-            android:layout_height="match_parent"
-            android:orientation="horizontal"
-            android:gravity="center_vertical" />
-    </HorizontalScrollView>
+        android:background="#33000000" />
 
     <LinearLayout
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:gravity="center"
-        android:paddingLeft="10px">
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingLeft="6px"
+        android:paddingRight="10px"
+        android:paddingTop="4px"
+        android:paddingBottom="4px">
 
-        <TextView
-            android:id="@+id/dockClock"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:singleLine="true"
-            android:letterSpacing="0.03"
-            android:textColor="#FFFFFF"
-            android:textStyle="bold"
-            android:textSize="22px" />
+        <ImageView
+            android:id="@+id/dockHome"
+            android:layout_width="56px"
+            android:layout_height="56px"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="回到桌面"
+            android:padding="8px"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_dock_home" />
 
-        <TextView
-            android:id="@+id/dockBatteryText"
+        <View
+            android:layout_width="1px"
+            android:layout_height="match_parent"
+            android:layout_marginLeft="6px"
+            android:layout_marginTop="6px"
+            android:layout_marginBottom="6px"
+            android:background="#3A3A3C" />
+
+        <HorizontalScrollView
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:layout_marginLeft="6px"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/dockApps"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:orientation="horizontal"
+                android:gravity="center_vertical" />
+        </HorizontalScrollView>
+
+        <LinearLayout
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="3px"
-            android:textColor="#B0B0B8"
-            android:textSize="13px" />
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:paddingLeft="10px">
+
+            <TextView
+                android:id="@+id/dockClock"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:singleLine="true"
+                android:letterSpacing="0.03"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:textSize="22px" />
+
+            <TextView
+                android:id="@+id/dockBatteryText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3px"
+                android:textColor="#B0B0B8"
+                android:textSize="13px" />
+        </LinearLayout>
     </LinearLayout>
-</LinearLayout>
+</FrameLayout>

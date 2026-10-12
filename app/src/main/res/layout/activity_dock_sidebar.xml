@@ -1,17 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- CarPlay 侧栏（左侧竖条）：顶部时间+电量，中部运行中应用，底部回桌面。
      尺寸用 px 与设计原型（design/launcher-proto.html）1:1 对应——dock 虚拟屏
-     126×540@420dpi 与视频流 1:1 合成，px 即最终车机画面像素。 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+     126×540@420dpi 与视频流 1:1 合成，px 即最终车机画面像素。
+     壁纸：DockActivity 在代码里往 dockWallpaper 塞「全流画布切片」（与桌面
+     同源同路径，交界连续）；scrim 20% 黑压住壁纸保证内容可读。
+     窗口必须不透明——半透明窗口下系统会往这块虚拟屏合成手机自身壁纸
+     （曾导致 dock 显示手机壁纸、与桌面壁纸错位的根因）。 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:gravity="center_horizontal"
-    android:background="#000000"
-    android:paddingLeft="8px"
-    android:paddingRight="8px"
-    android:paddingTop="12px"
-    android:paddingBottom="12px">
+    android:background="#FF000000">
+
+    <ImageView
+        android:id="@+id/dockWallpaper"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#33000000" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center_horizontal"
+        android:paddingLeft="8px"
+        android:paddingRight="8px"
+        android:paddingTop="12px"
+        android:paddingBottom="12px">
 
     <TextView
         android:id="@+id/dockClock"
@@ -81,4 +101,5 @@
         android:padding="8px"
         android:scaleType="fitCenter"
         android:src="@drawable/ic_dock_home" />
-</LinearLayout>
+    </LinearLayout>
+</FrameLayout>
