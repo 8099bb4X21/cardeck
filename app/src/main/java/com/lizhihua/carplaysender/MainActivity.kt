@@ -451,6 +451,11 @@ class MainActivity : AppCompatActivity() {
             }
         }.start()
 
+        // ---- 车机设置（手机侧二级菜单：桌面/横屏/超采样/dock/默认地图） ----
+        findViewById<LinearLayout>(R.id.btnCarSettings).setOnClickListener {
+            startActivity(android.content.Intent(this, PhoneSettingsActivity::class.java))
+        }
+
         // 启动即检查：常亮开 + 无悬浮窗权限 → 主动请求
         if (com.lizhihua.carplaysender.ui.ScreenDimmer.enabled) {
             if (!android.provider.Settings.canDrawOverlays(this)) {

@@ -202,7 +202,7 @@ object SessionController {
         }
     }
 
-    /** 新 BT 周期开始前彻底退役上一代会话（旧管线泄漏会累积编码器/虚拟显示器，最终 dequeueBuffer -19）。 */
+    /** 会话结束/新周期开始前彻底退役上一代会话（旧管线泄漏会累积编码器/虚拟显示器，最终 dequeueBuffer -19）。 */
     fun retireSession() {
         videoSender?.stop()
         videoSender = null
@@ -217,6 +217,13 @@ object SessionController {
         currentClient = null
         // 解除会话静默：出站探测恢复（下次会话建立时会再次置位）
         com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = false
+        // 「强制应用横屏」覆盖随会话结束统一复原（应用回到手机侧正常竖屏形态）
+        appContext?.let { ctx ->
+            runCatching {
+                val restored = com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat.resetAll(ctx)
+                if (restored > 0) appendLog("ORIENTATION: 已复原 $restored 个应用的显示设置")
+            }
+        }
     }
 
     /** 会话已建立且投影就绪、但音频尚未启动时，动态补启（投影授权晚于连接的场景）。 */
@@ -604,6 +611,12 @@ object SessionController {
                                                 // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
                                                 appendLog(">>> CarPlay 会话结束（推流终止）——恢复蓝牙探测")
                                                 com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = false
+                                                // 车机掉线类结束（无用户断开操作）：同样复原横屏覆盖
+                                                appContext?.let { ctx ->
+                                                    runCatching {
+                                                        com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat.resetAll(ctx)
+                                                    }
+                                                }
                                             },
                                         )
                                         val density = 420

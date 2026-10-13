@@ -390,6 +390,12 @@ object VirtualLauncher {
                         "app=$appDisplayId(${appWidth}x$appHeightPx @${appNativeDensity}dpi) " +
                         "appHi=$appHiDisplayId(${appHiWidth}x$appHiHeight @${appHiDensity}dpi scale=x$appScaleFactor)",
                 )
+                // 会话建立：为「强制应用横屏」名单内的应用逐个写入兼容覆盖
+                // （会话结束/断开时由 SessionController 统一复原，见 retireSession/onEnded）
+                runCatching {
+                    val applied = com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat.applyAll(context)
+                    if (applied > 0) log("ORIENTATION: 已为 $applied 个应用启用强制横屏（会话期间生效）")
+                }
             } else {
                 // 回退：应用侧 PUBLIC 屏（应用内跳转任务会逃逸到手机主屏，尽量可用的降级形态）
                 val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager

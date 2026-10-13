@@ -103,6 +103,33 @@
         </LinearLayout>
 
         <LinearLayout
+            android:id="@+id/menuOrientation"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:background="?android:attr/selectableItemBackground"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="9dp">
+
+            <ImageView
+                android:layout_width="23dp"
+                android:layout_height="23dp"
+                android:background="@drawable/bg_menu_chip"
+                android:importantForAccessibility="no"
+                android:padding="5dp"
+                android:src="@drawable/ic_screen_rotation" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="9dp"
+                android:text="应用横屏"
+                android:textColor="#FF8E8E93"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <LinearLayout
             android:id="@+id/menuDock"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -168,254 +195,12 @@
         android:layout_height="match_parent"
         android:layout_weight="1">
 
-        <!-- 内容页 1：管理桌面应用 -->
-        <LinearLayout
-            android:id="@+id/contentDesktopApps"
+        <!-- 右栏：内容 Fragment 容器（车机双栏 / 手机二级菜单共用面板） -->
+        <FrameLayout
+            android:id="@+id/settingsContainer"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:orientation="vertical"
-            android:paddingLeft="20dp"
-            android:paddingRight="13dp"
-            android:paddingTop="14dp"
-            android:paddingBottom="10dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="bottom"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="管理桌面应用"
-                    android:textColor="#FFF5F5F7"
-                    android:textSize="18sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:id="@+id/settingsCount"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginLeft="10dp"
-                    android:textColor="#FF8E8E93"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:layout_marginBottom="11dp"
-                android:text="勾选的应用将显示在桌面；「车机设置」固定在第一格。"
-                android:textColor="#FF8E8E93"
-                android:textSize="12sp" />
-
-            <!-- 单列应用列表 + 右侧字母导航条（FrameLayout 叠放） -->
-            <FrameLayout
-                android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1">
-
-                <androidx.recyclerview.widget.RecyclerView
-                    android:id="@+id/appList"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:clipToPadding="false"
-                    android:paddingRight="26dp"
-                    android:scrollbars="vertical" />
-
-                <LinearLayout
-                    android:id="@+id/appListIndex"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_gravity="right|center_vertical"
-                    android:orientation="vertical"
-                    android:paddingLeft="6dp" />
-            </FrameLayout>
-        </LinearLayout>
-
-        <!-- 内容页 2：应用超采样 -->
-        <LinearLayout
-            android:id="@+id/contentSupersample"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:orientation="vertical"
-            android:paddingLeft="20dp"
-            android:paddingRight="13dp"
-            android:paddingTop="14dp"
-            android:paddingBottom="10dp"
-            android:visibility="gone">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="应用超采样"
-                android:textColor="#FFF5F5F7"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:layout_marginBottom="11dp"
-                android:text="超采样以 1.5× 分辨率渲染再缩回，竖屏应用顶部空带更小；横屏应用建议关闭（更清晰流畅）。自动 = 检测为竖屏应用时开启。"
-                android:textColor="#FF8E8E93"
-                android:textSize="12sp" />
-
-            <!-- 单列应用列表 + 右侧字母导航条 -->
-            <FrameLayout
-                android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1">
-
-                <androidx.recyclerview.widget.RecyclerView
-                    android:id="@+id/ssList"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:clipToPadding="false"
-                    android:paddingRight="26dp"
-                    android:scrollbars="vertical" />
-
-                <LinearLayout
-                    android:id="@+id/ssListIndex"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_gravity="right|center_vertical"
-                    android:orientation="vertical"
-                    android:paddingLeft="6dp" />
-            </FrameLayout>
-        </LinearLayout>
-
-        <!-- 内容页 3：dock 栏设置（暗幕透明度 / 背景模糊） -->
-        <LinearLayout
-            android:id="@+id/contentDock"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:orientation="vertical"
-            android:paddingLeft="20dp"
-            android:paddingRight="13dp"
-            android:paddingTop="14dp"
-            android:paddingBottom="10dp"
-            android:visibility="gone">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="dock 栏设置"
-                android:textColor="#FFF5F5F7"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:layout_marginBottom="11dp"
-                android:text="调整 dock 栏壁纸的暗幕透明度与高斯模糊程度，拖动即时生效。"
-                android:textColor="#FF8E8E93"
-                android:textSize="12sp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="暗幕透明度"
-                android:textColor="#FFF5F5F7"
-                android:textSize="14sp" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <SeekBar
-                    android:id="@+id/dockScrimSeek"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:max="100" />
-
-                <TextView
-                    android:id="@+id/dockScrimValue"
-                    android:layout_width="52dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginLeft="8dp"
-                    android:gravity="right"
-                    android:textColor="#FF8E8E93"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
-                android:text="背景模糊程度"
-                android:textColor="#FFF5F5F7"
-                android:textSize="14sp" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <SeekBar
-                    android:id="@+id/dockBlurSeek"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:max="100" />
-
-                <TextView
-                    android:id="@+id/dockBlurValue"
-                    android:layout_width="52dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginLeft="8dp"
-                    android:gravity="right"
-                    android:textColor="#FF8E8E93"
-                    android:textSize="12sp" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- 内容页 4：默认地图（白名单内单选） -->
-        <LinearLayout
-            android:id="@+id/contentDefaultMap"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:orientation="vertical"
-            android:paddingLeft="20dp"
-            android:paddingRight="13dp"
-            android:paddingTop="14dp"
-            android:paddingBottom="10dp"
-            android:visibility="gone">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="默认地图"
-                android:textColor="#FFF5F5F7"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:layout_marginBottom="11dp"
-                android:text="仪表盘地图 tile 与「⤢ 全屏地图」使用的地图应用。"
-                android:textColor="#FF8E8E93"
-                android:textSize="12sp" />
-
-            <LinearLayout
-                android:id="@+id/mapOptions"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical" />
-        </LinearLayout>
+            android:layout_weight="1" />
 
         <!-- 轻提示（页内 Toast；淡入淡出由代码控制） -->
         <TextView

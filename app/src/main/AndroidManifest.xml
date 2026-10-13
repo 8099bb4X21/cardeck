@@ -56,6 +56,14 @@
             </intent-filter>
         </activity>
 
+        <!-- 车机设置（手机侧）：二级菜单页 + 内容 Fragment 宿主（与车机双栏共用面板） -->
+        <activity
+            android:name=".PhoneSettingsActivity"
+            android:exported="false" />
+        <activity
+            android:name=".SettingsContentActivity"
+            android:exported="false" />
+
         <service
             android:name=".service.CarPlayService"
             android:exported="false"
