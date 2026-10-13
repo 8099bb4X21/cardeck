@@ -1,6 +1,5 @@
 package com.lizhihua.carplaysender.launcher.settings
 
-import android.content.ComponentName
 import android.content.Context
 import com.lizhihua.carplaysender.shizuku.Shell
 
@@ -20,20 +19,18 @@ object AppOrientationCompat {
     const val CHANGE_ANY_ORIENTATION = 265464455
     private const val PREFS = "app_orientation"
 
-    fun prefKey(component: ComponentName) = "force_${component.flattenToString()}"
+    /** 偏好键统一按「包名」存取（am compat 也以包名为对象；读取侧统一 removePrefix 兼容旧键）。 */
+    private fun key(pkg: String) = "force_$pkg"
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    fun isEnabled(context: Context, component: ComponentName): Boolean =
-        prefs(context).getBoolean(prefKey(component), false)
+    fun isEnabled(context: Context, pkg: String): Boolean =
+        prefs(context).getBoolean(key(pkg), false)
 
     /** 用户开关：写偏好 + 立即写系统覆盖（设置页用）。返回系统写入是否成功。 */
     fun setEnabled(context: Context, pkg: String, enable: Boolean): Boolean {
-        val component = ComponentName.unflattenFromString(pkg)
-        prefs(context).edit()
-            .putBoolean(if (component != null) prefKey(component) else pkg, enable)
-            .apply()
+        prefs(context).edit().putBoolean(key(pkg), enable).apply()
         val action = if (enable) "enable" else "disable"
         val ok1 = Shell.exec("am compat $action $CHANGE_UNDEFINED_TO_NOSENSOR $pkg", timeoutMs = 4000).ok
         val ok2 = Shell.exec("am compat $action $CHANGE_ANY_ORIENTATION $pkg", timeoutMs = 4000).ok
@@ -63,5 +60,6 @@ object AppOrientationCompat {
     }
 
     private fun enabledPkgs(context: Context): List<String> =
-        prefs(context).all.filterValues { it == true }.keys.toList()
+        prefs(context).all.filterValues { it == true }.keys
+            .map { it.removePrefix("force_") }
 }

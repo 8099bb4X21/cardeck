@@ -264,7 +264,7 @@ class OrientationPanelFragment : SettingsPanelFragment() {
             name.text = entry.label
             // 界面勾选状态即事实源：点击 = 取反当前显示状态（不重新读偏好，
             // 避免读值失真导致方向算反——实测「取消」会变成再次「启用」）
-            shown = AppOrientationCompat.isEnabled(requireContext(), entry.component)
+            shown = AppOrientationCompat.isEnabled(requireContext(), pkg())
             refresh(shown)
 
             row.setOnClickListener {
