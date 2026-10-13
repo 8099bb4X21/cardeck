@@ -175,6 +175,19 @@ class GridActivity : AppCompatActivity() {
         cellWidthPx = (dm.widthPixels - chromeHorizontalPx) / COLUMNS
         cellHeightPx = (dm.heightPixels - chromeVerticalPx) / ROWS
         iconSizePx = (cellHeightPx * 0.63f).toInt().coerceAtMost((cellWidthPx * 0.72f).toInt())
+        // 虚拟屏重建竞态：dm 短暂为 0 时 cell/icon 尺寸会算出 0，首帧绑定即崩
+        // （Bitmap.createBitmap 0 宽高）。夹最小值保底，并在 pager 首帧布局后重算+重绑。
+        if (iconSizePx <= 0) {
+            iconSizePx = 48
+            findViewById<ViewPager2>(R.id.gridPager).post {
+                cellWidthPx = (dm.widthPixels - chromeHorizontalPx) / COLUMNS
+                cellHeightPx = (dm.heightPixels - chromeVerticalPx) / ROWS
+                iconSizePx = (cellHeightPx * 0.63f).toInt()
+                    .coerceAtMost((cellWidthPx * 0.72f).toInt())
+                    .coerceAtLeast(48)
+                if (cellWidthPx > 0) reload()
+            }
+        }
 
         // 壁纸背景（index 0 = 最底）：窗口必须不透明——透明窗口压在应用窗口前面时
         // 会把应用内容透出来（点 home 后桌面图标叠在头条上的根因）。

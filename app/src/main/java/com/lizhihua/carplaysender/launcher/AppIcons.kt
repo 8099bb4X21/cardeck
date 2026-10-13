@@ -18,6 +18,7 @@ object AppIcons {
      * dock 里同一实例的缩放矩阵失配（图标变小且偏左，点 home 触发网格重绑后复现）。
      */
     fun rounded(drawable: Drawable, size: Int, radiusFraction: Float = 0.22f): Bitmap {
+        if (size <= 0) return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val radius = size * radiusFraction

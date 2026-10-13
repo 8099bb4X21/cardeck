@@ -254,26 +254,34 @@ class OrientationPanelFragment : SettingsPanelFragment() {
         private val icon: ImageView = row.findViewById(R.id.oriIcon)
         private val name: TextView = row.findViewById(R.id.oriName)
         private val check: ImageView = row.findViewById(R.id.oriCheck)
+        private lateinit var entry: VirtualLauncher.AppEntry
+        private var shown = false
 
         fun bind(entry: VirtualLauncher.AppEntry) {
+            this.entry = entry
             val iconPx = (30 * resources.displayMetrics.density).toInt()
             icon.setImageBitmap(AppIcons.rounded(entry.icon, iconPx))
             name.text = entry.label
-            val pkg = entry.component.packageName
-            val enabled = AppOrientationCompat.isEnabled(requireContext(), entry.component)
-            refresh(enabled)
+            // 界面勾选状态即事实源：点击 = 取反当前显示状态（不重新读偏好，
+            // 避免读值失真导致方向算反——实测「取消」会变成再次「启用」）
+            shown = AppOrientationCompat.isEnabled(requireContext(), entry.component)
+            refresh(shown)
 
             row.setOnClickListener {
-                val nowEnabled = !AppOrientationCompat.isEnabled(requireContext(), entry.component)
-                if (!AppOrientationCompat.setEnabled(requireContext(), pkg, nowEnabled)) {
+                shown = !shown
+                if (!AppOrientationCompat.setEnabled(requireContext(), pkg(), shown)) {
+                    shown = !shown
+                    refresh(shown)
                     hostToast("写入失败（Shizuku 异常）")
                     return@setOnClickListener
                 }
-                refresh(nowEnabled)
-                hostToast("「${entry.label}」横屏：${if (nowEnabled) "开" else "关"}")
+                refresh(shown)
+                hostToast("「${entry.label}」横屏：${if (shown) "开" else "关"}")
                 askKillIfAlive(entry)
             }
         }
+
+        private fun pkg() = entry.component.packageName
 
         private fun refresh(enabled: Boolean) {
             check.setImageResource(

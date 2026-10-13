@@ -74,12 +74,14 @@
             android:name=".launcher.DockActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:excludeFromRecents="true"
             android:theme="@style/Theme.CarPlaySender.Launcher" />
 
         <activity
             android:name=".launcher.GridActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:excludeFromRecents="true"
             android:theme="@style/Theme.CarPlaySender.Launcher" />
 
         <!-- 通知监听（媒体会话枚举）：音乐卡需要「通知使用权」；
@@ -98,6 +100,7 @@
             android:name=".launcher.SettingsActivity"
             android:exported="false"
             android:launchMode="singleTop"
+            android:excludeFromRecents="true"
             android:theme="@style/Theme.CarPlaySender.Settings" />
 
         <!-- Shizuku（隐形屏模式：am start 指定 display + MotionEvent 直注） -->

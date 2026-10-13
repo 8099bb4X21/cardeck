@@ -278,6 +278,13 @@ class MainActivity : AppCompatActivity() {
 
         deviceSubtitle.text = deviceName()
         logText.movementMethod = ScrollingMovementMethod()
+        // 控制台在长页面 ScrollView 内：按下时申请父级不拦截竖向手势，否则无法手动滚动
+        logText.setOnTouchListener { v, event ->
+            if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) {
+                v.parent.requestDisallowInterceptTouchEvent(true)
+            }
+            false
+        }
 
         // 进程重启兜底：若上次会话未正常退役，「常亮」改过的屏幕超时需要恢复
         run {
@@ -450,6 +457,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }.start()
+
 
         // ---- 车机设置（手机侧二级菜单：桌面/横屏/超采样/dock/默认地图） ----
         findViewById<LinearLayout>(R.id.btnCarSettings).setOnClickListener {
@@ -693,13 +701,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderConsole(text: String) {
+        // 改文本前已在底部（或用户上翻阅读中）：决定本次是否自动跟底
+        val stick = !logText.canScrollVertically(1)
         logText.text =
             if (SessionController.logEnabled) text else "日志采集已关闭（打开「监听日志」开关恢复）"
         logText.post {
             val layout = logText.layout ?: return@post
             val bottom = layout.getLineBottom(layout.lineCount - 1) -
                 logText.height + logText.paddingBottom
-            logText.scrollTo(0, bottom.coerceAtLeast(0))
+            if (stick) logText.scrollTo(0, bottom.coerceAtLeast(0))
         }
     }
 
@@ -765,7 +775,19 @@ class MainActivity : AppCompatActivity() {
                 if (residual.isNotEmpty()) {
                     log("SHELL: 启动检测到 ${residual.size} 个残留虚拟屏: " +
                         residual.joinToString(", ") { "${it.second}(${it.first})" })
-                    runOnUiThread { promptResidualDisplays(residual) }
+                    // 残留屏 = 上次会话异常退出（进程被杀）：横屏覆盖的会话末复原
+                    // 也没执行——一并清理，避免应用在手机侧残留横屏状态
+                    runCatching {
+                        val reset = com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
+                            .resetAll(applicationContext)
+                        if (reset > 0) log("ORIENTATION: 残留会话的横屏覆盖已复原 $reset 个")
+                    }
+                    runOnUiThread {
+                        promptResidualDisplays(residual)
+                        // 自动展开日志卡：启动清理的两条记录直接可见（卡片默认折叠）
+                        findViewById<View>(R.id.logBody).visibility = View.VISIBLE
+                        findViewById<ImageView>(R.id.logChevron).animate().rotation(180f).setDuration(250L).start()
+                    }
                 }
             }
         }.start()
