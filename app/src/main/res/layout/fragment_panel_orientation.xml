@@ -13,7 +13,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="6dp"
         android:layout_marginBottom="11dp"
-        android:text="开启后竖屏应用在车机屏以横屏全屏渲染。设置持久生效，会话关闭不复原；应用在手机上也会跟随屏幕方向。注意：部分界面文字可能变大或变小，重启目标应用后恢复；对运行中的应用，需重启后生效。"
+        android:text="开启后竖屏应用在车机屏以横屏全屏渲染。开关本身持久保存，下次连接自动生效；系统覆盖仅在会话期间生效，会话结束自动复原，应用回到正常方向，无需手动处理。注意：部分界面文字可能变大或变小，重启目标应用后恢复；对运行中的应用，切换开关需重启后生效。"
         android:textColor="#FF8E8E93"
         android:textSize="12sp" />
 
