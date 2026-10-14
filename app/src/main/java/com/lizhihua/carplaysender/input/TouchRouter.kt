@@ -95,7 +95,8 @@ object TouchRouter {
         } else {
             inDock = px < dockW
             var routedToMap = false
-            if (!inDock && launcher.mapDisplayId >= 0 &&
+            if (!inDock &&
+                launcher.mapDisplayId >= 0 &&
                 (launcher.mapFullscreen || launcher.dashboardMode) &&
                 launcher.tileSlideFraction <= 0.01f
             ) {
@@ -104,14 +105,9 @@ object TouchRouter {
                 if (tileX in 0 until tileVisibleW) {
                     inDock = false
                     targetDisplay = launcher.mapDisplayId
-                    // 地图屏按应用区全尺寸创建；分屏时合成器采样其画面中央带区
-                    // （宽的一半居中），触摸坐标需加回同一偏移
-                    localX =
-                        if (launcher.mapFullscreen) {
-                            tileX
-                        } else {
-                            tileX + launcher.appAreaWidth / 4
-                        }
+                    // 地图屏按布局动态 resize（分屏=tile 尺寸、全屏=应用区尺寸），
+                    // 屏内容即坐标域：相对应用区左缘的偏移就是屏内坐标，直接平移
+                    localX = tileX
                     localY = py
                     routedToMap = true
                 }
@@ -166,8 +162,10 @@ object TouchRouter {
         // （注入逻辑不受影响；点按 = 快速轻点，平移/双击/双指等地图手势不触发）
         if (!launcher.dockAtBottom) {
             val tileHit =
-                !inDock && targetDisplay == launcher.mapDisplayId &&
-                    launcher.dashboardMode && !launcher.mapFullscreen
+                !inDock &&
+                    targetDisplay == launcher.mapDisplayId &&
+                    launcher.dashboardMode &&
+                    !launcher.mapFullscreen
             updateMapTileTap(launcher, contact, tileHit, px - dockW)
         }
     }
@@ -216,7 +214,8 @@ object TouchRouter {
                 tapY = contact.yPixels
             } else if (tapArmSlot >= 0 &&
                 (
-                    !inTile || contact.slot != tapArmSlot ||
+                    !inTile ||
+                        contact.slot != tapArmSlot ||
                         kotlin.math.abs(tileX - tapX) + kotlin.math.abs(contact.yPixels - tapY) > TAP_MAX_MOVE_PX
                 )
             ) {
@@ -224,7 +223,8 @@ object TouchRouter {
             }
         } else if (tapArmSlot >= 0 && contact.slot == tapArmSlot) {
             val ok =
-                inTile && now - tapDownAt <= TAP_MAX_MS &&
+                inTile &&
+                    now - tapDownAt <= TAP_MAX_MS &&
                     kotlin.math.abs(tileX - tapX) + kotlin.math.abs(contact.yPixels - tapY) <= TAP_MAX_MOVE_PX
             cancelMapTileTap()
             if (ok) {

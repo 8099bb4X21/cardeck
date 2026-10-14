@@ -146,7 +146,7 @@ object VirtualLauncher {
         composer?.targetFps = fps
     }
 
-    /** 地图屏 tile 尺寸（分屏形态；应用区左半）。 */
+    /** 地图屏 tile 尺寸（分屏形态的实际显示尺寸；与 DualDisplayComposer 的 SPLIT 绘制矩形一致）。 */
     @Volatile
     var mapTileWidth: Int = 0
         private set
@@ -167,6 +167,16 @@ object VirtualLauncher {
     @Volatile
     var mapFullscreen: Boolean = false
         private set
+
+    /** 地图屏当前逻辑尺寸（resize 幂等基线；0 = 未创建/已释放）。 */
+    @Volatile
+    private var mapDisplayW = 0
+
+    @Volatile
+    private var mapDisplayH = 0
+
+    /** 地图屏密度（创建时固定 200dpi，resize 不变——逻辑尺寸随像素缩放）。 */
+    private const val MAP_DISPLAY_DPI = 200
 
     /** 仪表盘（分屏）模式是否激活。 */
     @Volatile
@@ -271,11 +281,12 @@ object VirtualLauncher {
         }
         appAreaWidth = appWidth
         appAreaHeight = appHeightPx
-        // 地图屏：始终按应用区全尺寸创建（应用窗口稳定，任务不迁移）。
-        // 分屏形态由合成器采样画面中央带区实现（地图中心≈车辆位置），无需 resize。
+        // 地图屏：按应用区全尺寸创建，分屏/全屏间动态 resize（见 resizeMapDisplay）。
+        // tile 尺寸 = SPLIT 绘制矩形（应用区宽/2，四周留边 16、右缘再收半边距 8），
+        // 与 DualDisplayComposer.TILE_MARGIN 保持一致。
         if (!dockAtBottom) {
-            mapTileWidth = appWidth / 2
-            mapTileHeight = appHeightPx
+            mapTileWidth = appWidth / 2 - 24
+            mapTileHeight = appHeightPx - 32
         }
         // 横屏应用屏的密度选择（2026-10-11 实测标定）：
         // 竖屏锁定应用（如头条）在横屏屏上被系统 letterbox 成窄条窗口，窗口逻辑宽度
@@ -415,6 +426,9 @@ object VirtualLauncher {
                         }
                         if (mapId >= 0) {
                             mapDisplayId = mapId
+                            // 创建尺寸=应用区全尺寸（resizeMapDisplay 的幂等基线）
+                            mapDisplayW = appWidth
+                            mapDisplayH = appHeightPx
                         } else if (mapSurface != null) {
                             log("LAUNCHER: 地图屏创建失败——仪表盘无地图 tile")
                         }
@@ -581,6 +595,8 @@ object VirtualLauncher {
         mapDisplayId = -1
         mapTileWidth = 0
         mapTileHeight = 0
+        mapDisplayW = 0
+        mapDisplayH = 0
         appAreaWidth = 0
         appAreaHeight = 0
         mapFullscreen = false
@@ -669,6 +685,7 @@ object VirtualLauncher {
                 // 期间用户可能已点开普通应用（launchApp 会置 HIDDEN 并退出仪表盘）：
                 // 复查模式，别把地图层又盖回去
                 if (dashboardMode) {
+                    resizeMapDisplay(fullscreen = false)
                     composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
                 }
             }, "dashboard-enter").start()
@@ -689,12 +706,14 @@ object VirtualLauncher {
     }
 
     /**
-     * 地图屏全屏 ⇄ 分屏：地图屏尺寸恒定（应用区大小），仅切换合成器的采样布局。
-     * 任务不迁移、不 resize，导航等状态天然连续。
+     * 地图屏全屏 ⇄ 分屏：动态 resize 地图屏到目标尺寸（全屏=应用区、分屏=tile 显示尺寸），
+     * 屏上地图应用由系统派发配置变更并 relayout（任务不迁移，导航等状态天然连续）。
+     * 合成器同步切换布局：resize 后地图屏内容即目标区域内容，整幅映射、不再裁剪采样。
      */
     fun setMapFullscreen(fullscreen: Boolean) {
         if (mapDisplayId < 0 || mapFullscreen == fullscreen) return
         mapFullscreen = fullscreen
+        resizeMapDisplay(fullscreen)
         composer?.setTileLayout(
             if (fullscreen) {
                 DualDisplayComposer.TileLayout.FULLSCREEN
@@ -704,6 +723,34 @@ object VirtualLauncher {
         )
         notifyMapLayout()
         logSink?.invoke("LAUNCHER: 地图屏 ${if (fullscreen) "全屏" else "分屏"}")
+    }
+
+    /**
+     * resize 地图屏到目标布局尺寸（幂等：尺寸未变不调——每次 resize 都会触发屏上
+     * 应用的配置变更/重布局，能免则免）。Shizuku 未绑定或调用失败时保持现尺寸，
+     * 合成器整幅映射依旧成立（只是地图 UI 密度与可视区域暂不匹配）。
+     */
+    private fun resizeMapDisplay(fullscreen: Boolean) {
+        val id = mapDisplayId
+        if (id < 0) return
+        val w = if (fullscreen) appAreaWidth else mapTileWidth
+        val h = if (fullscreen) appAreaHeight else mapTileHeight
+        if (w <= 0 || h <= 0 || (w == mapDisplayW && h == mapDisplayH)) return
+        val svc =
+            com.lizhihua.carplaysender.shizuku.CarInputClient.service
+                ?: return
+        runCatching {
+            if (svc.resizeDisplay(id, w, h, MAP_DISPLAY_DPI)) {
+                mapDisplayW = w
+                mapDisplayH = h
+                // 消费端 buffer 尺寸必须同步——否则新尺寸内容画进旧 buffer 左上区域
+                // （tile 内容偏左、宽度只剩比例值、右侧全黑）
+                composer?.resizeMapInput(w, h)
+                logSink?.invoke(
+                    "LAUNCHER: 地图屏 resize → ${w}x$h@${MAP_DISPLAY_DPI}dpi（${if (fullscreen) "全屏" else "分屏"}）",
+                )
+            }
+        }
     }
 
     /**

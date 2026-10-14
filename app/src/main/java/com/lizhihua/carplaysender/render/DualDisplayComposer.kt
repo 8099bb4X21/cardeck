@@ -170,6 +170,18 @@ class DualDisplayComposer(
         tileLayout = layout
     }
 
+    /**
+     * 地图屏动态 resize 后同步消费端 buffer 尺寸。VirtualDisplay.resize 只改系统侧
+     * 显示设备——SurfaceTexture 的 defaultBufferSize 仍锁在创建时的旧尺寸，投影会把
+     * 新尺寸内容画进旧 buffer 的左上区域（tile 内容偏居左、宽度只剩比例值、右侧全黑）。
+     */
+    fun resizeMapInput(
+        width: Int,
+        height: Int,
+    ) {
+        mapInput?.surfaceTexture?.setDefaultBufferSize(width, height)
+    }
+
     fun stop() {
         if (!running.getAndSet(false)) return
         glThread?.interrupt()
@@ -297,8 +309,8 @@ class DualDisplayComposer(
             x1: Float,
             y0: Float,
             y1: Float,
-            u0: Float,
-            u1: Float,
+            u0: Float = 0f,
+            u1: Float = 1f,
             cornerRadius: Float = 0f,
         ) {
             input.surfaceTexture.getTransformMatrix(matrix)
@@ -409,8 +421,10 @@ class DualDisplayComposer(
                     drawInput(activeInput, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
                 }
                 // 地图层叠在应用区之上（HIDDEN 不画）：
-                //  FULLSCREEN=整个应用区（采样全缓冲）；SPLIT=左半区域采样缓冲中央带区
-                //  （地图应用把车辆/当前位置渲染在画面中心，裁两侧即得到以车为中心的地图）。
+                //  FULLSCREEN=整个应用区；SPLIT=左半卡片区域。
+                //  地图屏经 VirtualLauncher 按布局动态 resize（分屏=tile 显示尺寸、
+                //  全屏=应用区尺寸），屏上地图应用 relayout——两种布局都是整幅
+                //  1:1 映射（旧的「全尺寸屏+中央带区裁剪采样」方案已移除）。
                 val layout = tileLayout
                 if (map?.hasContent == true && layout != TileLayout.HIDDEN) {
                     if (layout == TileLayout.FULLSCREEN) {
@@ -429,8 +443,6 @@ class DualDisplayComposer(
                             dockW + TILE_MARGIN + tileW - slide,
                             TILE_MARGIN,
                             outHeight - TILE_MARGIN,
-                            u0 = 0.25f,
-                            u1 = 0.75f,
                             cornerRadius = TILE_CORNER_RADIUS,
                         )
                     }
