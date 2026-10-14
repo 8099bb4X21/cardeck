@@ -51,8 +51,11 @@ class MediaListenerService : NotificationListenerService() {
      *  封面字段滞后），空结果只保持 2 秒，之后重试直到封面就绪。 */
     private var artEmptyAt = 0L
 
-    /** uri 型封面解码进行中（防重复发起）。 */
-    private var artLoading = false
+    /** 封面 uri 解码专用单线程（串行；主线程不能做 IO/解码）。 */
+    private val artExecutor =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "media-art").apply { isDaemon = true }
+        }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
@@ -146,9 +149,9 @@ class MediaListenerService : NotificationListenerService() {
         val now = android.os.SystemClock.elapsedRealtime()
         if (key == lastArtKey) {
             if (cachedArt != null) return cachedArt
-            // 键没变但封面为空：解码中等待；否则 2 秒内不重试（getBitmap 有成本），
-            // 超后重提取——app 在切歌后补封面（bitmap 键从无到有）靠这条路兜住
-            if (artLoading || now - artEmptyAt < 2_000) return null
+            // 键没变但封面为空：2 秒内不重试（getBitmap 有成本），超后重提取——
+            // app 在切歌后补封面（bitmap 键从无到有）靠这条路兜住
+            if (now - artEmptyAt < 2_000) return null
         }
         lastArtKey = key
         cachedArt = null
@@ -161,32 +164,23 @@ class MediaListenerService : NotificationListenerService() {
             return cachedArt
         }
         artEmptyAt = now
-        if (artUri != null && !artLoading) {
-            artLoading = true
-            Thread(
-                {
-                    var decoded: android.graphics.Bitmap? = null
-                    try {
+        if (artUri != null) {
+            // 解码在专用线程；就绪后不主动 refresh——periodicRefresh 下一轮（≤1s）拉取
+            artExecutor.execute {
+                val bmp =
+                    runCatching {
                         val input =
                             if (artUri.startsWith("http")) {
                                 java.net.URL(artUri).openStream()
                             } else {
                                 contentResolver.openInputStream(android.net.Uri.parse(artUri))
                             }
-                        input
-                            ?.use { android.graphics.BitmapFactory.decodeStream(it) }
-                            ?.let { decoded = it }
-                    } catch (_: Exception) {
-                    } finally {
-                        artLoading = false
-                    }
-                    if (decoded != null && key == lastArtKey) {
-                        cachedArt = scaleArt(decoded!!)
-                        mainHandler.post { refresh() }
-                    }
-                },
-                "media-art-load",
-            ).start()
+                        input?.use { android.graphics.BitmapFactory.decodeStream(it) }
+                    }.getOrNull()
+                if (bmp != null && key == lastArtKey) {
+                    cachedArt = scaleArt(bmp)
+                }
+            }
         }
         return null
     }
