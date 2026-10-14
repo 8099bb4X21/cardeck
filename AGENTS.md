@@ -69,6 +69,11 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
 - **虚拟屏 resize 必须同步消费端**：`VirtualDisplay.resize` 后要
   `SurfaceTexture.setDefaultBufferSize(新尺寸)`，否则投影把新内容画进旧 buffer 左上角
   （内容偏居左、宽度只剩比例值）。
+- **GL 绘制坐标约定**：DualDisplayComposer 顶点/裁剪的 y 全程是 **GL 坐标（底部
+  原点，向上增长）**，触摸/流坐标是顶部原点——两套方向相反，混用即出 bug。圆角
+  裁剪矩形（uClipRect）必须与顶点同坐标系直传；曾因翻转成屏幕坐标 + 全高 tile
+  对称重合而长期未暴露，半高 tile（竖屏）整块被 discard（地图卡不可见根因，
+  2026-10-14）。部分区域可见性异常时优先核对该区域顶点与裁剪的坐标系一致性。
 - **出帧节奏**在 DualDisplayComposer 合成循环：有新帧按 `1000/targetFps` 节流，
   静止画面保底 33ms 心跳（编码器断粮 = 接收端画面冻结）；「新帧」只统计会画进
   输出画面的输入（dock + 活动应用屏 + tile 可见时的 map）。
