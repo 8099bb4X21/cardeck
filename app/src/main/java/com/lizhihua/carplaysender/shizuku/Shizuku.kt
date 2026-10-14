@@ -6,10 +6,10 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
 import android.util.Log
+import com.lizhihua.carplaysender.util.Bg
 import moe.shizuku.server.IShizukuService
 import java.io.FileInputStream
 import java.util.concurrent.TimeUnit
-import kotlin.concurrent.thread
 
 /**
  * Shizuku 网关 + shell 执行 + CarInput UserService 绑定。
@@ -66,7 +66,7 @@ object Shell {
             val service = IShizukuService.Stub.asInterface(binder)
             val process = service.newProcess(arrayOf("sh", "-c", cmd), null, null)
 
-            thread(isDaemon = true) {
+            Bg.run("shell-stderr") {
                 try {
                     process.errorStream.use { pfd ->
                         FileInputStream(pfd.fileDescriptor).readBytes()

@@ -3,6 +3,7 @@ package com.lizhihua.carplaysender.net
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import com.lizhihua.carplaysender.util.Bg
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -120,10 +121,7 @@ class CarPlayCtrlAdvertiser(
                 } catch (_: Exception) {
                     break
                 }
-            Thread({ handleClient(client) }, "ctrl-client").apply {
-                isDaemon = true
-                start()
-            }
+            Bg.run("ctrl-client") { handleClient(client) }
         }
     }
 

@@ -15,6 +15,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import com.lizhihua.carplaysender.R
+import com.lizhihua.carplaysender.util.Bg
 
 /**
  * CarPlay dock（独立虚拟屏，含时钟/电量/运行中应用/回桌面）。
@@ -88,7 +89,7 @@ class DockActivity : AppCompatActivity() {
         appsContainer = findViewById(R.id.dockApps)
         wallpaperView = findViewById(R.id.dockWallpaper)
         findViewById<ImageView>(R.id.dockHome).apply {
-            setOnClickListener { Thread { VirtualLauncher.onHomePressed() }.start() }
+            setOnClickListener { Bg.run("dock-home") { VirtualLauncher.onHomePressed() } }
             // 图标随模式切换：仪表盘激活=房屋（点按回桌面）；否则=田字格（点按进仪表盘）。
             // 应用中与桌面同为田字格——两种场景下的动作都是进仪表盘，语义一致。
             VirtualLauncher.addDashboardListener { dashboard ->
@@ -198,7 +199,7 @@ class DockActivity : AppCompatActivity() {
         if (current == wallpaperShownVersion) return
         wallpaperShownVersion = current
         val params = view.layoutParams as? FrameLayout.LayoutParams ?: return
-        Thread({
+        Bg.run("wallpaper-dock") {
             val bitmap =
                 runCatching {
                     com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
@@ -216,7 +217,7 @@ class DockActivity : AppCompatActivity() {
             } else {
                 VirtualLauncher.logSink?.invoke("WALLPAPER-DOCK: 解码失败")
             }
-        }, "wallpaper-dock").start()
+        }
     }
 
     /** 逐级缩小字号直至文本宽度放得下（px 单位；行程 22→12px，对照设计原型）。 */
@@ -290,7 +291,7 @@ class DockActivity : AppCompatActivity() {
                     setPadding(pad, pad, pad, pad)
                     contentDescription = component.shortClassName
                     setOnClickListener {
-                        Thread { VirtualLauncher.launchApp(component) }.start()
+                        Bg.run("launch-app") { VirtualLauncher.launchApp(component) }
                     }
                 },
                 LinearLayout.LayoutParams(iconPx + pad * 2, iconPx + pad * 2),

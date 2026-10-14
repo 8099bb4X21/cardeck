@@ -12,6 +12,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import com.lizhihua.carplaysender.shizuku.Shell
+import com.lizhihua.carplaysender.util.Bg
 
 /**
  * 常亮 + 暗幕：替代息屏的锁屏规避方案。
@@ -214,7 +215,7 @@ object ScreenDimmer {
     // ---- 屏幕常亮：改系统屏幕超时为永不，断开时恢复 ----
 
     private fun enableStayAwake(ctx: Context) {
-        Thread({
+        Bg.run("dimmer-stayawake") {
             val current =
                 Shell
                     .exec("settings get system screen_off_timeout")
@@ -223,7 +224,7 @@ object ScreenDimmer {
                     .toIntOrNull()
             if (current == null) {
                 Log.w(TAG, "读取屏幕超时失败（Shizuku 未就绪？）")
-                return@Thread
+                return@run
             }
             val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
             if (current < TIMEOUT_MAX && !prefs.contains("screen_off_timeout_backup")) {
@@ -231,17 +232,17 @@ object ScreenDimmer {
             }
             Shell.exec("settings put system screen_off_timeout $TIMEOUT_MAX")
             Log.i("CarPlaySender", "DIMMER: 屏幕超时设为永不（原值 $current）")
-        }, "dimmer-stayawake").start()
+        }
     }
 
     private fun restoreTimeout(ctx: Context) {
-        Thread({
+        Bg.run("dimmer-restore") {
             val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
-            if (!prefs.contains("screen_off_timeout_backup")) return@Thread
+            if (!prefs.contains("screen_off_timeout_backup")) return@run
             val backup = prefs.getInt("screen_off_timeout_backup", 60_000)
             prefs.edit().remove("screen_off_timeout_backup").apply()
             Shell.exec("settings put system screen_off_timeout $backup")
             Log.i("CarPlaySender", "DIMMER: 屏幕超时恢复为 $backup")
-        }, "dimmer-restore").start()
+        }
     }
 }

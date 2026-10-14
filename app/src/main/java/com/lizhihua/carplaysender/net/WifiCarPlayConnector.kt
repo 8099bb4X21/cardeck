@@ -6,6 +6,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiNetworkSpecifier
+import com.lizhihua.carplaysender.util.Bg
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -145,18 +146,15 @@ class WifiCarPlayConnector(
             }
         callback.set(newCallback)
         connectivityManager.requestNetwork(request, newCallback)
-        Thread({
+        Bg.run("wifi-bind-watchdog") {
             try {
                 Thread.sleep(5_000)
             } catch (_: InterruptedException) {
-                return@Thread
+                return@run
             }
             if (!reported) {
                 log("WiFi: 5 秒未绑定——手机当前不在任何WiFi上。请到 设置>WLAN 加入接收端热点（如 \"Redmi K40\"），加入后本轮挂起的绑定会自动完成")
             }
-        }, "wifi-bind-watchdog").apply {
-            isDaemon = true
-            start()
         }
     }
 

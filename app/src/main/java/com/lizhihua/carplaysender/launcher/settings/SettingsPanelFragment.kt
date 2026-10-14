@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.view.View
 import androidx.fragment.app.Fragment
 import com.lizhihua.carplaysender.launcher.VirtualLauncher
+import com.lizhihua.carplaysender.util.Bg
 
 /** 设置面板宿主：页内轻提示（车机=页内 Toast 视图；手机=系统 Toast）。 */
 interface SettingsToastHost {
@@ -26,7 +27,7 @@ abstract class SettingsPanelFragment : Fragment() {
             onReady()
             return
         }
-        Thread({
+        Bg.run("apps-scan") {
             val scanned = VirtualLauncher.launchableApps(appContext)
             VirtualLauncher.adoptAppsCache(scanned)
             requireActivity().runOnUiThread {
@@ -34,7 +35,7 @@ abstract class SettingsPanelFragment : Fragment() {
                 apps = scanned
                 onReady()
             }
-        }, "settings-panel-scan").start()
+        }
     }
 
     protected fun hostToast(text: String) {

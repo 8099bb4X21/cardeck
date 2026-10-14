@@ -11,6 +11,7 @@ import android.util.Log
 import android.view.Surface
 import com.lizhihua.carplaysender.render.DualDisplayComposer
 import com.lizhihua.carplaysender.shizuku.Shell
+import com.lizhihua.carplaysender.util.Bg
 
 /**
  * 虚拟屏启动器（双屏 + GL 合成架构）：
@@ -679,7 +680,7 @@ object VirtualLauncher {
         dashboardMode = dashboard
         if (changed) notifyDashboard()
         if (dashboard) {
-            Thread({
+            Bg.run("dashboard-enter") {
                 ensureMapTask()
                 if (mapFullscreen) setMapFullscreen(false)
                 // 期间用户可能已点开普通应用（launchApp 会置 HIDDEN 并退出仪表盘）：
@@ -688,7 +689,7 @@ object VirtualLauncher {
                     resizeMapDisplay(fullscreen = false)
                     composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
                 }
-            }, "dashboard-enter").start()
+            }
         } else {
             composer?.setTileLayout(DualDisplayComposer.TileLayout.HIDDEN)
         }

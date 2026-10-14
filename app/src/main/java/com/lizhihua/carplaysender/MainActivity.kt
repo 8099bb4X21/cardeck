@@ -154,7 +154,7 @@ class MainActivity : AppCompatActivity() {
                 .start(this)
             log("MODE: ✓ 投屏权限已授予（重启手机后需重新授权）")
             // 会话已在进行中授权（授权晚于连接）：等投影就绪后动态补启音频通道
-            Thread({
+            com.lizhihua.carplaysender.util.Bg.run("audio-late-start") {
                 val deadline = SystemClock.uptimeMillis() + 5_000L
                 while (SystemClock.uptimeMillis() < deadline) {
                     if (com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null) break
@@ -162,14 +162,14 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (com.lizhihua.carplaysender.service.CarPlayService.mediaProjection == null) {
                     log("MODE: 投影 5 秒未就绪（服务异常？），音频通道本次未启动")
-                    return@Thread
+                    return@run
                 }
                 SessionController.maybeStartAudioNow(applicationContext)
                 // 「启动连接」时选了开启声音、投屏授权在此刻才拿到：接着启动连接
                 if (pendingStartAfterProjection.compareAndSet(true, false)) {
                     startConnectionNow()
                 }
-            }, "audio-late-start").start()
+            }
         }
 
     /** 投屏授权是「启动连接」的前置（选了开启声音且尚未授权）时置位。 */
@@ -371,11 +371,11 @@ class MainActivity : AppCompatActivity() {
             ) {
                 val backup = prefs.getInt("screen_off_timeout_backup", 60_000)
                 prefs.edit().remove("screen_off_timeout_backup").apply()
-                Thread {
+                com.lizhihua.carplaysender.util.Bg.run("screen-timeout-restore") {
                     com.lizhihua.carplaysender.shizuku.Shell.exec(
                         "settings put system screen_off_timeout $backup",
                     )
-                }.start()
+                }
             }
         }
 
@@ -537,7 +537,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 通知使用权（媒体会话枚举，音乐卡数据源）：Shizuku 在场时静默授权
-        Thread {
+        com.lizhihua.carplaysender.util.Bg.run("notif-listener-grant") {
             if (com.lizhihua.carplaysender.shizuku.ShizukuGate
                     .state(this) ==
                 com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
@@ -558,7 +558,7 @@ class MainActivity : AppCompatActivity() {
                     },
                 )
             }
-        }.start()
+        }
 
         // ---- 车机设置（手机侧二级菜单：桌面/横屏/超采样/dock/默认地图） ----
         findViewById<LinearLayout>(R.id.btnCarSettings).setOnClickListener {
@@ -938,7 +938,7 @@ class MainActivity : AppCompatActivity() {
             tickHero()
         }
         shellStateText.text = "读取中…"
-        Thread {
+        com.lizhihua.carplaysender.util.Bg.run("shell-state") {
             if (com.lizhihua.carplaysender.shizuku.ShizukuGate
                     .state(this) !=
                 com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
@@ -948,7 +948,7 @@ class MainActivity : AppCompatActivity() {
                     if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
                     shellStateText.text = "Shizuku 未就绪——shell 状态读取需要 Shizuku"
                 }
-                return@Thread
+                return@run
             }
 
             fun sh(cmd: String) =
@@ -1015,7 +1015,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-        }.start()
+        }
     }
 
     /** 当前会话持有的虚拟屏（不参与残留清理）。 */
@@ -1044,14 +1044,14 @@ class MainActivity : AppCompatActivity() {
                 pendingResidualDisplays = null
                 updateResidualChip()
                 if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
-                Thread {
+                com.lizhihua.carplaysender.util.Bg.run("residual-cleanup") {
                     val released = releaseDisplays(residual.map { it.first })
                     log("SHELL: 残留虚拟屏清理完成（释放 $released/${residual.size}）")
                     runOnUiThread {
                         snack("已释放 $released/${residual.size} 个残留屏")
                         refreshShellState()
                     }
-                }.start()
+                }
             }.setNegativeButton("暂不", null)
             .setOnCancelListener {
                 // 返回键/点外部关闭 = 暂不：保留英雄卡的「清理残留屏」入口
@@ -1085,13 +1085,13 @@ class MainActivity : AppCompatActivity() {
     /** 一键把 shell 全局状态复位为系统默认值（含残留虚拟屏释放，保留当前会话屏）。 */
     private fun resetShellState() {
         shellStateText.text = "复位中…"
-        Thread {
+        com.lizhihua.carplaysender.util.Bg.run("shell-reset") {
             if (com.lizhihua.carplaysender.shizuku.ShizukuGate
                     .state(this) !=
                 com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
             ) {
                 runOnUiThread { shellStateText.text = "Shizuku 未就绪——shell 复位需要 Shizuku" }
-                return@Thread
+                return@run
             }
 
             fun sh(cmd: String) =
@@ -1125,7 +1125,7 @@ class MainActivity : AppCompatActivity() {
                     "提示：letterbox 调优会在下次连接时自动重新应用"
                 refreshShellState()
             }
-        }.start()
+        }
     }
 
     /** 悬浮窗权限请求：先弹说明弹窗，用户确认后再跳系统设置。 */

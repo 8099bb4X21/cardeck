@@ -1,6 +1,7 @@
 package com.lizhihua.carplaysender
 
 import android.content.Context
+import com.lizhihua.carplaysender.util.Bg
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -322,14 +323,14 @@ object SessionController {
             )
             return
         }
-        Thread {
+        Bg.run("wifi-auto-join") {
             val current = shellWifiSsid()
             if (current == wifi.ssid) {
                 appendLog("WIFI: 手机已在车机热点 \"$current\"——直接绑定")
                 bindCarWifiAndRegister(wifi)
-                return@Thread
+                return@run
             }
-            if (connectCancelled) return@Thread
+            if (connectCancelled) return@run
             phaseHint = "正在自动加入车机热点 ${wifi.ssid}…"
             appendLog(
                 ">>> 手机当前 WiFi: ${current ?: "未连接"}（非车机热点）——" +
@@ -346,30 +347,30 @@ object SessionController {
                     "WIFI: connect-network 失败（${result.output.take(80).ifEmpty { "exit=${result.exitCode}" }}）" +
                         "——请到 系统设置>WLAN 手动加入（密码可点「去连接」复制）",
                 )
-                return@Thread
+                return@run
             }
             appendLog("WIFI: connect-network 已发起（自动保存网络，等待切换…）")
             // 系统切换是异步的（断开当前网/扫描/关联/DHCP，2-10 秒）：轮询 SSID 确认
             repeat(8) {
                 if (connectCancelled) {
                     appendLog("WIFI: 自动加入已取消（用户断开）")
-                    return@Thread
+                    return@run
                 }
                 Thread.sleep(2_500)
                 val ssid = shellWifiSsid()
                 if (ssid == null) {
                     // status 命令不可用（非 AOSP 系统）：退化为直接尝试绑定（无 SSID 校验）
                     bindCarWifiAndRegister(wifi)
-                    return@Thread
+                    return@run
                 }
                 if (ssid == wifi.ssid) {
                     bindCarWifiAndRegister(wifi)
-                    return@Thread
+                    return@run
                 }
             }
             phaseHint = "自动加入热点超时——请到 WLAN 设置加入 ${wifi.ssid}"
             appendLog(">>> WiFi 自动加入超时——请到 系统设置>WLAN 手动加入（密码可点「去连接」复制）")
-        }.start()
+        }
     }
 
     /** 绑定当前 WiFi（应为车机热点）并重注册 ctrl 广播；绑定超时给出指引。 */
@@ -601,18 +602,18 @@ object SessionController {
                 sessionStarting.set(false)
                 return@bindCurrentWifi
             }
-            Thread({
+            Bg.run("airplay-pairing") {
                 try {
                     if (connectCancelled) {
                         appendLog("AIRPLAY: 用户已取消——中止配对")
                         sessionStarting.set(false)
-                        return@Thread
+                        return@run
                     }
                     Thread.sleep(1_600) // 等 ctrl 探测（实测 +1.0~+1.3s）
                     if (connectCancelled) {
                         appendLog("AIRPLAY: 用户已取消——中止配对")
                         sessionStarting.set(false)
-                        return@Thread
+                        return@run
                     }
 
                     fun newClient() =
@@ -634,7 +635,7 @@ object SessionController {
                         retireSession()
                         appendLog("AIRPLAY: 用户已取消——中止配对")
                         sessionStarting.set(false)
-                        return@Thread
+                        return@run
                     }
                     if (keys == null && !client.pairSetupRejected && client.attemptedPairing) {
                         // 第二阶段（仅测试台 DiPlay）：复现「BT 控制已结束」状态再试一次。
@@ -651,7 +652,7 @@ object SessionController {
                             retireSession()
                             appendLog("AIRPLAY: 用户已取消——中止配对")
                             sessionStarting.set(false)
-                            return@Thread
+                            return@run
                         }
                     }
                     if (keys != null) {
@@ -855,7 +856,7 @@ object SessionController {
                         com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = false
                     }
                 }
-            }, "airplay-pairing").start()
+            }
         }
     }
 

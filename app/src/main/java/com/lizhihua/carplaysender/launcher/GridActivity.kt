@@ -15,6 +15,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import com.lizhihua.carplaysender.R
+import com.lizhihua.carplaysender.util.Bg
 
 /**
  * CarPlay 主区桌面：纯黑背景 + 4×3 图标分页网格 + 底部页点。
@@ -117,7 +118,7 @@ class GridActivity : AppCompatActivity() {
         val canvasWidth = (VirtualLauncher.streamWidthPx * scale).toInt()
         val canvasHeight = (VirtualLauncher.streamHeightPx * scale).toInt()
         if (canvasWidth <= 0 || canvasHeight <= 0) return
-        Thread({
+        Bg.run("wallpaper-dash") {
             val bitmap =
                 runCatching {
                     com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
@@ -125,7 +126,7 @@ class GridActivity : AppCompatActivity() {
                         canvasWidth,
                         canvasHeight,
                     )
-                }.getOrNull() ?: return@Thread
+                }.getOrNull() ?: return@run
             val margin = (CARD_MARGIN_PX * scale).toInt()
             // 音乐卡左缘 = 应用区中线 + 半边距（8）：与地图 tile 右缘（中线-8）之间
             // 形成 16px 中缝（两侧各让一半）。显式按中线算，勿引用 mapTileWidth——
@@ -144,7 +145,7 @@ class GridActivity : AppCompatActivity() {
                 // 位图就绪后重申 RenderEffect（视图特效在位图更新后仍需生效）
                 applyDashCardChrome()
             }
-        }, "wallpaper-dash").start()
+        }
     }
 
     /** 音乐卡进度自刷新（1s；渲染尾部续调度，位置由锚点+速度推算）。 */
@@ -227,7 +228,7 @@ class GridActivity : AppCompatActivity() {
                                     ?.invoke("MEDIA: $pkg 无可启动入口，忽略封面点击")
                                 return@setOnClickListener
                             }
-                    Thread { VirtualLauncher.launchApp(component) }.start()
+                    Bg.run("launch-app") { VirtualLauncher.launchApp(component) }
                 }
             } else {
                 // 占位不消失（INVISIBLE）：封面异步加载/切歌间隙内容不上下跳动
@@ -378,7 +379,7 @@ class GridActivity : AppCompatActivity() {
         if (current == wallpaperShownVersion) return
         wallpaperShownVersion = current
         val params = view.layoutParams as? android.widget.FrameLayout.LayoutParams
-        Thread({
+        Bg.run("wallpaper-grid") {
             val bitmap =
                 runCatching {
                     com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
@@ -403,7 +404,7 @@ class GridActivity : AppCompatActivity() {
             } else {
                 VirtualLauncher.logSink?.invoke("WALLPAPER-GRID: 解码失败")
             }
-        }, "wallpaper-grid").start()
+        }
     }
 
     override fun onResume() {
@@ -576,7 +577,7 @@ class GridActivity : AppCompatActivity() {
                         label.text = cell.entry.label
                         view.setOnClickListener {
                             Toast.makeText(this@GridActivity, "启动 ${cell.entry.label}", Toast.LENGTH_SHORT).show()
-                            Thread { VirtualLauncher.launchApp(cell.entry.component) }.start()
+                            Bg.run("launch-app") { VirtualLauncher.launchApp(cell.entry.component) }
                         }
                     }
                 }
