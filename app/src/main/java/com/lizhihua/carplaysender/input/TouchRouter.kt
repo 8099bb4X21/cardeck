@@ -86,15 +86,35 @@ object TouchRouter {
         var targetDisplay = -1
         var localX = 0
         var localY = 0
+        var routedToMap = false
         if (launcher.dockAtBottom) {
             val appH = launcher.appHeightPx
             inDock = py >= appH
-            targetDisplay = if (inDock) launcher.dockDisplayId else launcher.appDisplayId
-            localX = px
-            localY = if (inDock) py - appH else py
+            // 地图 tile（应用区上半；全屏=应用区全部）。触摸/流坐标顶部起算：
+            // tile 矩形 py ∈ [16, 16+mapTileHeight]，屏内 y = py-16（顶边距扣除）
+            if (!inDock &&
+                launcher.mapDisplayId >= 0 &&
+                (launcher.mapFullscreen || launcher.dashboardMode) &&
+                launcher.tileSlideFraction <= 0.01f &&
+                px < launcher.appAreaWidth &&
+                (
+                    launcher.mapFullscreen ||
+                        (py >= 16 && py < 16 + launcher.mapTileHeight)
+                )
+            ) {
+                inDock = false
+                targetDisplay = launcher.mapDisplayId
+                localX = px
+                localY = if (launcher.mapFullscreen) py else py - 16
+                routedToMap = true
+            }
+            if (!routedToMap) {
+                targetDisplay = if (inDock) launcher.dockDisplayId else launcher.appDisplayId
+                localX = px
+                localY = if (inDock) py - appH else py
+            }
         } else {
             inDock = px < dockW
-            var routedToMap = false
             if (!inDock &&
                 launcher.mapDisplayId >= 0 &&
                 (launcher.mapFullscreen || launcher.dashboardMode) &&
@@ -159,15 +179,19 @@ object TouchRouter {
         }
 
         // 仪表盘模式：地图 tile 的触摸同时喂给「点按 → 全屏地图」检测器
-        // （注入逻辑不受影响；点按 = 快速轻点，平移/双击/双指等地图手势不触发）
-        if (!launcher.dockAtBottom) {
-            val tileHit =
-                !inDock &&
-                    targetDisplay == launcher.mapDisplayId &&
-                    launcher.dashboardMode &&
-                    !launcher.mapFullscreen
-            updateMapTileTap(launcher, contact, tileHit, px - dockW)
-        }
+        // （注入逻辑不受影响；点按 = 快速轻点，平移/双击/双指等地图手势不触发）。
+        // 横竖屏都启用：tileX 传 tile 内坐标（仅用于位移判定，起点取值不敏感）
+        val tileHit =
+            !inDock &&
+                targetDisplay == launcher.mapDisplayId &&
+                launcher.dashboardMode &&
+                !launcher.mapFullscreen
+        updateMapTileTap(
+            launcher,
+            contact,
+            tileHit,
+            if (launcher.dockAtBottom) px - 16 else px - dockW,
+        )
     }
 
     fun reset() {

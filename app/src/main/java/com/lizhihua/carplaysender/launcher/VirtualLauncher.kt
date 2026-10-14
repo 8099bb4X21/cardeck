@@ -282,10 +282,19 @@ object VirtualLauncher {
         }
         appAreaWidth = appWidth
         appAreaHeight = appHeightPx
+        // 竖屏应用屏密度：窗口逻辑宽度目标 ≈ 手机竖屏宽度（LETTERBOX_TARGET_DP）。
+        // 错用 dock 的 densityDpi（420×缩放）会把窗口压到 ~206dp——文字观感大一倍
+        // （2026-10-14 竖屏实测：应用与桌面字号明显偏大的根因）。
+        val appPortraitDensity =
+            (appWidth / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(160, 640)
         // 地图屏：按应用区全尺寸创建，分屏/全屏间动态 resize（见 resizeMapDisplay）。
-        // tile 尺寸 = SPLIT 绘制矩形（应用区宽/2，四周留边 16、右缘再收半边距 8），
-        // 与 DualDisplayComposer.TILE_MARGIN 保持一致。
-        if (!dockAtBottom) {
+        // tile 尺寸 = SPLIT 绘制矩形，与 DualDisplayComposer.TILE_MARGIN(16) 保持一致：
+        //  横屏：左半卡片（宽=应用区/2-24，即左右留 16、右缘收半边距 8；高=上下留 16）
+        //  竖屏：上半卡片（地图上/音乐下，各占应用区高一半，四周留 16、中缝 16）
+        if (dockAtBottom) {
+            mapTileWidth = appWidth - 32
+            mapTileHeight = (appHeightPx - 48) / 2
+        } else {
             mapTileWidth = appWidth / 2 - 24
             mapTileHeight = appHeightPx - 32
         }
@@ -313,7 +322,7 @@ object VirtualLauncher {
                 val letterboxWindowPx = appHiHeight / LETTERBOX_ASPECT_RATIO
                 (letterboxWindowPx / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(180, 640)
             } else {
-                densityDpi
+                appPortraitDensity
             }
         // 原生应用屏密度：与超采样屏保持**相同逻辑尺寸**（应用布局不受所在屏影响，
         // 超采样只是渲染分辨率差异）。横屏：原生 1034×540 @~200dpi = 827×432dp，
@@ -323,7 +332,7 @@ object VirtualLauncher {
                 val hiLogicalHeightDp = appHiHeight * 160f / appHiDensity
                 (appHeightPx * 160f / hiLogicalHeightDp).toInt().coerceIn(160, 640)
             } else {
-                densityDpi
+                appPortraitDensity
             }
 
         // 等待 Shizuku UserService 绑定（受信虚拟屏需要 shell 权限创建）
@@ -403,9 +412,9 @@ object VirtualLauncher {
                         } else {
                             -1
                         }
-                    // 地图屏（全屏尺寸创建；分屏形态由合成器中央带区采样实现）
+                    // 地图屏（横竖屏都创建；按应用区全尺寸创建，分屏/全屏间动态 resize）
                     val mapId =
-                        if (mapSurface != null && !dockAtBottom) {
+                        if (mapSurface != null) {
                             svc!!.createDisplay(
                                 "CarPlayMap",
                                 appWidth,
@@ -518,8 +527,8 @@ object VirtualLauncher {
                 appHeightPx,
                 if (landscapeApp) appHiWidth else 0,
                 if (landscapeApp) appHiHeight else 0,
-                if (landscapeApp) appWidth else 0,
-                if (landscapeApp) appHeightPx else 0,
+                appWidth,
+                appHeightPx,
             )
             if (!displaysCreated[0]) {
                 log("LAUNCHER: 虚拟屏创建失败")

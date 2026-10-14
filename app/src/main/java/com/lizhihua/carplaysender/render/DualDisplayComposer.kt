@@ -165,6 +165,16 @@ class DualDisplayComposer(
     @Volatile
     private var tileLayout = TileLayout.HIDDEN
 
+    @Volatile
+    private var lastPortraitTileDiag = 0L
+
+    private fun launcherDashHint(): Boolean =
+        try {
+            com.lizhihua.carplaysender.launcher.VirtualLauncher.dashboardMode
+        } catch (_: Throwable) {
+            false
+        }
+
     /** 切换地图 tile 布局。 */
     fun setTileLayout(layout: TileLayout) {
         tileLayout = layout
@@ -316,16 +326,13 @@ class DualDisplayComposer(
             input.surfaceTexture.getTransformMatrix(matrix)
             GLES20.glUniformMatrix4fv(uSTMatrix, 1, false, matrix, 0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, input.texture)
-            // 圆角裁剪（GL 坐标 y 翻转：传入矩形以左上原点表达，此处换算）
+            // 圆角裁剪：shader 用 gl_FragCoord（GL 底部原点）与 uClipRect 比较，
+            // 故直接传顶点坐标（本函数 y 即 GL 坐标）。此前翻转成屏幕坐标——
+            // 全高 tile（横屏）对称区间恰好重合未暴露；竖屏半高 tile 顶点区域
+            // 与裁剪区域完全不相交，整块被 discard（「地图卡不可见」根因）
             if (cornerRadius > 0f) {
                 GLES20.glUniform1i(uClipEnabled, 1)
-                GLES20.glUniform4f(
-                    uClipRect,
-                    x0,
-                    outHeight - y1,
-                    x1,
-                    outHeight - y0,
-                )
+                GLES20.glUniform4f(uClipRect, x0, y0, x1, y1)
                 GLES20.glUniform1f(uClipRadius, cornerRadius)
             } else {
                 GLES20.glUniform1i(uClipEnabled, 0)
@@ -411,10 +418,47 @@ class DualDisplayComposer(
             }
             val activeInput = if (activeAppHi) hi else app
             if (dockAtBottom) {
-                // 竖屏：dock 横条贴底（GL 坐标 y=0 为底边），app 在其余区域
+                // 竖屏：dock 横条贴底（GL 坐标 y=0 为底边），app 在其余区域；
+                // 仪表盘时地图卡叠在应用区上半（地图上/音乐下），全屏盖满应用区。
                 if (dock.hasContent) drawInput(dock, 0f, outWidth.toFloat(), 0f, dockH.toFloat())
                 if (activeInput?.hasContent == true) {
                     drawInput(activeInput, 0f, outWidth.toFloat(), dockH.toFloat(), outHeight.toFloat())
+                }
+                val layoutP = tileLayout
+                if (map?.hasContent == true && layoutP != TileLayout.HIDDEN) {
+                    if (layoutP == TileLayout.FULLSCREEN) {
+                        drawInput(map!!, 0f, outWidth.toFloat(), dockH.toFloat(), outHeight.toFloat())
+                    } else {
+                        // 上半卡片：左右留 16、顶留 16；pager 水平滑动 → tile 向左滑出（跟手）
+                        val tileH = (outHeight - dockH) / 2f - TILE_MARGIN * 1.5f
+                        val slide = tileSlideFraction * outWidth
+                        val nowMs = android.os.SystemClock.uptimeMillis()
+                        if (nowMs - lastPortraitTileDiag > 5_000) {
+                            lastPortraitTileDiag = nowMs
+                            com.lizhihua.carplaysender.launcher.VirtualLauncher.logSink?.invoke(
+                                "COMPOSER: 竖屏 tile 绘制 tileH=$tileH slide=$slide frames=${map!!.frameCount}",
+                            )
+                        }
+                        drawInputUV(
+                            map!!,
+                            TILE_MARGIN - slide,
+                            outWidth - TILE_MARGIN - slide,
+                            outHeight - TILE_MARGIN - tileH,
+                            outHeight - TILE_MARGIN,
+                            cornerRadius = TILE_CORNER_RADIUS,
+                        )
+                    }
+                } else {
+                    // 竖屏 tile 未绘制：状态节流采样（5s），排查「看不到地图卡」
+                    val nowMs = android.os.SystemClock.uptimeMillis()
+                    if (nowMs - lastPortraitTileDiag > 5_000) {
+                        lastPortraitTileDiag = nowMs
+                        com.lizhihua.carplaysender.launcher.VirtualLauncher.logSink?.invoke(
+                            "COMPOSER: 竖屏 tile 未画 layout=$layoutP " +
+                                "mapInput=${map != null} hasContent=${map?.hasContent} " +
+                                "frames=${map?.frameCount} dash=${launcherDashHint()}",
+                        )
+                    }
                 }
             } else {
                 if (activeInput?.hasContent == true) {

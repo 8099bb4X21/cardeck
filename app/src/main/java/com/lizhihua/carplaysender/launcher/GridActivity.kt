@@ -128,16 +128,26 @@ class GridActivity : AppCompatActivity() {
                     )
                 }.getOrNull() ?: return@run
             val margin = (CARD_MARGIN_PX * scale).toInt()
-            // 音乐卡左缘 = 应用区中线 + 半边距（8）：与地图 tile 右缘（中线-8）之间
-            // 形成 16px 中缝（两侧各让一半）。显式按中线算，勿引用 mapTileWidth——
-            // 其语义是 tile 实际宽度（含边距扣减），会随 tile 布局变化
-            val cardX =
-                ((VirtualLauncher.dockWidthPx + VirtualLauncher.appAreaWidth / 2 + CARD_MARGIN_PX / 2) * scale)
-                    .toInt()
-            val cropX = cardX.coerceAtMost(bitmap.width - 2)
-            val cropY = margin.coerceAtMost(bitmap.height - 2)
+            // 裁出音乐卡对应区域的壁纸切片（与卡片实际位置一致）：
+            //  横屏：右半（左缘=中线+半边距 8，与地图 tile 右缘形成 16px 中缝）
+            //  竖屏：下半（音乐卡在地图卡下方；顶 = 边距+tile 高+中缝）
+            val cropX: Int
+            val cropY: Int
+            if (VirtualLauncher.dockAtBottom) {
+                cropX = margin
+                cropY =
+                    (margin * 2 + VirtualLauncher.mapTileHeight * scale)
+                        .toInt()
+                        .coerceAtMost(bitmap.height - 2)
+            } else {
+                cropX =
+                    ((VirtualLauncher.dockWidthPx + VirtualLauncher.appAreaWidth / 2 + CARD_MARGIN_PX / 2) * scale)
+                        .toInt()
+                        .coerceAtMost(bitmap.width - 2)
+                cropY = margin.coerceAtMost(bitmap.height - 2)
+            }
             val cropW = (bitmap.width - cropX - margin).coerceAtLeast(2)
-            val cropH = (bitmap.height - cropY * 2).coerceAtLeast(2)
+            val cropH = (bitmap.height - cropY - margin).coerceAtLeast(2)
             runOnUiThread {
                 wallpaper.setImageBitmap(
                     Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH),
@@ -490,13 +500,22 @@ class GridActivity : AppCompatActivity() {
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     ).apply {
-                        // 左缘 = 应用区中线 + 半边距（8）：与地图 tile 右缘（中线-8）之间
-                        // 形成 16px 中缝。显式按中线算，勿引用 mapTileWidth（语义已变）
-                        leftMargin =
-                            ((VirtualLauncher.appAreaWidth / 2 + CARD_MARGIN_PX / 2) * scale).toInt()
-                        topMargin = cardMargin
-                        rightMargin = cardMargin
-                        bottomMargin = cardMargin
+                        if (VirtualLauncher.dockAtBottom) {
+                            // 竖屏：音乐卡在地图卡下方（地图上/音乐下），中缝 16
+                            leftMargin = cardMargin
+                            rightMargin = cardMargin
+                            topMargin = cardMargin * 2 + (VirtualLauncher.mapTileHeight * scale).toInt()
+                            bottomMargin = cardMargin
+                        } else {
+                            // 横屏：左缘 = 应用区中线 + 半边距（8）：与地图 tile 右缘
+                            // （中线-8）之间形成 16px 中缝。显式按中线算，勿引用
+                            // mapTileWidth（语义已变）
+                            leftMargin =
+                                ((VirtualLauncher.appAreaWidth / 2 + CARD_MARGIN_PX / 2) * scale).toInt()
+                            topMargin = cardMargin
+                            rightMargin = cardMargin
+                            bottomMargin = cardMargin
+                        }
                     }
             panel.outlineProvider =
                 object : android.view.ViewOutlineProvider() {
