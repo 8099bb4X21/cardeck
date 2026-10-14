@@ -48,6 +48,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var heroStateText: TextView
     private lateinit var btnResidualCleanup: TextView
     private lateinit var heroSubline: TextView
+    private lateinit var heroStats: TextView
     private lateinit var heroProgress: View
     private lateinit var ctaButton: LinearLayout
     private lateinit var ctaIcon: ImageView
@@ -78,6 +79,9 @@ class MainActivity : AppCompatActivity() {
     // 记在 pendingResidualDisplays，状态旁的「清理残留屏」按钮可再次发起
     private var startupCheckRunning = false
     private var pendingResidualDisplays: List<Pair<Int, String>>? = null
+
+    // 英雄卡实时帧率：1s 轮询对 VideoSender 已发帧计数取差值
+    private var lastSentFrames = 0L
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val heroTick: Runnable =
@@ -319,6 +323,7 @@ class MainActivity : AppCompatActivity() {
             pendingResidualDisplays?.let { promptResidualDisplays(it) }
         }
         heroSubline = findViewById(R.id.heroSubline)
+        heroStats = findViewById(R.id.heroStats)
         heroProgress = findViewById(R.id.heroProgress)
         ctaButton = findViewById(R.id.ctaButton)
         ctaIcon = findViewById(R.id.ctaIcon)
@@ -612,9 +617,25 @@ class MainActivity : AppCompatActivity() {
             heroProgress.visibility = View.VISIBLE
         }
         updateConnectedSubline()
+        updateHeroStats()
         updateAudioTag()
         updateReadyRow()
         updateShizukuChip()
+    }
+
+    /**
+     * 英雄卡统计行（仅连接时显示）：运行时分辨率 + 实际/目标帧率。
+     * 实际帧率 = 1s 轮询对已发帧计数取差值；新会话计数归零时先对齐基线。
+     */
+    private fun updateHeroStats() {
+        if (heroState != HeroState.CONNECTED) return
+        val sent = SessionController.videoSender?.framesSentTotal ?: 0
+        if (sent < lastSentFrames) lastSentFrames = sent
+        val fps = sent - lastSentFrames
+        lastSentFrames = sent
+        heroStats.text =
+            "分辨率 ${SessionController.activeScalePercent}% · " +
+            "$fps/${SessionController.activeTargetFps} fps"
     }
 
     private fun applyHeroState(s: HeroState) {
@@ -658,6 +679,7 @@ class MainActivity : AppCompatActivity() {
                 HeroState.CONNECTED -> "已连接"
             }
         heroProgress.visibility = if (s == HeroState.CONNECTING) View.VISIBLE else View.GONE
+        heroStats.visibility = if (s == HeroState.CONNECTED) View.VISIBLE else View.GONE
 
         when (s) {
             HeroState.IDLE -> {

@@ -141,6 +141,11 @@ object VirtualLauncher {
         composer?.tileSlideFraction = fraction
     }
 
+    /** 「显示」设置实时切换目标帧率（合成器未创建时静默——attach 时会从偏好读取）。 */
+    fun setStreamFps(fps: Int) {
+        composer?.targetFps = fps
+    }
+
     /** 地图屏 tile 尺寸（分屏形态；应用区左半）。 */
     @Volatile
     var mapTileWidth: Int = 0
@@ -328,6 +333,9 @@ object VirtualLauncher {
         log("LAUNCHER: 虚拟屏模式=${if (useTrusted) "受信屏(shell)" else "应用屏(回退)"}")
 
         val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom)
+        composer.targetFps =
+            com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
+                .fps(context)
         this.composer = composer
         val displaysCreated = arrayOf(false)
         composer.onSurfacesReady = { dockSurface, appSurface, appHiSurface, mapSurface ->

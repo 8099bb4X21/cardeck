@@ -10,6 +10,7 @@ object SettingsMenus {
     const val ORIENTATION = 2
     const val DOCK = 3
     const val DEFAULT_MAP = 4
+    const val DISPLAY = 5
 
     data class Item(
         val id: Int,
@@ -25,6 +26,7 @@ object SettingsMenus {
             Item(ORIENTATION, "应用横屏", "竖屏应用在车机横屏全屏显示", R.drawable.ic_screen_rotation),
             Item(DOCK, "dock 栏设置", "壁纸暗幕透明度与模糊程度", R.drawable.ic_menu_dock),
             Item(DEFAULT_MAP, "默认地图", "仪表盘地图屏使用的地图应用", R.drawable.ic_menu_map),
+            Item(DISPLAY, "显示", "流分辨率缩放与目标帧率", R.drawable.ic_menu_display),
         )
 
     fun titleOf(id: Int): String = ALL.first { it.id == id }.title
@@ -35,6 +37,7 @@ object SettingsMenus {
             SUPERSAMPLE -> SupersamplePanelFragment()
             ORIENTATION -> OrientationPanelFragment()
             DOCK -> DockPanelFragment()
+            DISPLAY -> DisplayPanelFragment()
             else -> DefaultMapPanelFragment()
         }
 }

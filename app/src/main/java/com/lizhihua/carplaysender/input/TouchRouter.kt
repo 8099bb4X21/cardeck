@@ -31,12 +31,33 @@ object TouchRouter {
     private var pressedDisplay = -1
     private var failStreak = 0
 
+    // 车机触摸坐标（通告视图坐标系，如 1160×540）→ 流坐标（缩放后 1450×674）的换算系数。
+    // 分辨率缩放 ≠100% 时流比视图大，不换算会导致点击整体向右下漂移（dock 分流也错位）。
+    @Volatile
+    private var coordScaleX = 1f
+
+    @Volatile
+    private var coordScaleY = 1f
+
+    /** 会话建立时设置：视图（车机通告 display）尺寸 → 流（编码/虚拟屏）尺寸。 */
+    fun setCoordinateScale(
+        viewW: Int,
+        viewH: Int,
+        streamW: Int,
+        streamH: Int,
+    ) {
+        coordScaleX = if (viewW > 0) streamW.toFloat() / viewW else 1f
+        coordScaleY = if (viewH > 0) streamH.toFloat() / viewH else 1f
+    }
+
     fun onContact(
         context: Context,
         contact: Contact,
     ) {
         // 空闲槽占位（未按下且 0,0）忽略
         if (!contact.down && contact.xPixels == 0 && contact.yPixels == 0) return
+        val px = (contact.xPixels * coordScaleX).toInt().coerceAtLeast(0)
+        val py = (contact.yPixels * coordScaleY).toInt().coerceAtLeast(0)
 
         val launcher = com.lizhihua.carplaysender.launcher.VirtualLauncher
         val dockW = launcher.dockWidthPx
@@ -67,18 +88,18 @@ object TouchRouter {
         var localY = 0
         if (launcher.dockAtBottom) {
             val appH = launcher.appHeightPx
-            inDock = contact.yPixels >= appH
+            inDock = py >= appH
             targetDisplay = if (inDock) launcher.dockDisplayId else launcher.appDisplayId
-            localX = contact.xPixels
-            localY = if (inDock) contact.yPixels - appH else contact.yPixels
+            localX = px
+            localY = if (inDock) py - appH else py
         } else {
-            inDock = contact.xPixels < dockW
+            inDock = px < dockW
             var routedToMap = false
             if (!inDock && launcher.mapDisplayId >= 0 &&
                 (launcher.mapFullscreen || launcher.dashboardMode) &&
                 launcher.tileSlideFraction <= 0.01f
             ) {
-                val tileX = contact.xPixels - dockW
+                val tileX = px - dockW
                 val tileVisibleW = if (launcher.mapFullscreen) Int.MAX_VALUE else launcher.mapTileWidth
                 if (tileX in 0 until tileVisibleW) {
                     inDock = false
@@ -91,15 +112,15 @@ object TouchRouter {
                         } else {
                             tileX + launcher.appAreaWidth / 4
                         }
-                    localY = contact.yPixels
+                    localY = py
                     routedToMap = true
                 }
             }
             if (!routedToMap) {
                 targetDisplay = if (inDock) launcher.dockDisplayId else launcher.activeAppDisplayId()
                 val scale = if (inDock) 1f else launcher.activeAppScale().coerceAtLeast(1f)
-                localX = if (inDock) contact.xPixels else ((contact.xPixels - dockW) * scale).toInt()
-                localY = (contact.yPixels * scale).toInt()
+                localX = if (inDock) px else ((px - dockW) * scale).toInt()
+                localY = (py * scale).toInt()
             }
         }
         if (targetDisplay < 0) {
@@ -147,7 +168,7 @@ object TouchRouter {
             val tileHit =
                 !inDock && targetDisplay == launcher.mapDisplayId &&
                     launcher.dashboardMode && !launcher.mapFullscreen
-            updateMapTileTap(launcher, contact, tileHit, contact.xPixels - dockW)
+            updateMapTileTap(launcher, contact, tileHit, px - dockW)
         }
     }
 
@@ -155,6 +176,8 @@ object TouchRouter {
         pressed = false
         pressedDisplay = -1
         cancelMapTileTap()
+        coordScaleX = 1f
+        coordScaleY = 1f
     }
 
     // ---- 仪表盘地图 tile「快速点按 → 全屏地图」检测 ----

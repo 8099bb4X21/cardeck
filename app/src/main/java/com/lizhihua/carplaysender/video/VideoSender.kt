@@ -27,22 +27,32 @@ class VideoSender(
     private val host: String,
     private val dataPort: Int,
     private val streamKey: ByteArray,
-    private val width: Int,
-    private val height: Int,
+    /** H.264 4:2:0 要求偶数尺寸——奇数高度会让编码器在首帧输入时进错误态（125% 缩放实测踩坑）。 */
+    width: Int,
+    height: Int,
+    /** 目标帧率（30/60）：编码器元数据 + 60fps 提码率；实际节奏由合成器驱动。 */
+    private val targetFps: Int = 30,
     private val log: (String) -> Unit,
     /** 推流自然结束（对端断开等）时回调——CarPlay 会话真实结束的信号。 */
     private val onEnded: (() -> Unit)? = null,
 ) {
+    private val width: Int = (width / 2) * 2
+    private val height: Int = (height / 2) * 2
     private var socket: Socket? = null
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
     private val running = AtomicBoolean(false)
     private var frameCounter = 0L
     private var configSent = false
+
+    @Volatile
     private var framesSent = 0L
 
     /** 推流是否活跃（静默降噪守卫判断用：start 失败时保持 false）。 */
     val isRunning: Boolean get() = running.get()
+
+    /** 已发送帧总数（英雄卡实时帧率 = 1s 轮询取差值）。 */
+    val framesSentTotal: Long get() = framesSent
 
     /**
      * 启动编码与推流。编码器输入 Surface 通过 [onSurfaceReady] 交给调用方渲染
@@ -55,13 +65,18 @@ class VideoSender(
             client.connect(InetSocketAddress(host, dataPort), 5_000)
             client.tcpNoDelay = true
             socket = client
-            log("VIDEO: TCP 已连通 $host:$dataPort，启动编码器 ${width}x$height@30")
+            val bitrate =
+                (
+                    ((width * height * 6L).toInt()).coerceIn(2_000_000, 10_000_000) *
+                        if (targetFps >= 60) 1.5f else 1f
+                ).toInt().coerceAtMost(15_000_000)
+            log("VIDEO: TCP 已连通 $host:$dataPort，启动编码器 ${width}x$height@$targetFps ${bitrate / 1_000_000}Mbps")
 
             val format =
                 MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
                     setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                    setInteger(MediaFormat.KEY_BIT_RATE, 4_000_000)
-                    setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+                    setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
                     setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
                 }
             val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
@@ -108,7 +123,10 @@ class VideoSender(
                 val index =
                     try {
                         codec.dequeueOutputBuffer(bufferInfo, 10_000)
-                    } catch (_: Exception) {
+                    } catch (error: Exception) {
+                        // 编码器进错误态（如非法尺寸首帧）：必须留痕——静默 break 曾让
+                        // 「零帧推流 4 秒后断开」无从排查（接收端只见 peer EOF）
+                        log("VIDEO: 编码器取帧异常，停止推流 - ${error.message}")
                         break
                     }
                 when {

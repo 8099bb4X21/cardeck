@@ -180,6 +180,17 @@
                     android:indeterminateTint="@color/m3_primary"
                     android:visibility="gone" />
 
+                <!-- 连接统计：运行时分辨率 + 实际/目标帧率（1s 轮询差分，仅连接时显示） -->
+                <TextView
+                    android:id="@+id/heroStats"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="分辨率 100% · 30/30 fps"
+                    android:textColor="#8E8E93"
+                    android:textSize="11.5sp"
+                    android:visibility="gone" />
+
                 <!-- 主操作（M3 pill：填充→禁用→红色描边断开） -->
                 <LinearLayout
                     android:id="@+id/ctaButton"

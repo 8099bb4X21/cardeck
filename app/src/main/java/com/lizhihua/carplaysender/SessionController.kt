@@ -80,6 +80,16 @@ object SessionController {
     @Volatile
     var videoSender: com.lizhihua.carplaysender.video.VideoSender? = null
 
+    // ---- 「显示」运行时生效值（会话建立时快照；英雄卡展示运行时值而非偏好值）----
+
+    /** 本会话流分辨率缩放百分比（按车机分辨率的百分比生成；100=原尺寸）。 */
+    @Volatile
+    var activeScalePercent: Int = 100
+
+    /** 本会话目标帧率（合成节奏上限；「显示」设置运行中切换可实时生效）。 */
+    @Volatile
+    var activeTargetFps: Int = 30
+
     @Volatile
     var audioSender: com.lizhihua.carplaysender.audio.AudioSender? = null
 
@@ -641,13 +651,51 @@ object SessionController {
                                 startAudioChannel(context, client, keys.sharedSecret, host)
                                 client.record()
                                 if (host != null) {
+                                    // 「显示」偏好：流画布/虚拟屏按车机分辨率百分比生成。
+                                    // 只在会话建立时生效——编码器与虚拟屏尺寸此时定型；
+                                    // 密度同步缩放，逻辑布局（dp）与 100% 完全一致。
+                                    val scalePct =
+                                        appContext
+                                            ?.let {
+                                                com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
+                                                    .scalePercent(it)
+                                            } ?: 100
+                                    val scale = scalePct / 100f
+                                    // 缩放后向下对齐偶数（H.264 要求）：虚拟屏/合成器/编码器
+                                    // 三方必须同一尺寸，故在源头对齐（VideoSender 内另有兜底）
+                                    val streamW =
+                                        ((setup.displayWidth * scale).toInt().coerceAtLeast(320) / 2) * 2
+                                    val streamH =
+                                        ((setup.displayHeight * scale).toInt().coerceAtLeast(180) / 2) * 2
+                                    val fps =
+                                        appContext
+                                            ?.let {
+                                                com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
+                                                    .fps(it)
+                                            } ?: 30
+                                    activeScalePercent = scalePct
+                                    activeTargetFps = fps
+                                    // 车机触摸在通告视图坐标系（如 1160×540），流已按比例
+                                    // 缩放（如 1450×674）——注入前需映射，否则点击漂移
+                                    com.lizhihua.carplaysender.input.TouchRouter
+                                        .setCoordinateScale(
+                                            setup.displayWidth,
+                                            setup.displayHeight,
+                                            streamW,
+                                            streamH,
+                                        )
+                                    appendLog(
+                                        "DISPLAY: 流 ${setup.displayWidth}x${setup.displayHeight} → " +
+                                            "${streamW}x$streamH（$scalePct%）@${fps}fps",
+                                    )
                                     videoSender =
                                         com.lizhihua.carplaysender.video.VideoSender(
                                             host = host,
                                             dataPort = screen.dataPort,
                                             streamKey = screen.streamKey,
-                                            width = setup.displayWidth,
-                                            height = setup.displayHeight,
+                                            width = streamW,
+                                            height = streamH,
+                                            targetFps = fps,
                                             log = { line -> appendLog(line) },
                                             onEnded = {
                                                 // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
@@ -662,7 +710,7 @@ object SessionController {
                                                 }
                                             },
                                         )
-                                    val density = 420
+                                    val density = (420 * scale).toInt().coerceIn(120, 840)
                                     videoSender?.start { surface ->
                                         // 唯一模式：隐形屏（双屏启动器：dock + 应用屏）
                                         val source =
@@ -674,8 +722,8 @@ object SessionController {
                                         val ok =
                                             source.attach(
                                                 surface,
-                                                setup.displayWidth,
-                                                setup.displayHeight,
+                                                streamW,
+                                                streamH,
                                                 density,
                                             )
                                         appendLog(

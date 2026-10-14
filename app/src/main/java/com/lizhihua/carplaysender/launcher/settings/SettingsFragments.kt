@@ -460,3 +460,103 @@ class DefaultMapPanelFragment : SettingsPanelFragment() {
         }
     }
 }
+
+/**
+ * 「显示」面板：流分辨率缩放（30%–160%，下次连接起效）+ 目标帧率（30/60，
+ * 运行中实时切换）。英雄卡展示的是会话运行时生效值（SessionController 快照），
+ * 与本页偏好值相区别。
+ */
+class DisplayPanelFragment : SettingsPanelFragment() {
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?,
+    ): View = inflater.inflate(R.layout.fragment_panel_display, container, false)
+
+    override fun onViewCreated(view: View) {
+        val ctx = requireContext()
+        val scaleSeek = view.findViewById<SeekBar>(R.id.displayScaleSeek)
+        val scaleValue = view.findViewById<TextView>(R.id.displayScaleValue)
+        val scaleNote = view.findViewById<TextView>(R.id.displayScaleNote)
+        val fps30 = view.findViewById<TextView>(R.id.btnFps30)
+        val fps60 = view.findViewById<TextView>(R.id.btnFps60)
+
+        // 滑条 progress（0..26）→ 百分比（30..160，步进 5）
+        fun progressOf(percent: Int) = (percent - DisplayPrefs.SCALE_MIN) / DisplayPrefs.SCALE_STEP
+
+        fun percentOf(progress: Int) = DisplayPrefs.SCALE_MIN + progress * DisplayPrefs.SCALE_STEP
+
+        val saved = DisplayPrefs.scalePercent(ctx)
+        scaleSeek.progress = progressOf(saved)
+        scaleValue.text = "$saved%"
+
+        fun refreshScaleNote() {
+            val runningNow =
+                com.lizhihua.carplaysender.SessionController.videoSender
+                    ?.isRunning == true
+            scaleNote.text =
+                if (runningNow) {
+                    "保存后下次连接起效；当前连接按 " +
+                        "${com.lizhihua.carplaysender.SessionController.activeScalePercent}% 运行"
+                } else {
+                    "保存后下次连接起效"
+                }
+        }
+        refreshScaleNote()
+
+        scaleSeek.setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(
+                    seekBar: SeekBar?,
+                    progress: Int,
+                    fromUser: Boolean,
+                ) {
+                    if (!fromUser) return
+                    scaleValue.text = "${percentOf(progress)}%"
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    val percent = percentOf(scaleSeek.progress)
+                    DisplayPrefs.setScalePercent(ctx, percent)
+                    hostToast("分辨率 $percent% 已保存，下次连接起效")
+                    refreshScaleNote()
+                }
+            },
+        )
+
+        fun refreshFps(active30: Boolean) {
+            // 未选中片用暗色底（与容器同色）而非 null 背景，避免背景重置内边距
+            fps30.setBackgroundResource(
+                if (active30) R.drawable.bg_segment_sel else R.drawable.bg_segment,
+            )
+            fps30.setTextColor(
+                if (active30) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt(),
+            )
+            fps60.setBackgroundResource(
+                if (active30) R.drawable.bg_segment else R.drawable.bg_segment_sel,
+            )
+            fps60.setTextColor(
+                if (active30) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt(),
+            )
+        }
+
+        val savedFps = DisplayPrefs.fps(ctx)
+        refreshFps(savedFps < 60)
+
+        fun applyFps(fps: Int) {
+            DisplayPrefs.setFps(ctx, fps)
+            refreshFps(fps < 60)
+            com.lizhihua.carplaysender.launcher.VirtualLauncher
+                .setStreamFps(fps)
+            val live =
+                com.lizhihua.carplaysender.SessionController.videoSender
+                    ?.isRunning == true
+            hostToast("帧率已切换为 ${fps}fps${if (live) "（实时生效）" else ""}")
+            if (live) com.lizhihua.carplaysender.SessionController.activeTargetFps = fps
+        }
+        fps30.setOnClickListener { applyFps(30) }
+        fps60.setOnClickListener { applyFps(60) }
+    }
+}

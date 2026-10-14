@@ -35,6 +35,13 @@ class DualDisplayComposer(
     @Volatile
     var tileSlideFraction: Float = 0f
 
+    /**
+     * 目标帧率（30/60，合成出帧节奏上限；「显示」设置运行中实时切换）。
+     * 有新输入帧时按 1000/targetFps 节流；静止画面保底 30fps 心跳（编码器不能断粮）。
+     */
+    @Volatile
+    var targetFps: Int = 30
+
     companion object {
         private const val TAG = "DualComposer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
@@ -445,16 +452,27 @@ class DualDisplayComposer(
         startLatch?.countDown()
 
         // ---- 合成循环 ----
-        // 有输入新帧：立即合成。
+        // 有输入新帧：按目标帧率（1000/targetFps）节流合成。
         // 无新帧（界面静止，如启动器/阅读页/地图停靠）：以 33ms 心跳重复合成最后一帧内容——
         // 否则编码器无输入、视频流停摆，接收端画面冻结（表现为"桌面卡死/不可交互"，
         // 2026-10-09 实测踩坑：触摸其实送到了，只是没有帧能反映出来）。
         try {
             var lastComposeAt = System.currentTimeMillis()
             while (running.get()) {
-                val hasNew = dock.hasNewFrame || app.hasNewFrame
+                // 快车道（60fps 节流）只由「会被画进输出画面」的输入驱动：
+                // dock + 当前活动应用屏（app/hi 二选一）+ tile 可见时的地图屏。
+                // 高德走地图屏、竖屏应用走超采样屏——只看 dock/原生屏会漏掉它们，
+                // 60fps 档被 33ms 静止心跳锁死在 30fps。
+                // 非活动屏的新帧不在判定内（画面不含它）：帧仍会在 composeFrame 里
+                // 持续消费（纹理保持最新，避免 SurfaceTexture 队列积压卡住后台应用），
+                // 但不为看不见的内容白烧 GPU/带宽。
+                val hasNew =
+                    dock.hasNewFrame ||
+                        (if (activeAppHi) appHi else app)?.hasNewFrame == true ||
+                        (tileLayout != TileLayout.HIDDEN && mapInput?.hasNewFrame == true)
                 val now = System.currentTimeMillis()
-                if (hasNew || now - lastComposeAt >= 33) {
+                val intervalMs = if (hasNew) 1000L / targetFps.coerceIn(1, 120) else 33L
+                if (now - lastComposeAt >= intervalMs) {
                     composeFrame(fullRedraw = false)
                     lastComposeAt = now
                 } else {
