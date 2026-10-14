@@ -11,7 +11,6 @@ import android.content.Context
  * 监听器在主线程回调（设置页拖动滑条时触发），DockActivity 据此即时重渲染。
  */
 object DockPrefs {
-
     private const val PREFS_NAME = "settings"
     private const val KEY_SCRIM = "dockScrimOpacity"
     private const val KEY_BLUR = "dockBlur"
@@ -32,21 +31,24 @@ object DockPrefs {
         listeners.remove(listener)
     }
 
-    private fun prefs(context: Context) =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private fun prefs(context: Context) = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    fun scrimOpacity(context: Context): Int =
-        prefs(context).getInt(KEY_SCRIM, DEFAULT_SCRIM).coerceIn(0, 100)
+    fun scrimOpacity(context: Context): Int = prefs(context).getInt(KEY_SCRIM, DEFAULT_SCRIM).coerceIn(0, 100)
 
-    fun blur(context: Context): Int =
-        prefs(context).getInt(KEY_BLUR, DEFAULT_BLUR).coerceIn(0, 100)
+    fun blur(context: Context): Int = prefs(context).getInt(KEY_BLUR, DEFAULT_BLUR).coerceIn(0, 100)
 
-    fun setScrimOpacity(context: Context, value: Int) {
+    fun setScrimOpacity(
+        context: Context,
+        value: Int,
+    ) {
         prefs(context).edit().putInt(KEY_SCRIM, value.coerceIn(0, 100)).apply()
         notifyListeners()
     }
 
-    fun setBlur(context: Context, value: Int) {
+    fun setBlur(
+        context: Context,
+        value: Int,
+    ) {
         prefs(context).edit().putInt(KEY_BLUR, value.coerceIn(0, 100)).apply()
         notifyListeners()
     }

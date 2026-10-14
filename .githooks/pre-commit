@@ -1,0 +1,43 @@
+#!/bin/sh
+# 提交前拦截：自动格式化本次提交涉及的 Kotlin 文件 + Android Lint 检查。
+# 按仓库约定通过 `git config core.hooksPath .githooks` 启用（克隆后执行一次）。
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$STAGED" ] && exit 0
+
+# 1) 格式化：仅当暂存了 Kotlin / Gradle 脚本
+if printf '%s\n' "$STAGED" | grep -qE '\.(kt|kts)$'; then
+    echo "▶ 提交前检查：代码格式化（spotlessApply）..."
+    ./gradlew --console=plain -q spotlessApply
+
+    # 仅把「本来就暂存过、且被格式化改动」的文件重新加入暂存区
+    for f in $STAGED; do
+        case "$f" in
+        *.kt | *.kts)
+            if ! git diff --quiet -- "$f" 2>/dev/null; then
+                git add -- "$f"
+                echo "  已自动格式化并重新暂存: $f"
+            fi
+            ;;
+        esac
+    done
+fi
+
+# 2) Lint：仅当暂存了源码/资源/构建脚本（存量问题已在 lint-baseline.xml 豁免）
+if printf '%s\n' "$STAGED" | grep -qE '^(app/src/|[^ ]*\.gradle\.kts$|gradle\.properties$)'; then
+    echo "▶ 提交前检查：Android Lint（lintDebug）..."
+    if ./gradlew --console=plain -q :app:lintDebug; then
+        echo "✓ lint 通过"
+    else
+        echo ""
+        echo "✗ lint 检查未通过，本次提交已被拦截。"
+        echo "  报告: app/build/reports/lint-results-debug.html"
+        echo "  修复问题后重试；若确认为误报，可在 app/build.gradle.kts 的 lint 块中"
+        echo "  按 issue id 关闭，或经评审后更新基线（./gradlew :app:updateLintBaseline）。"
+        exit 1
+    fi
+fi
+
+exit 0

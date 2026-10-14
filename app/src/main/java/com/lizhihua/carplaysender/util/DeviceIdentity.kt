@@ -47,31 +47,39 @@ object DeviceIdentity {
     }
 
     /** 设备名（0x4E09 DeviceInformationUpdate 用；对齐真机发的是本机蓝牙名）。 */
-    fun deviceName(context: Context): String = try {
-        context.getSystemService(BluetoothManager::class.java)?.adapter?.name
-            ?.takeIf { it.isNotBlank() }
-            ?: "iPhone"
-    } catch (_: Exception) {
-        "iPhone"
-    }
+    fun deviceName(context: Context): String =
+        try {
+            context
+                .getSystemService(BluetoothManager::class.java)
+                ?.adapter
+                ?.name
+                ?.takeIf { it.isNotBlank() }
+                ?: "iPhone"
+        } catch (_: Exception) {
+            "iPhone"
+        }
 
-    private fun resolveViaShizuku(): String? = try {
-        val result = Shell.exec(
-            "content query --uri content://settings/secure/bluetooth_address",
-            timeoutMs = 4_000,
-        )
-        MAC_REGEX.find(result.output)?.value?.uppercase()
-    } catch (_: Exception) {
-        null
-    }
+    private fun resolveViaShizuku(): String? =
+        try {
+            val result =
+                Shell.exec(
+                    "content query --uri content://settings/secure/bluetooth_address",
+                    timeoutMs = 4_000,
+                )
+            MAC_REGEX.find(result.output)?.value?.uppercase()
+        } catch (_: Exception) {
+            null
+        }
 
-    private fun resolveViaSettings(context: Context): String? = try {
-        Settings.Secure.getString(context.contentResolver, "bluetooth_address")
-            ?.takeIf { MAC_REGEX.matches(it) }
-            ?.uppercase()
-    } catch (_: Exception) {
-        null
-    }
+    private fun resolveViaSettings(context: Context): String? =
+        try {
+            Settings.Secure
+                .getString(context.contentResolver, "bluetooth_address")
+                ?.takeIf { MAC_REGEX.matches(it) }
+                ?.uppercase()
+        } catch (_: Exception) {
+            null
+        }
 
     private const val RETRY_QUIET_MILLIS = 10_000L
 }

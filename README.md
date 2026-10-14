@@ -144,6 +144,28 @@ docs/PROTOCOL-NOTES.md              # 协议知识库（分层格式/时序/参�
 reference/                          # 参考仓库（gitignore，不入库不分发）
 ```
 
+## 代码质量（提交前自动拦截）
+
+提交（`git commit`）前 pre-commit 钩子（`.githooks/pre-commit`，经 `core.hooksPath` 启用）
+会自动执行两步，任一失败即阻止提交：
+
+1. **代码格式化**：Spotless + ktlint（Kotlin 官方代码风格，规则在根目录 `.editorconfig`）。
+   暂存过的 `.kt`/`.kts` 会被自动格式化并重新暂存，无需手工处理；
+2. **Android Lint**：`lintDebug` 全量检查，error 级问题使提交失败。
+
+手工命令：
+
+```bash
+./gradlew spotlessApply             # 全量格式化
+./gradlew :app:lintDebug            # lint 检查（报告: app/build/reports/lint-results-debug.html）
+./gradlew :app:updateLintBaseline   # 修复问题后重建 lint 基线
+```
+
+存量 lint 问题（273 条，均为车机 UI 场景的有意取舍：硬编码中文文案、px 定位、RTL 等）
+记录在 `app/lint-baseline.xml` 中豁免；**新代码再引入同类问题仍会被拦截**。
+问题实际修复后基线条目自动失效；确认为误报可单独关闭对应 issue id，或评审后重建基线。
+全新克隆后需执行一次 `git config core.hooksPath .githooks` 启用钩子。
+
 ## 边界
 
 - **产品形态是隐形屏启动器**（受信虚拟屏跑手机应用 + dock 常驻），不是整机镜像；

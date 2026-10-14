@@ -5,7 +5,10 @@ object Tlv8 {
     private const val SEPARATOR_TYPE = 0xFF
     private const val MAX_FRAGMENT = 255
 
-    data class Item(val type: Int, val value: ByteArray)
+    data class Item(
+        val type: Int,
+        val value: ByteArray,
+    )
 
     fun encode(items: List<Item>): ByteArray {
         val out = ArrayList<ByteArray>()

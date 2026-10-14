@@ -2,10 +2,9 @@ package com.lizhihua.carplaysender.shizuku
 
 import android.content.ComponentName
 import android.content.Context
-import android.content.pm.PackageManager
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.os.IBinder
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import moe.shizuku.server.IShizukuService
 import java.io.FileInputStream
@@ -18,7 +17,6 @@ import kotlin.concurrent.thread
  * （移植自参考项目 android-auto）
  */
 object ShizukuGate {
-
     enum class State { NOT_INSTALLED, NOT_RUNNING, UNAUTHORIZED, READY }
 
     fun state(context: Context): State {
@@ -50,14 +48,20 @@ object ShizukuGate {
 
 /** 以 shell 身份执行命令（等同 adb shell）。Shizuku api 13 需经 IShizukuService binder 调 newProcess。 */
 object Shell {
-
-    class Result(val exitCode: Int, val output: String) {
+    class Result(
+        val exitCode: Int,
+        val output: String,
+    ) {
         val ok: Boolean get() = exitCode == 0
     }
 
-    fun exec(cmd: String, timeoutMs: Long = 6000L): Result {
-        val binder = rikka.shizuku.Shizuku.getBinder()
-            ?: return Result(-1, "Shizuku 未连接")
+    fun exec(
+        cmd: String,
+        timeoutMs: Long = 6000L,
+    ): Result {
+        val binder =
+            rikka.shizuku.Shizuku.getBinder()
+                ?: return Result(-1, "Shizuku 未连接")
         return try {
             val service = IShizukuService.Stub.asInterface(binder)
             val process = service.newProcess(arrayOf("sh", "-c", cmd), null, null)
@@ -71,22 +75,24 @@ object Shell {
                 }
             }
 
-            val output = try {
-                process.inputStream.use { pfd ->
-                    FileInputStream(pfd.fileDescriptor).readBytes().decodeToString().trim()
+            val output =
+                try {
+                    process.inputStream.use { pfd ->
+                        FileInputStream(pfd.fileDescriptor).readBytes().decodeToString().trim()
+                    }
+                } catch (_: Exception) {
+                    ""
                 }
-            } catch (_: Exception) {
-                ""
-            }
 
             if (!process.waitForTimeout(timeoutMs, TimeUnit.MILLISECONDS.toString())) {
                 process.destroy()
             }
-            val exit = try {
-                process.exitValue()
-            } catch (_: Exception) {
-                -1
-            }
+            val exit =
+                try {
+                    process.exitValue()
+                } catch (_: Exception) {
+                    -1
+                }
             Result(exit, output)
         } catch (e: Exception) {
             Result(-1, "命令执行失败：${e.message ?: e.javaClass.simpleName}")
@@ -96,7 +102,6 @@ object Shell {
 
 /** CarInput UserService 的绑定管理：绑定一次后所有触摸注入直连常驻 shell 进程（毫秒级）。 */
 object CarInputClient {
-
     @Volatile
     var service: ICarInput? = null
         private set
@@ -127,24 +132,33 @@ object CarInputClient {
 
     private var binderListenerAdded = false
 
-    private val conn = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            service = ICarInput.Stub.asInterface(binder)
-            binding = false
-            val ok = try { service?.ping() == true } catch (_: Throwable) { false }
-            diag("connected ping=$ok")
-            if (!ok) {
+    private val conn =
+        object : ServiceConnection {
+            override fun onServiceConnected(
+                name: ComponentName?,
+                binder: IBinder?,
+            ) {
+                service = ICarInput.Stub.asInterface(binder)
+                binding = false
+                val ok =
+                    try {
+                        service?.ping() == true
+                    } catch (_: Throwable) {
+                        false
+                    }
+                diag("connected ping=$ok")
+                if (!ok) {
+                    service = null
+                    binding = false
+                }
+            }
+
+            override fun onServiceDisconnected(name: ComponentName?) {
+                diag("service disconnected")
                 service = null
                 binding = false
             }
         }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            diag("service disconnected")
-            service = null
-            binding = false
-        }
-    }
 
     /** 上次绑定尝试时间（防止高频重试）。 */
     @Volatile
@@ -192,13 +206,14 @@ object CarInputClient {
         }
         binding = true
         try {
-            val args = userServiceArgs ?: rikka.shizuku.Shizuku.UserServiceArgs(
-                ComponentName("com.lizhihua.carplaysender", CarInputServiceImpl::class.java.name)
-            )
-                .processNameSuffix("car_input")
-                .debuggable(true)
-                .version(14) // 14：shell 包 Context 创建受信屏（修 packageName/uid 匹配校验）
-                .also { userServiceArgs = it }
+            val args =
+                userServiceArgs ?: rikka.shizuku.Shizuku
+                    .UserServiceArgs(
+                        ComponentName("com.lizhihua.carplaysender", CarInputServiceImpl::class.java.name),
+                    ).processNameSuffix("car_input")
+                    .debuggable(true)
+                    .version(14) // 14：shell 包 Context 创建受信屏（修 packageName/uid 匹配校验）
+                    .also { userServiceArgs = it }
             // 重绑前先解绑旧连接（清掉可能残留的 binder 状态）
             if (hasBoundOnce) {
                 runCatching { rikka.shizuku.Shizuku.unbindUserService(args, conn, true) }

@@ -23,7 +23,6 @@ import com.lizhihua.carplaysender.shizuku.Shell
  * 手机侧二级菜单页共用同一套面板实例，逻辑零拷贝。
  */
 class DesktopPanelFragment : SettingsPanelFragment() {
-
     private var countText: TextView? = null
     private var selected: MutableSet<String> = mutableSetOf()
     private lateinit var adapter: DesktopAdapter
@@ -55,7 +54,10 @@ class DesktopPanelFragment : SettingsPanelFragment() {
         countText?.text = "已选 ${selected.size} 个"
     }
 
-    private fun toggle(entry: VirtualLauncher.AppEntry, checked: Boolean) {
+    private fun toggle(
+        entry: VirtualLauncher.AppEntry,
+        checked: Boolean,
+    ) {
         val key = entry.component.flattenToString()
         if (checked) selected.add(key) else selected.remove(key)
         DesktopApps.save(requireContext(), selected)
@@ -65,24 +67,28 @@ class DesktopPanelFragment : SettingsPanelFragment() {
     }
 
     private inner class DesktopAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-
         val rows: List<SettingsRow> get() = SettingsRows.build(requireContext(), apps)
 
-        override fun getItemViewType(position: Int): Int =
-            if (rows[position] is SettingsRow.Header) 0 else 1
+        override fun getItemViewType(position: Int): Int = if (rows[position] is SettingsRow.Header) 0 else 1
 
         override fun getItemId(position: Int): Long = rows[position].id
 
         override fun getItemCount(): Int = rows.size
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder =
+        override fun onCreateViewHolder(
+            parent: ViewGroup,
+            viewType: Int,
+        ): RecyclerView.ViewHolder =
             if (viewType == 0) {
                 SettingsRows.HeaderHolder(SettingsRows.inflateHeader(this@DesktopPanelFragment, parent))
             } else {
                 PickerHolder(layoutInflater.inflate(R.layout.item_app_pick, parent, false))
             }
 
-        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        override fun onBindViewHolder(
+            holder: RecyclerView.ViewHolder,
+            position: Int,
+        ) {
             when (val row = rows[position]) {
                 is SettingsRow.Header -> (holder as SettingsRows.HeaderHolder).bind(row.title)
                 is SettingsRow.App -> (holder as PickerHolder).bind(row.entry)
@@ -90,7 +96,9 @@ class DesktopPanelFragment : SettingsPanelFragment() {
         }
     }
 
-    private inner class PickerHolder(private val row: View) : RecyclerView.ViewHolder(row) {
+    private inner class PickerHolder(
+        private val row: View,
+    ) : RecyclerView.ViewHolder(row) {
         private val icon: ImageView = row.findViewById(R.id.pickIcon)
         private val name: TextView = row.findViewById(R.id.pickName)
         private val check: ImageView = row.findViewById(R.id.pickCheck)
@@ -115,7 +123,6 @@ class DesktopPanelFragment : SettingsPanelFragment() {
 }
 
 class SupersamplePanelFragment : SettingsPanelFragment() {
-
     private lateinit var adapter: SupersampleAdapter
 
     override fun onCreateView(
@@ -138,24 +145,28 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
     }
 
     private inner class SupersampleAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-
         val rows: List<SettingsRow> get() = SettingsRows.build(requireContext(), apps)
 
-        override fun getItemViewType(position: Int): Int =
-            if (rows[position] is SettingsRow.Header) 0 else 1
+        override fun getItemViewType(position: Int): Int = if (rows[position] is SettingsRow.Header) 0 else 1
 
         override fun getItemId(position: Int): Long = rows[position].id
 
         override fun getItemCount(): Int = rows.size
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder =
+        override fun onCreateViewHolder(
+            parent: ViewGroup,
+            viewType: Int,
+        ): RecyclerView.ViewHolder =
             if (viewType == 0) {
                 SettingsRows.HeaderHolder(SettingsRows.inflateHeader(this@SupersamplePanelFragment, parent))
             } else {
                 SsHolder(layoutInflater.inflate(R.layout.item_app_ss, parent, false))
             }
 
-        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        override fun onBindViewHolder(
+            holder: RecyclerView.ViewHolder,
+            position: Int,
+        ) {
             when (val row = rows[position]) {
                 is SettingsRow.Header -> (holder as SettingsRows.HeaderHolder).bind(row.title)
                 is SettingsRow.App -> (holder as SsHolder).bind(row.entry)
@@ -163,7 +174,9 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
         }
     }
 
-    private inner class SsHolder(private val row: View) : RecyclerView.ViewHolder(row) {
+    private inner class SsHolder(
+        private val row: View,
+    ) : RecyclerView.ViewHolder(row) {
         private val icon: ImageView = row.findViewById(R.id.ssIcon)
         private val name: TextView = row.findViewById(R.id.ssName)
         private val segAuto: TextView = row.findViewById(R.id.ssAuto)
@@ -176,7 +189,10 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
             name.text = entry.label
             refresh(SupersamplePrefs.mode(requireContext(), entry.component))
 
-            fun pick(mode: Int, label: String) {
+            fun pick(
+                mode: Int,
+                label: String,
+            ) {
                 SupersamplePrefs.setMode(requireContext(), entry.component, mode)
                 refresh(mode)
                 hostToast("「${entry.label}」超采样：$label（下次启动生效）")
@@ -187,11 +203,12 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
         }
 
         private fun refresh(mode: Int) {
-            val segs = listOf(
-                segAuto to SupersamplePrefs.MODE_AUTO,
-                segOn to SupersamplePrefs.MODE_ON,
-                segOff to SupersamplePrefs.MODE_OFF,
-            )
+            val segs =
+                listOf(
+                    segAuto to SupersamplePrefs.MODE_AUTO,
+                    segOn to SupersamplePrefs.MODE_ON,
+                    segOff to SupersamplePrefs.MODE_OFF,
+                )
             segs.forEach { (view, segMode) ->
                 val active = segMode == mode
                 view.background = if (active) requireActivity().getDrawable(R.drawable.bg_segment_sel) else null
@@ -202,7 +219,6 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
 }
 
 class OrientationPanelFragment : SettingsPanelFragment() {
-
     private lateinit var adapter: OrientationAdapter
 
     override fun onCreateView(
@@ -225,24 +241,28 @@ class OrientationPanelFragment : SettingsPanelFragment() {
     }
 
     private inner class OrientationAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-
         val rows: List<SettingsRow> get() = SettingsRows.build(requireContext(), apps)
 
-        override fun getItemViewType(position: Int): Int =
-            if (rows[position] is SettingsRow.Header) 0 else 1
+        override fun getItemViewType(position: Int): Int = if (rows[position] is SettingsRow.Header) 0 else 1
 
         override fun getItemId(position: Int): Long = rows[position].id
 
         override fun getItemCount(): Int = rows.size
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder =
+        override fun onCreateViewHolder(
+            parent: ViewGroup,
+            viewType: Int,
+        ): RecyclerView.ViewHolder =
             if (viewType == 0) {
                 SettingsRows.HeaderHolder(SettingsRows.inflateHeader(this@OrientationPanelFragment, parent))
             } else {
                 OriHolder(layoutInflater.inflate(R.layout.item_orientation_car, parent, false))
             }
 
-        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        override fun onBindViewHolder(
+            holder: RecyclerView.ViewHolder,
+            position: Int,
+        ) {
             when (val row = rows[position]) {
                 is SettingsRow.Header -> (holder as SettingsRows.HeaderHolder).bind(row.title)
                 is SettingsRow.App -> (holder as OriHolder).bind(row.entry)
@@ -250,7 +270,9 @@ class OrientationPanelFragment : SettingsPanelFragment() {
         }
     }
 
-    private inner class OriHolder(private val row: View) : RecyclerView.ViewHolder(row) {
+    private inner class OriHolder(
+        private val row: View,
+    ) : RecyclerView.ViewHolder(row) {
         private val icon: ImageView = row.findViewById(R.id.oriIcon)
         private val name: TextView = row.findViewById(R.id.oriName)
         private val check: ImageView = row.findViewById(R.id.oriCheck)
@@ -294,20 +316,19 @@ class OrientationPanelFragment : SettingsPanelFragment() {
         val pkg = entry.component.packageName
         val pid = Shell.exec("pidof $pkg", timeoutMs = 4000).output.trim()
         if (pid.isEmpty()) return
-        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+        androidx.appcompat.app.AlertDialog
+            .Builder(requireContext())
             .setTitle("应用正在运行")
             .setMessage("「${entry.label}」正在运行，显示设置的更改需要重启应用后才能生效。是否立即结束它？")
             .setPositiveButton("结束应用") { _, _ ->
                 Shell.exec("am force-stop $pkg", timeoutMs = 4000)
                 hostToast("已结束「${entry.label}」，重新打开即按新设置显示")
-            }
-            .setNegativeButton("稍后手动重启", null)
+            }.setNegativeButton("稍后手动重启", null)
             .show()
     }
 }
 
 class DockPanelFragment : SettingsPanelFragment() {
-
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -320,36 +341,55 @@ class DockPanelFragment : SettingsPanelFragment() {
         val blurSeek = view.findViewById<SeekBar>(R.id.dockBlurSeek)
         val blurValue = view.findViewById<TextView>(R.id.dockBlurValue)
 
-        scrimSeek.progress = com.lizhihua.carplaysender.launcher.DockPrefs.scrimOpacity(requireContext())
+        scrimSeek.progress =
+            com.lizhihua.carplaysender.launcher.DockPrefs
+                .scrimOpacity(requireContext())
         scrimValue.text = "${scrimSeek.progress}%"
-        scrimSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
-                if (!fromUser) return
-                scrimValue.text = "$value%"
-                com.lizhihua.carplaysender.launcher.DockPrefs.setScrimOpacity(requireContext(), value)
-            }
+        scrimSeek.setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(
+                    seekBar: SeekBar?,
+                    value: Int,
+                    fromUser: Boolean,
+                ) {
+                    if (!fromUser) return
+                    scrimValue.text = "$value%"
+                    com.lizhihua.carplaysender.launcher.DockPrefs
+                        .setScrimOpacity(requireContext(), value)
+                }
 
-            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
-        })
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
 
-        blurSeek.progress = com.lizhihua.carplaysender.launcher.DockPrefs.blur(requireContext())
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            },
+        )
+
+        blurSeek.progress =
+            com.lizhihua.carplaysender.launcher.DockPrefs
+                .blur(requireContext())
         blurValue.text = "${blurSeek.progress}%"
-        blurSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
-                if (!fromUser) return
-                blurValue.text = "$value%"
-                com.lizhihua.carplaysender.launcher.DockPrefs.setBlur(requireContext(), value)
-            }
+        blurSeek.setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(
+                    seekBar: SeekBar?,
+                    value: Int,
+                    fromUser: Boolean,
+                ) {
+                    if (!fromUser) return
+                    blurValue.text = "$value%"
+                    com.lizhihua.carplaysender.launcher.DockPrefs
+                        .setBlur(requireContext(), value)
+                }
 
-            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
-        })
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            },
+        )
     }
 }
 
 class DefaultMapPanelFragment : SettingsPanelFragment() {
-
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -358,37 +398,49 @@ class DefaultMapPanelFragment : SettingsPanelFragment() {
 
     override fun onViewCreated(view: View) {
         val container = view.findViewById<LinearLayout>(R.id.mapOptions)
-        val installed = VirtualLauncher.MAP_PACKAGES_PRIORITY.mapNotNull { pkg ->
-            val launch = requireContext().packageManager.getLaunchIntentForPackage(pkg)
-                ?: return@mapNotNull null
-            val label = runCatching {
-                requireContext().packageManager.getApplicationInfo(pkg, 0)
-                    .loadLabel(requireContext().packageManager).toString()
-            }.getOrDefault(pkg)
-            pkg to label
-        }
+        val installed =
+            VirtualLauncher.MAP_PACKAGES_PRIORITY.mapNotNull { pkg ->
+                val launch =
+                    requireContext().packageManager.getLaunchIntentForPackage(pkg)
+                        ?: return@mapNotNull null
+                val label =
+                    runCatching {
+                        requireContext()
+                            .packageManager
+                            .getApplicationInfo(pkg, 0)
+                            .loadLabel(requireContext().packageManager)
+                            .toString()
+                    }.getOrDefault(pkg)
+                pkg to label
+            }
         if (installed.isEmpty()) {
-            container.addView(TextView(requireContext()).apply {
-                text = "未安装任何受支持的地图应用（高德/百度/腾讯）"
-                setTextColor(0xFF8E8E93.toInt())
-                textSize = 13f
-            })
+            container.addView(
+                TextView(requireContext()).apply {
+                    text = "未安装任何受支持的地图应用（高德/百度/腾讯）"
+                    setTextColor(0xFF8E8E93.toInt())
+                    textSize = 13f
+                },
+            )
             return
         }
-        var current = DefaultMapPrefs.manualPackage(requireContext())
-            ?: installed.firstOrNull()?.first
+        var current =
+            DefaultMapPrefs.manualPackage(requireContext())
+                ?: installed.firstOrNull()?.first
         installed.forEach { (pkg, label) ->
             val row = layoutInflater.inflate(R.layout.item_map_option, container, false)
             val iconPx = (34 * resources.displayMetrics.density).toInt()
-            val appIcon = runCatching {
-                requireContext().packageManager.getApplicationIcon(pkg)
-            }.getOrNull()
+            val appIcon =
+                runCatching {
+                    requireContext().packageManager.getApplicationIcon(pkg)
+                }.getOrNull()
             if (appIcon != null) {
-                row.findViewById<ImageView>(R.id.mapOptionIcon)
+                row
+                    .findViewById<ImageView>(R.id.mapOptionIcon)
                     .setImageBitmap(AppIcons.rounded(appIcon, iconPx))
             }
             row.findViewById<TextView>(R.id.mapOptionName).text = label
             val radio = row.findViewById<ImageView>(R.id.mapOptionRadio)
+
             fun refresh() {
                 radio.setImageResource(
                     if (pkg == current) R.drawable.bg_radio_on else R.drawable.bg_radio_off,

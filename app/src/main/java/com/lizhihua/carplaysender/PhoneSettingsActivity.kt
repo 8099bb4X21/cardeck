@@ -3,7 +3,6 @@ package com.lizhihua.carplaysender
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
@@ -19,7 +18,6 @@ import com.lizhihua.carplaysender.launcher.settings.SettingsToastHost
  * 列出五个设置入口，点击进入内容 Fragment——与车机 SettingsActivity 双栏共用同一套面板。
  */
 class PhoneSettingsActivity : AppCompatActivity() {
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_phone_settings)
@@ -31,15 +29,20 @@ class PhoneSettingsActivity : AppCompatActivity() {
     }
 
     private inner class MenuAdapter : RecyclerView.Adapter<MenuHolder>() {
-
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): MenuHolder {
+        override fun onCreateViewHolder(
+            parent: ViewGroup,
+            viewType: Int,
+        ): MenuHolder {
             val view = layoutInflater.inflate(R.layout.item_phone_settings_menu, parent, false)
             return MenuHolder(view)
         }
 
         override fun getItemCount() = SettingsMenus.ALL.size
 
-        override fun onBindViewHolder(holder: MenuHolder, position: Int) {
+        override fun onBindViewHolder(
+            holder: MenuHolder,
+            position: Int,
+        ) {
             val item = SettingsMenus.ALL[position]
             holder.icon.setImageResource(item.iconRes)
             holder.title.text = item.title
@@ -50,7 +53,9 @@ class PhoneSettingsActivity : AppCompatActivity() {
         }
     }
 
-    private class MenuHolder(view: View) : RecyclerView.ViewHolder(view) {
+    private class MenuHolder(
+        view: View,
+    ) : RecyclerView.ViewHolder(view) {
         val icon: ImageView = view.findViewById(R.id.menuIcon)
         val title: TextView = view.findViewById(R.id.menuTitle)
         val desc: TextView = view.findViewById(R.id.menuDesc)
@@ -60,8 +65,9 @@ class PhoneSettingsActivity : AppCompatActivity() {
 /**
  * 手机侧设置内容宿主：承载与车机双栏共用的内容 Fragment。
  */
-class SettingsContentActivity : AppCompatActivity(), SettingsToastHost {
-
+class SettingsContentActivity :
+    AppCompatActivity(),
+    SettingsToastHost {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val menuId = intent.getIntExtra(EXTRA_MENU, SettingsMenus.DESKTOP)
@@ -70,20 +76,26 @@ class SettingsContentActivity : AppCompatActivity(), SettingsToastHost {
         findViewById<TextView>(R.id.contentTitle).text = SettingsMenus.titleOf(menuId)
 
         if (supportFragmentManager.findFragmentById(R.id.settingsContainer) == null) {
-            supportFragmentManager.beginTransaction()
+            supportFragmentManager
+                .beginTransaction()
                 .replace(R.id.settingsContainer, SettingsMenus.createFragment(menuId))
                 .commit()
         }
     }
 
     override fun showToast(text: String) {
-        android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_SHORT).show()
+        android.widget.Toast
+            .makeText(this, text, android.widget.Toast.LENGTH_SHORT)
+            .show()
     }
 
     companion object {
         private const val EXTRA_MENU = "menu"
 
-        fun start(context: Context, item: SettingsMenus.Item) {
+        fun start(
+            context: Context,
+            item: SettingsMenus.Item,
+        ) {
             context.startActivity(
                 Intent(context, SettingsContentActivity::class.java)
                     .putExtra(EXTRA_MENU, item.id),
@@ -91,4 +103,3 @@ class SettingsContentActivity : AppCompatActivity(), SettingsToastHost {
         }
     }
 }
-

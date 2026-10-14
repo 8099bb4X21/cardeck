@@ -48,23 +48,29 @@ class InMemoryStreamPair {
     private val aToB = Pipe()
     private val bToA = Pipe()
 
-    val sideA: DuplexStream = object : DuplexStream {
-        override fun read(buffer: ByteArray) = aToB.source.read(buffer)
-        override fun write(bytes: ByteArray) = bToA.writeAndFlush(bytes)
-        override fun close() {
-            aToB.close()
-            bToA.closePartner()
-        }
-    }
+    val sideA: DuplexStream =
+        object : DuplexStream {
+            override fun read(buffer: ByteArray) = aToB.source.read(buffer)
 
-    val sideB: DuplexStream = object : DuplexStream {
-        override fun read(buffer: ByteArray) = bToA.source.read(buffer)
-        override fun write(bytes: ByteArray) = aToB.writeAndFlush(bytes)
-        override fun close() {
-            bToA.close()
-            aToB.closePartner()
+            override fun write(bytes: ByteArray) = bToA.writeAndFlush(bytes)
+
+            override fun close() {
+                aToB.close()
+                bToA.closePartner()
+            }
         }
-    }
+
+    val sideB: DuplexStream =
+        object : DuplexStream {
+            override fun read(buffer: ByteArray) = bToA.source.read(buffer)
+
+            override fun write(bytes: ByteArray) = aToB.writeAndFlush(bytes)
+
+            override fun close() {
+                bToA.close()
+                aToB.closePartner()
+            }
+        }
 
     private class Pipe {
         val source = PipedInputStream(1 shl 16)
@@ -91,4 +97,6 @@ class InMemoryStreamPair {
     }
 }
 
-class DuplexClosedException(message: String) : IOException(message)
+class DuplexClosedException(
+    message: String,
+) : IOException(message)

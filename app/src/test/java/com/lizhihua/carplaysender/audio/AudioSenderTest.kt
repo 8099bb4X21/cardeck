@@ -10,15 +10,15 @@ import org.junit.Test
  * （对照 DiPlay `AudioStream.kt`：AAD=头 4..12、密文=12..n-8、nonce=尾 8B 小端）。
  */
 class AudioSenderTest {
-
     private val key = ByteArray(32) { (it * 7 + 1).toByte() }
 
-    private fun sender() = AudioSender(
-        host = "127.0.0.1",
-        dataPort = 5000,
-        streamKey = key,
-        log = {},
-    )
+    private fun sender() =
+        AudioSender(
+            host = "127.0.0.1",
+            dataPort = 5000,
+            streamKey = key,
+            log = {},
+        )
 
     @Test
     fun headerFieldsMatchCarPlayRtpConvention() {
@@ -63,12 +63,13 @@ class AudioSenderTest {
     fun wirePayloadIsByteSwappedRelativeToCapture() {
         val pcm = byteArrayOf(0x34, 0x12, 0x78, 0x56) // 小端样本 0x1234, 0x5678
         val wire = sender().sealPacket(pcm, sequence = 0, timestamp = 0, nonceCounter = 0)
-        val decrypted = AirPlayCrypto.chachaOpen(
-            key,
-            ByteArray(12).also { wire.copyOfRange(wire.size - 8, wire.size).copyInto(it, 4) },
-            wire.copyOfRange(12, wire.size - 8),
-            wire.copyOfRange(4, 12),
-        )
+        val decrypted =
+            AirPlayCrypto.chachaOpen(
+                key,
+                ByteArray(12).also { wire.copyOfRange(wire.size - 8, wire.size).copyInto(it, 4) },
+                wire.copyOfRange(12, wire.size - 8),
+                wire.copyOfRange(4, 12),
+            )
         // 线上应为大端：0x12 0x34 0x56 0x78
         assertArrayEquals(byteArrayOf(0x12, 0x34, 0x56, 0x78), decrypted)
     }

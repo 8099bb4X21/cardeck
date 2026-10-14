@@ -1,12 +1,10 @@
 package com.lizhihua.carplaysender.launcher
 
-import com.lizhihua.carplaysender.R
-
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.view.View
 import android.os.Bundle
+import android.view.View
 import android.view.ViewGroup
 import android.widget.GridLayout
 import android.widget.ImageView
@@ -16,6 +14,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
+import com.lizhihua.carplaysender.R
 
 /**
  * CarPlay 主区桌面：纯黑背景 + 4×3 图标分页网格 + 底部页点。
@@ -26,12 +25,15 @@ import androidx.viewpager2.widget.ViewPager2
  * 用户可在设置页勾选要显示的应用，返回桌面（onResume）即时刷新。
  */
 class GridActivity : AppCompatActivity() {
-
     /** 桌面格子：仪表盘页（第 0 页）/ 固定设置入口 / 普通应用。 */
     private sealed interface Cell {
         object Dashboard : Cell
+
         object Pinned : Cell
-        data class App(val entry: VirtualLauncher.AppEntry) : Cell
+
+        data class App(
+            val entry: VirtualLauncher.AppEntry,
+        ) : Cell
     }
 
     private var pages: List<List<Cell>> = emptyList()
@@ -83,9 +85,10 @@ class GridActivity : AppCompatActivity() {
         val panel = dashboardView ?: return
         val scrim = panel.findViewById<View>(R.id.dashScrim)
         val alpha = (DockPrefs.scrimOpacity(this) * 255 / 100).coerceIn(0, 255)
-        scrim.background = android.graphics.drawable.ColorDrawable(
-            android.graphics.Color.argb(alpha, 0, 0, 0),
-        )
+        scrim.background =
+            android.graphics.drawable.ColorDrawable(
+                android.graphics.Color.argb(alpha, 0, 0, 0),
+            )
         val wallpaper = panel.findViewById<ImageView>(R.id.dashWallpaper)
         val percent = DockPrefs.blur(this)
         if (percent <= 0) {
@@ -94,7 +97,9 @@ class GridActivity : AppCompatActivity() {
             val radius = percent / 100f * 40f * resources.displayMetrics.density
             wallpaper.setRenderEffect(
                 android.graphics.RenderEffect.createBlurEffect(
-                    radius, radius, android.graphics.Shader.TileMode.CLAMP,
+                    radius,
+                    radius,
+                    android.graphics.Shader.TileMode.CLAMP,
                 ),
             )
         }
@@ -113,11 +118,14 @@ class GridActivity : AppCompatActivity() {
         val canvasHeight = (VirtualLauncher.streamHeightPx * scale).toInt()
         if (canvasWidth <= 0 || canvasHeight <= 0) return
         Thread({
-            val bitmap = runCatching {
-                com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
-                    this@GridActivity, canvasWidth, canvasHeight,
-                )
-            }.getOrNull() ?: return@Thread
+            val bitmap =
+                runCatching {
+                    com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
+                        this@GridActivity,
+                        canvasWidth,
+                        canvasHeight,
+                    )
+                }.getOrNull() ?: return@Thread
             val margin = (CARD_MARGIN_PX * scale).toInt()
             // 音乐卡左缘收半边距（8）：与地图 tile 右缘之间形成 16px 中缝（两侧各让一半）
             val cardX = ((VirtualLauncher.dockWidthPx + VirtualLauncher.mapTileWidth + CARD_MARGIN_PX / 2) * scale).toInt()
@@ -181,9 +189,11 @@ class GridActivity : AppCompatActivity() {
             findViewById<ViewPager2>(R.id.gridPager).post {
                 cellWidthPx = (dm.widthPixels - chromeHorizontalPx) / COLUMNS
                 cellHeightPx = (dm.heightPixels - chromeVerticalPx) / ROWS
-                iconSizePx = (cellHeightPx * 0.63f).toInt()
-                    .coerceAtMost((cellWidthPx * 0.72f).toInt())
-                    .coerceAtLeast(48)
+                iconSizePx =
+                    (cellHeightPx * 0.63f)
+                        .toInt()
+                        .coerceAtMost((cellWidthPx * 0.72f).toInt())
+                        .coerceAtLeast(48)
                 if (cellWidthPx > 0) reload()
             }
         }
@@ -197,33 +207,39 @@ class GridActivity : AppCompatActivity() {
         val canvasHeight = (VirtualLauncher.streamHeightPx * scale).toInt()
         if (canvasWidth > 0 && canvasHeight > 0) {
             val root = findViewById<android.view.ViewGroup>(android.R.id.content)
-            wallpaperView = ImageView(this).apply {
-                scaleType = ImageView.ScaleType.FIT_XY
-                layoutParams = android.widget.FrameLayout.LayoutParams(
-                    canvasWidth,
-                    canvasHeight,
-                ).apply {
-                    if (VirtualLauncher.dockAtBottom) {
-                        // 竖屏车机：dock 在底部，桌面切片 = 画布顶部
-                        leftMargin = 0
-                        topMargin = 0
-                    } else {
-                        // 横屏车机：dock 在左侧，桌面切片 = 画布右部
-                        leftMargin = -(VirtualLauncher.dockWidthPx * scale).toInt()
-                        topMargin = 0
-                    }
+            wallpaperView =
+                ImageView(this).apply {
+                    scaleType = ImageView.ScaleType.FIT_XY
+                    layoutParams =
+                        android.widget.FrameLayout
+                            .LayoutParams(
+                                canvasWidth,
+                                canvasHeight,
+                            ).apply {
+                                if (VirtualLauncher.dockAtBottom) {
+                                    // 竖屏车机：dock 在底部，桌面切片 = 画布顶部
+                                    leftMargin = 0
+                                    topMargin = 0
+                                } else {
+                                    // 横屏车机：dock 在左侧，桌面切片 = 画布右部
+                                    leftMargin = -(VirtualLauncher.dockWidthPx * scale).toInt()
+                                    topMargin = 0
+                                }
+                            }
                 }
-            }
             root.addView(wallpaperView, 0)
             // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
-            com.lizhihua.carplaysender.ui.WallpaperStore.addListener(wallpaperListener)
+            com.lizhihua.carplaysender.ui.WallpaperStore
+                .addListener(wallpaperListener)
             refreshWallpaperIfChanged()
 
             // 仪表盘面板已改为 ViewPager2 首页（PageAdapter 绑定时创建），
             // 此处仅注册全局监听：卡片视觉/媒体状态/壁纸切片/仪表盘模式。
             DockPrefs.addListener(dockPrefsListener)
-            com.lizhihua.carplaysender.media.MediaSessionsState.addListener(mediaStateListener)
-            com.lizhihua.carplaysender.ui.WallpaperStore.addCanvasReadyListener(canvasReadyListener)
+            com.lizhihua.carplaysender.media.MediaSessionsState
+                .addListener(mediaStateListener)
+            com.lizhihua.carplaysender.ui.WallpaperStore
+                .addCanvasReadyListener(canvasReadyListener)
             VirtualLauncher.addDashboardListener(dashboardListener)
             VirtualLauncher.addMapLayoutListener { runOnUiThread { refreshDashWallpaper() } }
             applyDashboardMode(VirtualLauncher.dashboardMode)
@@ -232,36 +248,43 @@ class GridActivity : AppCompatActivity() {
             applyDashboardMode(VirtualLauncher.dashboardMode)
         }
 
-        pager = findViewById<ViewPager2>(R.id.gridPager).apply {
-            offscreenPageLimit = 2
-            adapter = PageAdapter()
-        }
+        pager =
+            findViewById<ViewPager2>(R.id.gridPager).apply {
+                offscreenPageLimit = 2
+                adapter = PageAdapter()
+            }
         dotsRow = findViewById(R.id.dotsRow)
-        pager?.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
-            override fun onPageSelected(position: Int) {
-                updateDots(position)
-                // 用户滑动切换仪表盘/桌面：回写 launcher（含地图任务与 tile 布局）
-                if (position == 0 && !VirtualLauncher.dashboardMode) VirtualLauncher.showDashboard()
-                if (position != 0 && VirtualLauncher.dashboardMode) VirtualLauncher.showDesktop()
-            }
-
-            override fun onPageScrolled(position: Int, positionOffset: Float, offsetPixels: Int) {
-                // 滑动过程中 tile 跟随手指平移（合成器采样位置随进度左移/右移）；
-                // 回滑进仪表盘时提前显示 tile（纯视觉，状态在落定 IDLE 时统一对账）
-                if (position == 0) {
-                    VirtualLauncher.setTileSlide(positionOffset)
-                    if (positionOffset < 1f) VirtualLauncher.showMapTile()
+        pager?.registerOnPageChangeCallback(
+            object : ViewPager2.OnPageChangeCallback() {
+                override fun onPageSelected(position: Int) {
+                    updateDots(position)
+                    // 用户滑动切换仪表盘/桌面：回写 launcher（含地图任务与 tile 布局）
+                    if (position == 0 && !VirtualLauncher.dashboardMode) VirtualLauncher.showDashboard()
+                    if (position != 0 && VirtualLauncher.dashboardMode) VirtualLauncher.showDesktop()
                 }
-            }
 
-            override fun onPageScrollStateChanged(state: Int) {
-                if (state == androidx.viewpager2.widget.ViewPager2.SCROLL_STATE_IDLE) {
-                    VirtualLauncher.setTileSlide(0f)
-                    // 落定对账：仪表盘模式与所在页一致（含异常中断的对账恢复）
-                    VirtualLauncher.syncDashboard(pager?.currentItem == 0)
+                override fun onPageScrolled(
+                    position: Int,
+                    positionOffset: Float,
+                    offsetPixels: Int,
+                ) {
+                    // 滑动过程中 tile 跟随手指平移（合成器采样位置随进度左移/右移）；
+                    // 回滑进仪表盘时提前显示 tile（纯视觉，状态在落定 IDLE 时统一对账）
+                    if (position == 0) {
+                        VirtualLauncher.setTileSlide(positionOffset)
+                        if (positionOffset < 1f) VirtualLauncher.showMapTile()
+                    }
                 }
-            }
-        })
+
+                override fun onPageScrollStateChanged(state: Int) {
+                    if (state == androidx.viewpager2.widget.ViewPager2.SCROLL_STATE_IDLE) {
+                        VirtualLauncher.setTileSlide(0f)
+                        // 落定对账：仪表盘模式与所在页一致（含异常中断的对账恢复）
+                        VirtualLauncher.syncDashboard(pager?.currentItem == 0)
+                    }
+                }
+            },
+        )
     }
 
     /** 壁纸版本变化时后台重解码并换图（手机侧换壁纸后 ≤2s 桌面更新）。 */
@@ -272,19 +295,21 @@ class GridActivity : AppCompatActivity() {
         wallpaperShownVersion = current
         val params = view.layoutParams as? android.widget.FrameLayout.LayoutParams
         Thread({
-            val bitmap = runCatching {
-                com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
-                    this@GridActivity,
-                    params?.width ?: 0,
-                    params?.height ?: 0,
-                )
-            }.getOrNull()
+            val bitmap =
+                runCatching {
+                    com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
+                        this@GridActivity,
+                        params?.width ?: 0,
+                        params?.height ?: 0,
+                    )
+                }.getOrNull()
             if (bitmap != null) {
                 // 诊断：bitmap 三点采样（中线上 25%/50%/75% 宽）——区分「bitmap 内容缺失」
                 // 与「视图/合成问题」（本机 logcat 受抑制，走 logSink 落文件日志）
-                val samples = listOf(0.25f, 0.5f, 0.75f).joinToString(",") {
-                    "%06x".format(bitmap.getPixel((bitmap.width * it).toInt(), bitmap.height / 2))
-                }
+                val samples =
+                    listOf(0.25f, 0.5f, 0.75f).joinToString(",") {
+                        "%06x".format(bitmap.getPixel((bitmap.width * it).toInt(), bitmap.height / 2))
+                    }
                 VirtualLauncher.logSink?.invoke(
                     "WALLPAPER-GRID: bitmap=${bitmap.width}x${bitmap.height} " +
                         "view=${params?.width}x${params?.height} left=${params?.leftMargin} " +
@@ -306,22 +331,24 @@ class GridActivity : AppCompatActivity() {
 
     /** 重新读取应用清单与桌面选择（首帧与每次回到桌面时调用）。 */
     private fun reload() {
-        val apps = appsCache ?: run {
-            val scanned = VirtualLauncher.launchableApps(this)
-            // iconCache 供 dock 运行中图标使用（每次重扫时同步刷新）
-            synchronized(VirtualLauncher.runningApps) { VirtualLauncher.iconCache.clear() }
-            scanned.forEach { VirtualLauncher.iconCache[it.component] = it.icon }
-            appsCache = scanned
-            // 纳入进程级共享缓存：桌面扫过之后，车机设置首次打开即秒开
-            VirtualLauncher.adoptAppsCache(scanned)
-            scanned
-        }
+        val apps =
+            appsCache ?: run {
+                val scanned = VirtualLauncher.launchableApps(this)
+                // iconCache 供 dock 运行中图标使用（每次重扫时同步刷新）
+                synchronized(VirtualLauncher.runningApps) { VirtualLauncher.iconCache.clear() }
+                scanned.forEach { VirtualLauncher.iconCache[it.component] = it.icon }
+                appsCache = scanned
+                // 纳入进程级共享缓存：桌面扫过之后，车机设置首次打开即秒开
+                VirtualLauncher.adoptAppsCache(scanned)
+                scanned
+            }
 
         val selected = DesktopApps.selected(this, apps)
-        val cells = buildList {
-            add(Cell.Pinned) // 桌面第一格：车机设置（固定，不可取消）
-            apps.filter { it.component.flattenToString() in selected }.forEach { add(Cell.App(it)) }
-        }
+        val cells =
+            buildList {
+                add(Cell.Pinned) // 桌面第一格：车机设置（固定，不可取消）
+                apps.filter { it.component.flattenToString() in selected }.forEach { add(Cell.App(it)) }
+            }
         // 第 0 页 = 仪表盘，其后为桌面网格页：左右滑动即互相切换
         pages = listOf(listOf<Cell>(Cell.Dashboard)) + cells.chunked(COLUMNS * ROWS)
 
@@ -339,10 +366,12 @@ class GridActivity : AppCompatActivity() {
     private inner class PageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         override fun getItemCount(): Int = pages.size
 
-        override fun getItemViewType(position: Int): Int =
-            if (pages.getOrNull(position)?.firstOrNull() is Cell.Dashboard) 0 else 1
+        override fun getItemViewType(position: Int): Int = if (pages.getOrNull(position)?.firstOrNull() is Cell.Dashboard) 0 else 1
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder =
+        override fun onCreateViewHolder(
+            parent: ViewGroup,
+            viewType: Int,
+        ): RecyclerView.ViewHolder =
             if (viewType == 0) {
                 DashboardHolder(layoutInflater.inflate(R.layout.view_dashboard, parent, false))
             } else {
@@ -351,7 +380,10 @@ class GridActivity : AppCompatActivity() {
                 PageHolder(grid)
             }
 
-        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        override fun onBindViewHolder(
+            holder: RecyclerView.ViewHolder,
+            position: Int,
+        ) {
             when (holder) {
                 is DashboardHolder -> holder.bind()
                 is PageHolder -> holder.bind(position)
@@ -360,26 +392,34 @@ class GridActivity : AppCompatActivity() {
     }
 
     /** 仪表盘页 Holder：面板随页面创建（卡片边距/圆角/媒体控制/壁纸切片）。 */
-    private inner class DashboardHolder(val panel: View) : RecyclerView.ViewHolder(panel) {
+    private inner class DashboardHolder(
+        val panel: View,
+    ) : RecyclerView.ViewHolder(panel) {
         fun bind() {
             dashboardView = panel
             val scale = VirtualLauncher.gridScale()
             val cardMargin = (CARD_MARGIN_PX * scale).toInt()
-            panel.layoutParams = android.view.ViewGroup.MarginLayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            ).apply {
-                // 左缘收半边距（8）：与地图 tile 右缘之间形成 16px 中缝
-                leftMargin = (VirtualLauncher.mapTileWidth * scale).toInt() + cardMargin / 2
-                topMargin = cardMargin
-                rightMargin = cardMargin
-                bottomMargin = cardMargin
-            }
-            panel.outlineProvider = object : android.view.ViewOutlineProvider() {
-                override fun getOutline(view: View, outline: android.graphics.Outline) {
-                    outline.setRoundRect(0, 0, view.width, view.height, cardMargin * 1.4f)
+            panel.layoutParams =
+                android.view.ViewGroup
+                    .MarginLayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ).apply {
+                        // 左缘收半边距（8）：与地图 tile 右缘之间形成 16px 中缝
+                        leftMargin = (VirtualLauncher.mapTileWidth * scale).toInt() + cardMargin / 2
+                        topMargin = cardMargin
+                        rightMargin = cardMargin
+                        bottomMargin = cardMargin
+                    }
+            panel.outlineProvider =
+                object : android.view.ViewOutlineProvider() {
+                    override fun getOutline(
+                        view: View,
+                        outline: android.graphics.Outline,
+                    ) {
+                        outline.setRoundRect(0, 0, view.width, view.height, cardMargin * 1.4f)
+                    }
                 }
-            }
             panel.clipToOutline = true
             panel.findViewById<ImageView>(R.id.dashPrev).setOnClickListener {
                 dispatchMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS)
@@ -393,16 +433,24 @@ class GridActivity : AppCompatActivity() {
                 val state = com.lizhihua.carplaysender.media.MediaSessionsState.nowPlaying
                 val playing = state?.playing == true
                 dispatchMediaKey(
-                    if (playing) android.view.KeyEvent.KEYCODE_MEDIA_PAUSE
-                    else android.view.KeyEvent.KEYCODE_MEDIA_PLAY,
+                    if (playing) {
+                        android.view.KeyEvent.KEYCODE_MEDIA_PAUSE
+                    } else {
+                        android.view.KeyEvent.KEYCODE_MEDIA_PLAY
+                    },
                 )
                 com.lizhihua.carplaysender.media.MediaSessionsState.publish(
                     com.lizhihua.carplaysender.media.MediaSessionsState.NowPlaying(
-                        state?.title, state?.artist, !playing,
+                        state?.title,
+                        state?.artist,
+                        !playing,
                     ),
                 )
                 panel.postDelayed(
-                    { com.lizhihua.carplaysender.media.MediaSessionsState.requestResync() },
+                    {
+                        com.lizhihua.carplaysender.media.MediaSessionsState
+                            .requestResync()
+                    },
                     400,
                 )
             }
@@ -415,14 +463,17 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
-    private inner class PageHolder(private val grid: GridLayout) : RecyclerView.ViewHolder(grid) {
+    private inner class PageHolder(
+        private val grid: GridLayout,
+    ) : RecyclerView.ViewHolder(grid) {
         fun bind(page: Int) {
             grid.removeAllViews()
             pages[page].forEach { cell ->
                 val view = layoutInflater.inflate(R.layout.item_app_cell, grid, false)
-                val icon = view.findViewById<ImageView>(R.id.cellIcon).apply {
-                    layoutParams = LinearLayout.LayoutParams(iconSizePx, iconSizePx)
-                }
+                val icon =
+                    view.findViewById<ImageView>(R.id.cellIcon).apply {
+                        layoutParams = LinearLayout.LayoutParams(iconSizePx, iconSizePx)
+                    }
                 val label = view.findViewById<TextView>(R.id.cellLabel)
                 when (cell) {
                     is Cell.Dashboard -> Unit // 仪表盘独立成页，不进网格
@@ -465,10 +516,11 @@ class GridActivity : AppCompatActivity() {
         repeat(pages.size) {
             row.addView(
                 android.view.View(this).apply {
-                    background = android.graphics.drawable.GradientDrawable().apply {
-                        shape = android.graphics.drawable.GradientDrawable.OVAL
-                        setColor(0x66FFFFFF)
-                    }
+                    background =
+                        android.graphics.drawable.GradientDrawable().apply {
+                            shape = android.graphics.drawable.GradientDrawable.OVAL
+                            setColor(0x66FFFFFF)
+                        }
                 },
                 LinearLayout.LayoutParams((6 * density).toInt(), (6 * density).toInt()).apply {
                     marginStart = (3 * density).toInt()
@@ -488,11 +540,14 @@ class GridActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        com.lizhihua.carplaysender.ui.WallpaperStore.removeListener(wallpaperListener)
+        com.lizhihua.carplaysender.ui.WallpaperStore
+            .removeListener(wallpaperListener)
         VirtualLauncher.removeDashboardListener(dashboardListener)
-        com.lizhihua.carplaysender.media.MediaSessionsState.removeListener(mediaStateListener)
+        com.lizhihua.carplaysender.media.MediaSessionsState
+            .removeListener(mediaStateListener)
         DockPrefs.removeListener(dockPrefsListener)
-        com.lizhihua.carplaysender.ui.WallpaperStore.removeCanvasReadyListener(canvasReadyListener)
+        com.lizhihua.carplaysender.ui.WallpaperStore
+            .removeCanvasReadyListener(canvasReadyListener)
         super.onDestroy()
     }
 

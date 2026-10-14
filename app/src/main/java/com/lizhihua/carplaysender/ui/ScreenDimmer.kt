@@ -24,7 +24,6 @@ import com.lizhihua.carplaysender.shizuku.Shell
  * 仅用于重置计时，不拦截、不消费任何事件。
  */
 object ScreenDimmer {
-
     private const val TAG = "ScreenDimmer"
     private const val IDLE_TIMEOUT_MS = 45_000L
     private const val TIMEOUT_MAX = 2_147_483_647
@@ -146,27 +145,28 @@ object ScreenDimmer {
             return
         }
         if (dimShown) return
-        val view = View(ctx).apply {
-            setBackgroundColor(Color.argb(0xF8, 0, 0, 0))
-            isClickable = true
-            setOnClickListener { onUserInteraction() }
-        }
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.OPAQUE,
-        )
+        val view =
+            View(ctx).apply {
+                setBackgroundColor(Color.argb(0xF8, 0, 0, 0))
+                isClickable = true
+                setOnClickListener { onUserInteraction() }
+            }
+        val params =
+            WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.OPAQUE,
+            )
         runCatching { wm.addView(view, params) }
             .onSuccess {
                 dimView = view
                 dimShown = true
                 Log.i("CarPlaySender", "DIMMER: 暗幕已显示")
-            }
-            .onFailure { Log.w(TAG, "暗幕添加失败：${it.message}") }
+            }.onFailure { Log.w(TAG, "暗幕添加失败：${it.message}") }
     }
 
     private fun hideDim() {
@@ -180,29 +180,32 @@ object ScreenDimmer {
     private fun addWatcher() {
         val ctx = appContext ?: return
         val wm = windowManager ?: return
-        val view = View(ctx).apply {
-            setOnTouchListener { _, event ->
-                if (event.action == MotionEvent.ACTION_DOWN ||
-                    event.action == MotionEvent.ACTION_OUTSIDE
-                ) {
-                    onUserInteraction()
+        val view =
+            View(ctx).apply {
+                setOnTouchListener { _, event ->
+                    if (event.action == MotionEvent.ACTION_DOWN ||
+                        event.action == MotionEvent.ACTION_OUTSIDE
+                    ) {
+                        onUserInteraction()
+                    }
+                    false
                 }
-                false
             }
-        }
-        val params = WindowManager.LayoutParams(
-            1,
-            1,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
-            PixelFormat.TRANSLUCENT,
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 0
-            y = 0
-        }
+        val params =
+            WindowManager
+                .LayoutParams(
+                    1,
+                    1,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                        WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                    PixelFormat.TRANSLUCENT,
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.START
+                    x = 0
+                    y = 0
+                }
         runCatching { wm.addView(view, params) }
             .onSuccess { watchView = view }
             .onFailure { Log.w(TAG, "触摸探针添加失败：${it.message}") }
@@ -212,7 +215,12 @@ object ScreenDimmer {
 
     private fun enableStayAwake(ctx: Context) {
         Thread({
-            val current = Shell.exec("settings get system screen_off_timeout").output.trim().toIntOrNull()
+            val current =
+                Shell
+                    .exec("settings get system screen_off_timeout")
+                    .output
+                    .trim()
+                    .toIntOrNull()
             if (current == null) {
                 Log.w(TAG, "读取屏幕超时失败（Shizuku 未就绪？）")
                 return@Thread

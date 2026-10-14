@@ -7,7 +7,6 @@ import org.junit.Test
 
 /** 两个链路引擎通过直接交换输出字节完成握手与数据往返（无线程、无 I/O）。 */
 class Iap2LinkEngineTest {
-
     @Test
     fun handshakeReachesNormalOnBothSides() {
         val phone = Iap2LinkEngine()
@@ -90,12 +89,18 @@ class Iap2LinkEngineTest {
 
     // ---- 工具 ----
 
-    private fun exchange(a: Iap2LinkEngine, b: Iap2LinkEngine) {
+    private fun exchange(
+        a: Iap2LinkEngine,
+        b: Iap2LinkEngine,
+    ) {
         b.feed(a.takeOutput(), tick())
         a.feed(b.takeOutput(), tick())
     }
 
-    private fun exchangeUntilNormal(a: Iap2LinkEngine, b: Iap2LinkEngine) {
+    private fun exchangeUntilNormal(
+        a: Iap2LinkEngine,
+        b: Iap2LinkEngine,
+    ) {
         var guard = 0
         while ((a.state != Iap2LinkEngine.State.NORMAL || b.state != Iap2LinkEngine.State.NORMAL) &&
             guard++ < 10

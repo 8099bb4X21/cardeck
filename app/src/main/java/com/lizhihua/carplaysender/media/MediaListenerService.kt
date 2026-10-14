@@ -1,13 +1,10 @@
 package com.lizhihua.carplaysender.media
 
 import android.content.ComponentName
-import android.content.Intent
-import android.content.IntentFilter
 import android.media.MediaMetadata
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.service.notification.NotificationListenerService
-import android.service.notification.StatusBarNotification
 
 /**
  * 通知监听服务：借通知使用权枚举系统活跃媒体会话，向应用提供「正在播放」状态
@@ -17,10 +14,8 @@ import android.service.notification.StatusBarNotification
  * `cmd notification allow_listener <本组件>`（MainActivity 启动时自动尝试）。
  */
 class MediaListenerService : NotificationListenerService() {
-
     companion object {
-        fun componentName(context: android.content.Context): ComponentName =
-            ComponentName(context, MediaListenerService::class.java)
+        fun componentName(context: android.content.Context): ComponentName = ComponentName(context, MediaListenerService::class.java)
     }
 
     private val manager by lazy {
@@ -38,18 +33,20 @@ class MediaListenerService : NotificationListenerService() {
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /** 兜底轮询：部分播放器不触发回调/回调丢失时保证卡片信息更新。 */
-    private val periodicRefresh = object : Runnable {
-        override fun run() {
-            refresh()
-            mainHandler.postDelayed(this, 1_000)
+    private val periodicRefresh =
+        object : Runnable {
+            override fun run() {
+                refresh()
+                mainHandler.postDelayed(this, 1_000)
+            }
         }
-    }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
         try {
             manager.addOnActiveSessionsChangedListener(
-                sessionListener, componentName(this),
+                sessionListener,
+                componentName(this),
             )
             MediaSessionsState.resyncHook = { mainHandler.post { refresh() } }
             update(manager.getActiveSessions(componentName(this)))
@@ -70,48 +67,51 @@ class MediaListenerService : NotificationListenerService() {
             if (watched.add(controller.sessionToken)) {
                 controller.registerCallback(
                     object : android.media.session.MediaController.Callback() {
-                    override fun onPlaybackStateChanged(state: PlaybackState?) {
-                        refresh()
-                    }
+                        override fun onPlaybackStateChanged(state: PlaybackState?) {
+                            refresh()
+                        }
 
-                    override fun onMetadataChanged(metadata: MediaMetadata?) {
-                        refresh()
-                    }
-                },
-                android.os.Handler(android.os.Looper.getMainLooper()),
-            )
-        }
+                        override fun onMetadataChanged(metadata: MediaMetadata?) {
+                            refresh()
+                        }
+                    },
+                    android.os.Handler(android.os.Looper.getMainLooper()),
+                )
+            }
         }
         refresh()
     }
 
     /** 从活跃会话提取正在播放态：优先 PLAYING 的会话，否则保留第一个有元数据的。 */
     private fun refresh() {
-        val controllers = try {
-            manager.getActiveSessions(componentName(this))
-        } catch (_: SecurityException) {
-            emptyList()
-        }
-        val picked = controllers.firstOrNull {
-            it.playbackState?.state == PlaybackState.STATE_PLAYING
-        } ?: controllers.firstOrNull { it.metadata != null }
-        val now = picked?.let { controller ->
-            val meta = controller.metadata
-            val playing = controller.playbackState?.state == PlaybackState.STATE_PLAYING
-            MediaSessionsState.NowPlaying(
-                title = meta?.getString(MediaMetadata.METADATA_KEY_TITLE),
-                artist = meta?.getString(MediaMetadata.METADATA_KEY_ARTIST)
-                    ?: meta?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST),
-                playing = playing,
-            )
-        }
+        val controllers =
+            try {
+                manager.getActiveSessions(componentName(this))
+            } catch (_: SecurityException) {
+                emptyList()
+            }
+        val picked =
+            controllers.firstOrNull {
+                it.playbackState?.state == PlaybackState.STATE_PLAYING
+            } ?: controllers.firstOrNull { it.metadata != null }
+        val now =
+            picked?.let { controller ->
+                val meta = controller.metadata
+                val playing = controller.playbackState?.state == PlaybackState.STATE_PLAYING
+                MediaSessionsState.NowPlaying(
+                    title = meta?.getString(MediaMetadata.METADATA_KEY_TITLE),
+                    artist =
+                        meta?.getString(MediaMetadata.METADATA_KEY_ARTIST)
+                            ?: meta?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST),
+                    playing = playing,
+                )
+            }
         MediaSessionsState.publish(now)
     }
 }
 
 /** 全局「正在播放」状态（本进程内共享；GridActivity 音乐卡监听渲染）。 */
 object MediaSessionsState {
-
     data class NowPlaying(
         val title: String?,
         val artist: String?,
@@ -137,8 +137,10 @@ object MediaSessionsState {
         if (nowPlaying == value) return
         nowPlaying = value
         com.lizhihua.carplaysender.launcher.VirtualLauncher.logSink?.invoke(
-            "MEDIA: " + (value?.let { "${it.title ?: "?"} - ${it.artist ?: "?"} playing=${it.playing}" }
-                ?: "无活跃会话"),
+            "MEDIA: " + (
+                value?.let { "${it.title ?: "?"} - ${it.artist ?: "?"} playing=${it.playing}" }
+                    ?: "无活跃会话"
+            ),
         )
         listeners.forEach { runCatching { it() } }
     }

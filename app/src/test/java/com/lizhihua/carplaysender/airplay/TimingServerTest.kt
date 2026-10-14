@@ -10,7 +10,6 @@ import java.nio.ByteBuffer
 
 /** 计时服务：NTP 编码往返 + 请求应答构造（对照 catplay rtcp_timesync.rs 的线格式）。 */
 class TimingServerTest {
-
     @Test
     fun ntpEncodingRoundTrips() {
         val values = listOf(0L, 123_456_789L, 999_999_999L, 1_000_000_000L, 12_345_678_901_234L)

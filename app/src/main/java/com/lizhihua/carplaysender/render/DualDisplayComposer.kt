@@ -31,7 +31,6 @@ class DualDisplayComposer(
     /** true：dock 是底部横条（竖屏车机）；false：dock 是左侧竖条（横屏车机）。 */
     private val dockAtBottom: Boolean = false,
 ) {
-
     /** 仪表盘↔桌面滑动进度（0=tile 原位，1=完全滑出左侧），由 GridActivity 随滑动驱动。 */
     @Volatile
     var tileSlideFraction: Float = 0f
@@ -106,20 +105,24 @@ class DualDisplayComposer(
         val ready = CountDownLatch(1)
         startLatch = ready
         var failure: IllegalStateException? = null
-        glThread = Thread({
-            try {
-                runGl(dockWidthPx, dockHeightPx, appWidthPx, appHeightPx, appHiWidthPx, appHiHeightPx, mapWidthPx, mapHeightPx)
-            } catch (error: IllegalStateException) {
-                failure = error
-            } finally {
-                ready.countDown()
+        glThread =
+            Thread({
+                try {
+                    runGl(dockWidthPx, dockHeightPx, appWidthPx, appHeightPx, appHiWidthPx, appHiHeightPx, mapWidthPx, mapHeightPx)
+                } catch (error: IllegalStateException) {
+                    failure = error
+                } finally {
+                    ready.countDown()
+                }
+            }, "dual-composer").apply {
+                isDaemon = true
+                start()
             }
-        }, "dual-composer").apply {
-            isDaemon = true
-            start()
-        }
         ready.await()
-        failure?.let { running.set(false); throw it }
+        failure?.let {
+            running.set(false)
+            throw it
+        }
     }
 
     /**
@@ -166,7 +169,11 @@ class DualDisplayComposer(
         glThread = null
     }
 
-    private class Input(val texture: Int, val surfaceTexture: SurfaceTexture, val surface: Surface) {
+    private class Input(
+        val texture: Int,
+        val surfaceTexture: SurfaceTexture,
+        val surface: Surface,
+    ) {
         @Volatile
         var hasNewFrame = false
 
@@ -194,36 +201,45 @@ class DualDisplayComposer(
         checkEgl(display != EGL14.EGL_NO_DISPLAY, "eglGetDisplay")
         checkEgl(EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 1), "eglInitialize")
 
-        val attribs = intArrayOf(
-            EGL14.EGL_RED_SIZE, 8,
-            EGL14.EGL_GREEN_SIZE, 8,
-            EGL14.EGL_BLUE_SIZE, 8,
-            EGL14.EGL_ALPHA_SIZE, 8,
-            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-            EGL_RECORDABLE_ANDROID, 1,
-            EGL14.EGL_NONE,
-        )
+        val attribs =
+            intArrayOf(
+                EGL14.EGL_RED_SIZE,
+                8,
+                EGL14.EGL_GREEN_SIZE,
+                8,
+                EGL14.EGL_BLUE_SIZE,
+                8,
+                EGL14.EGL_ALPHA_SIZE,
+                8,
+                EGL14.EGL_RENDERABLE_TYPE,
+                EGL14.EGL_OPENGL_ES2_BIT,
+                EGL_RECORDABLE_ANDROID,
+                1,
+                EGL14.EGL_NONE,
+            )
         val configs = arrayOfNulls<EGLConfig>(1)
         val num = IntArray(1)
         checkEgl(
             EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, num, 0) && num[0] > 0,
             "eglChooseConfig",
         )
-        val context: EGLContext = EGL14.eglCreateContext(
-            display,
-            configs[0],
-            EGL14.EGL_NO_CONTEXT,
-            intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE),
-            0,
-        )
+        val context: EGLContext =
+            EGL14.eglCreateContext(
+                display,
+                configs[0],
+                EGL14.EGL_NO_CONTEXT,
+                intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE),
+                0,
+            )
         checkEgl(context != EGL14.EGL_NO_CONTEXT, "eglCreateContext")
-        val outputSurface: EGLSurface = EGL14.eglCreateWindowSurface(
-            display,
-            configs[0],
-            output,
-            intArrayOf(EGL14.EGL_NONE),
-            0,
-        )
+        val outputSurface: EGLSurface =
+            EGL14.eglCreateWindowSurface(
+                display,
+                configs[0],
+                output,
+                intArrayOf(EGL14.EGL_NONE),
+                0,
+            )
         checkEgl(outputSurface != EGL14.EGL_NO_SURFACE, "eglCreateWindowSurface")
         checkEgl(
             EGL14.eglMakeCurrent(display, outputSurface, outputSurface, context),
@@ -231,7 +247,10 @@ class DualDisplayComposer(
         )
 
         // ---- 输入纹理 ----
-        fun newInput(width: Int, height: Int): Input {
+        fun newInput(
+            width: Int,
+            height: Int,
+        ): Input {
             val tex = IntArray(1)
             GLES20.glGenTextures(1, tex, 0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, tex[0])
@@ -283,18 +302,31 @@ class DualDisplayComposer(
                 GLES20.glUniform1i(uClipEnabled, 1)
                 GLES20.glUniform4f(
                     uClipRect,
-                    x0, outHeight - y1, x1, outHeight - y0,
+                    x0,
+                    outHeight - y1,
+                    x1,
+                    outHeight - y0,
                 )
                 GLES20.glUniform1f(uClipRadius, cornerRadius)
             } else {
                 GLES20.glUniform1i(uClipEnabled, 0)
             }
+
             // 像素坐标 → 裁剪坐标（GL 左下原点；纹理翻转由 uSTMatrix 处理，勿重复翻转）
             fun px(v: Float) = v / outWidth * 2f - 1f
+
             fun py(v: Float) = v / outHeight * 2f - 1f
-            val positions = floatBuffer(
-                px(x0), py(y0), px(x1), py(y0), px(x0), py(y1), px(x1), py(y1),
-            )
+            val positions =
+                floatBuffer(
+                    px(x0),
+                    py(y0),
+                    px(x1),
+                    py(y0),
+                    px(x0),
+                    py(y1),
+                    px(x1),
+                    py(y1),
+                )
             val coords = floatBuffer(u0, 0f, u1, 0f, u0, 1f, u1, 1f)
             GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, positions)
             GLES20.glEnableVertexAttribArray(aPos)
@@ -303,8 +335,13 @@ class DualDisplayComposer(
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
 
-        fun drawInput(input: Input, x0: Float, x1: Float, y0: Float, y1: Float) =
-            drawInputUV(input, x0, x1, y0, y1, u0 = 0f, u1 = 1f)
+        fun drawInput(
+            input: Input,
+            x0: Float,
+            x1: Float,
+            y0: Float,
+            y1: Float,
+        ) = drawInputUV(input, x0, x1, y0, y1, u0 = 0f, u1 = 1f)
 
         fun composeFrame(fullRedraw: Boolean) {
             // 待切应用屏：目标屏出帧即切（帧号前进 / 已有内容 600ms 兜底 / 2s 超时兜底）
@@ -381,9 +418,12 @@ class DualDisplayComposer(
                         val slide = tileSlideFraction * (outWidth - dockW)
                         drawInputUV(
                             map!!,
-                            dockW + TILE_MARGIN - slide, dockW + TILE_MARGIN + tileW - slide,
-                            TILE_MARGIN, outHeight - TILE_MARGIN,
-                            u0 = 0.25f, u1 = 0.75f,
+                            dockW + TILE_MARGIN - slide,
+                            dockW + TILE_MARGIN + tileW - slide,
+                            TILE_MARGIN,
+                            outHeight - TILE_MARGIN,
+                            u0 = 0.25f,
+                            u1 = 0.75f,
                             cornerRadius = TILE_CORNER_RADIUS,
                         )
                     }
@@ -451,36 +491,38 @@ class DualDisplayComposer(
 
     /** [oes]=true：外部纹理采样（SurfaceTexture）；false：普通 2D 采样（壁纸位图）。 */
     private fun buildProgram(oes: Boolean): Int {
-        val fragment = if (oes) {
-            """
-            #extension GL_OES_EGL_image_external : require
-            precision mediump float;
-            varying vec2 vTexCoord;
-            uniform samplerExternalOES uTexture;
-            uniform int uClipEnabled;
-            uniform vec4 uClipRect;
-            uniform float uClipRadius;
-            void main() {
-                if (uClipEnabled == 1) {
-                    vec2 p = gl_FragCoord.xy;
-                    vec2 half2 = vec2(uClipRadius);
-                    vec2 c = clamp(p, uClipRect.xy + half2, uClipRect.zw - half2);
-                    if (distance(p, c) > uClipRadius) discard;
+        val fragment =
+            if (oes) {
+                """
+                #extension GL_OES_EGL_image_external : require
+                precision mediump float;
+                varying vec2 vTexCoord;
+                uniform samplerExternalOES uTexture;
+                uniform int uClipEnabled;
+                uniform vec4 uClipRect;
+                uniform float uClipRadius;
+                void main() {
+                    if (uClipEnabled == 1) {
+                        vec2 p = gl_FragCoord.xy;
+                        vec2 half2 = vec2(uClipRadius);
+                        vec2 c = clamp(p, uClipRect.xy + half2, uClipRect.zw - half2);
+                        if (distance(p, c) > uClipRadius) discard;
+                    }
+                    gl_FragColor = texture2D(uTexture, vTexCoord);
                 }
-                gl_FragColor = texture2D(uTexture, vTexCoord);
+                """.trimIndent()
+            } else {
+                """
+                precision mediump float;
+                varying vec2 vTexCoord;
+                uniform sampler2D uTexture;
+                void main() {
+                    gl_FragColor = texture2D(uTexture, vTexCoord);
+                }
+                """.trimIndent()
             }
-            """.trimIndent()
-        } else {
+        val vertex =
             """
-            precision mediump float;
-            varying vec2 vTexCoord;
-            uniform sampler2D uTexture;
-            void main() {
-                gl_FragColor = texture2D(uTexture, vTexCoord);
-            }
-            """.trimIndent()
-        }
-        val vertex = """
             attribute vec2 aPos;
             attribute vec2 aTexCoord;
             uniform mat4 uSTMatrix;
@@ -489,9 +531,12 @@ class DualDisplayComposer(
                 gl_Position = vec4(aPos, 0.0, 1.0);
                 vTexCoord = (uSTMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
             }
-        """.trimIndent()
+            """.trimIndent()
 
-        fun compile(type: Int, source: String): Int {
+        fun compile(
+            type: Int,
+            source: String,
+        ): Int {
             val shader = GLES20.glCreateShader(type)
             GLES20.glShaderSource(shader, source)
             GLES20.glCompileShader(shader)
@@ -506,7 +551,8 @@ class DualDisplayComposer(
     }
 
     private fun floatBuffer(vararg values: Float): FloatBuffer =
-        ByteBuffer.allocateDirect(values.size * 4)
+        ByteBuffer
+            .allocateDirect(values.size * 4)
             .order(ByteOrder.nativeOrder())
             .asFloatBuffer()
             .apply {
@@ -514,7 +560,10 @@ class DualDisplayComposer(
                 position(0)
             }
 
-    private fun checkEgl(ok: Boolean, stage: String) {
+    private fun checkEgl(
+        ok: Boolean,
+        stage: String,
+    ) {
         if (!ok) {
             Log.e(TAG, "EGL 失败：$stage")
             throw IllegalStateException("EGL $stage")

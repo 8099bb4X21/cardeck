@@ -16,7 +16,6 @@ class Iap2LinkChannel(
     name: String = "iap2-link",
     private val log: (String) -> Unit = {},
 ) : Closeable {
-
     private val engine = Iap2LinkEngine()
     private val lock = Object()
     private val controls = LinkedBlockingQueue<ByteArray?>()
@@ -44,7 +43,7 @@ class Iap2LinkChannel(
             )
         }
         engine.onUnknownSessionData = { sessionId, size ->
-            log("LINK: 丢弃未知会话 $sessionId 的数据帧（${size} 字节）")
+            log("LINK: 丢弃未知会话 $sessionId 的数据帧（$size 字节）")
         }
         engine.onFrameReceived = { control, sequence, ack, sessionId, size ->
             // 真车调试关键观测：车机在识别阶段是否回帧、回什么（静默分歧全靠它定位）
@@ -82,11 +81,13 @@ class Iap2LinkChannel(
     }
 
     /** 对端协商的最大控制载荷（已扣除帧头与校验和），协商前为 null。 */
-    fun peerMaxControlPayload(): Int? =
-        synchronized(lock) { engine.peerSynchronization?.maxLength?.minus(Iap2LinkEngine.HEADER_BYTES + 1) }
+    fun peerMaxControlPayload(): Int? = synchronized(lock) { engine.peerSynchronization?.maxLength?.minus(Iap2LinkEngine.HEADER_BYTES + 1) }
 
     /** 排入一个完整控制载荷；链路已死返回 false。窗口满时内部积压，由 ACK 驱动发出。 */
-    fun sendControl(bytes: ByteArray, awaitAck: Boolean = true): Boolean {
+    fun sendControl(
+        bytes: ByteArray,
+        awaitAck: Boolean = true,
+    ): Boolean {
         synchronized(lock) {
             if (terminated) return false
             val accepted = engine.sendControl(bytes, nowMillis(), awaitAck)
@@ -98,12 +99,13 @@ class Iap2LinkChannel(
     /** 取下一个控制载荷；超时或链路结束返回 null。 */
     fun recvControl(timeoutMillis: Long): ByteArray? {
         if (timeoutMillis == 0L && terminated && controls.isEmpty()) return null
-        val polled = try {
-            controls.poll(timeoutMillis, TimeUnit.MILLISECONDS)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            return null
-        }
+        val polled =
+            try {
+                controls.poll(timeoutMillis, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return null
+            }
         return if (polled === null || polled === POISON) null else polled
     }
 
@@ -238,8 +240,11 @@ class Iap2LinkChannel(
         readyLatch.countDown()
         lock.notifyAll()
         runCatching { stream.close() }
-        if (failure != null) log("LINK closed: ${failure.message}")
-        else log("LINK closed")
+        if (failure != null) {
+            log("LINK closed: ${failure.message}")
+        } else {
+            log("LINK closed")
+        }
     }
 
     private fun nowMillis(): Long = System.nanoTime() / 1_000_000L

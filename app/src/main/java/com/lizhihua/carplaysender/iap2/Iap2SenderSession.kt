@@ -164,8 +164,10 @@ class Iap2SenderSession(
         send(Iap2MessageIds.DEVICE_LANGUAGE_UPDATE, Iap2Csm.string(0, "zh-CN"))
         send(Iap2MessageIds.DEVICE_INFORMATION_UPDATE, Iap2Csm.string(0, deviceName))
         val epochSeconds = System.currentTimeMillis() / 1000L
-        val timezoneMinutes = java.util.TimeZone.getDefault()
-            .getOffset(System.currentTimeMillis()) / 60_000
+        val timezoneMinutes =
+            java.util.TimeZone
+                .getDefault()
+                .getOffset(System.currentTimeMillis()) / 60_000
         send(
             Iap2MessageIds.DEVICE_TIME_UPDATE,
             Iap2Csm.param(0, u64Bytes(epochSeconds)) +
@@ -193,26 +195,28 @@ class Iap2SenderSession(
             Iap2MessageIds.CARPLAY_AVAILABILITY,
             Iap2Csm.group(1, Iap2Csm.u8(0, 1), Iap2Csm.string(1, bluetoothMac)),
         )
-        val startSession = expectOrNull(
-            Iap2MessageIds.CARPLAY_START_SESSION,
-            minOf(deadline, System.nanoTime() + START_SESSION_WAIT_NANOS),
-        )
-        val endpoint = if (startSession != null) {
-            parseStartSession(startSession, wifi)
-        } else {
-            log("iap2 0x4301 未到（该车机不发；AirPlay 端点走 mDNS _airplay._tcp）")
-            CarPlayEndpoint(
-                ssid = wifi.ssid,
-                passphrase = wifi.passphrase,
-                channel = wifi.channel,
-                securityType = wifi.securityType,
-                airPlayPort = 0,
-                deviceIdentifier = null,
-                publicKey = null,
-                sourceVersion = null,
-                ipAddresses = emptyList(),
+        val startSession =
+            expectOrNull(
+                Iap2MessageIds.CARPLAY_START_SESSION,
+                minOf(deadline, System.nanoTime() + START_SESSION_WAIT_NANOS),
             )
-        }
+        val endpoint =
+            if (startSession != null) {
+                parseStartSession(startSession, wifi)
+            } else {
+                log("iap2 0x4301 未到（该车机不发；AirPlay 端点走 mDNS _airplay._tcp）")
+                CarPlayEndpoint(
+                    ssid = wifi.ssid,
+                    passphrase = wifi.passphrase,
+                    channel = wifi.channel,
+                    securityType = wifi.securityType,
+                    airPlayPort = 0,
+                    deviceIdentifier = null,
+                    publicKey = null,
+                    sourceVersion = null,
+                    ipAddresses = emptyList(),
+                )
+            }
         if (startSession != null) {
             log(
                 "iap2 rx=0x4301 airPlayPort=${endpoint.airPlayPort} " +
@@ -270,12 +274,16 @@ class Iap2SenderSession(
      * 全部无应答时不抛异常直接返回——我们跳过签名校验，由后续 0x5702 是否获得应答
      * 判定对端是否放行（真车实测无应答后 0xaa05 仍可推进）。
      */
-    private fun runMfiChallenge(deadline: Long, prefer20First: Boolean = false) {
-        val ordered = if (prefer20First) {
-            listOf(MFI_ATTEMPTS[1], MFI_ATTEMPTS[0], MFI_ATTEMPTS[2])
-        } else {
-            MFI_ATTEMPTS
-        }
+    private fun runMfiChallenge(
+        deadline: Long,
+        prefer20First: Boolean = false,
+    ) {
+        val ordered =
+            if (prefer20First) {
+                listOf(MFI_ATTEMPTS[1], MFI_ATTEMPTS[0], MFI_ATTEMPTS[2])
+            } else {
+                MFI_ATTEMPTS
+            }
         var attempts = ordered.filter { it.first !in mfiRejectedLengths }
         if (attempts.isEmpty()) {
             // 所有档位都被拒过：清空重来，避免永久卡死
@@ -318,10 +326,11 @@ class Iap2SenderSession(
                         gotFailure = true
                     }
 
-                    else -> log(
-                        "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
-                            "(${Iap2MessageIds.nameOf(frame.messageId)})",
-                    )
+                    else ->
+                        log(
+                            "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
+                                "(${Iap2MessageIds.nameOf(frame.messageId)})",
+                        )
                 }
                 if (gotResponse || gotFailure) break
             }
@@ -334,12 +343,16 @@ class Iap2SenderSession(
         }
     }
 
-    private fun send(messageId: Int, vararg body: ByteArray) {
-        val joined = when (body.size) {
-            0 -> ByteArray(0)
-            1 -> body[0]
-            else -> body.reduce { acc, bytes -> acc + bytes }
-        }
+    private fun send(
+        messageId: Int,
+        vararg body: ByteArray,
+    ) {
+        val joined =
+            when (body.size) {
+                0 -> ByteArray(0)
+                1 -> body[0]
+                else -> body.reduce { acc, bytes -> acc + bytes }
+            }
         val frame = Iap2Csm.encode(messageId, joined)
         val limit = channel.peerMaxControlPayload() ?: (frame.size - 1).coerceAtLeast(1)
         var offset = 0
@@ -354,7 +367,10 @@ class Iap2SenderSession(
     }
 
     /** [send] 的发后不管变体：链路不因对端不 ACK 此消息而重传/死亡（见 0x4E0E）。 */
-    private fun sendFireAndForget(messageId: Int, body: ByteArray) {
+    private fun sendFireAndForget(
+        messageId: Int,
+        body: ByteArray,
+    ) {
         val frame = Iap2Csm.encode(messageId, body)
         val limit = channel.peerMaxControlPayload() ?: (frame.size - 1).coerceAtLeast(1)
         var offset = 0
@@ -368,12 +384,18 @@ class Iap2SenderSession(
         log("iap2 tx=0x${messageId.toString(16).padStart(4, '0')}（发后不管）")
     }
 
-    private fun expect(messageId: Int, deadline: Long): Iap2Csm.Frame =
+    private fun expect(
+        messageId: Int,
+        deadline: Long,
+    ): Iap2Csm.Frame =
         expectOrNull(messageId, deadline)
             ?: throw IOException("等待 0x${messageId.toString(16)} 超时")
 
     /** 同 [expect]，但超时返回 null（用于可选消息）。非预期帧放回队列供后续消费。 */
-    private fun expectOrNull(messageId: Int, deadlineNanos: Long): Iap2Csm.Frame? {
+    private fun expectOrNull(
+        messageId: Int,
+        deadlineNanos: Long,
+    ): Iap2Csm.Frame? {
         while (true) {
             val remaining = (deadlineNanos - System.nanoTime()) / 1_000_000L
             if (remaining <= 0) return null
@@ -415,18 +437,25 @@ class Iap2SenderSession(
                     return
                 }
 
-                else -> log(
-                    "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
-                        "(${Iap2MessageIds.nameOf(frame.messageId)})",
-                )
+                else ->
+                    log(
+                        "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
+                            "(${Iap2MessageIds.nameOf(frame.messageId)})",
+                    )
             }
         }
     }
 
     private fun recvFrame(timeoutMillis: Long): Iap2Csm.Frame? {
         // 优先：可选等待暂存的非预期帧（保持到达顺序：暂存 > 已解析队列）
-        pendingFrames.firstOrNull()?.let { pendingFrames.removeFirst(); return it }
-        receivedFrames.firstOrNull()?.let { receivedFrames.removeFirst(); return it }
+        pendingFrames.firstOrNull()?.let {
+            pendingFrames.removeFirst()
+            return it
+        }
+        receivedFrames.firstOrNull()?.let {
+            receivedFrames.removeFirst()
+            return it
+        }
         if (timeoutMillis <= 0) return null
         val bytes = channel.recvControl(timeoutMillis) ?: return null
         val frames = parser.offer(bytes)
@@ -450,19 +479,33 @@ class Iap2SenderSession(
         return WifiConfiguration(
             ssid = params[1]?.value?.asStringOrEmpty() ?: "",
             passphrase = params[2]?.value?.asStringOrEmpty() ?: "",
-            securityType = params[3]?.value?.firstOrNull()?.toInt()?.and(0xFF) ?: 0,
-            channel = params[4]?.value?.firstOrNull()?.toInt()?.and(0xFF) ?: 0,
+            securityType =
+                params[3]
+                    ?.value
+                    ?.firstOrNull()
+                    ?.toInt()
+                    ?.and(0xFF) ?: 0,
+            channel =
+                params[4]
+                    ?.value
+                    ?.firstOrNull()
+                    ?.toInt()
+                    ?.and(0xFF) ?: 0,
         )
     }
 
-    private fun parseStartSession(frame: Iap2Csm.Frame, wifi: WifiConfiguration): CarPlayEndpoint {
+    private fun parseStartSession(
+        frame: Iap2Csm.Frame,
+        wifi: WifiConfiguration,
+    ): CarPlayEndpoint {
         val params = Iap2Csm.parseParams(frame.body).associateBy { it.id }
         val wirelessGroup = params[1]?.value
         val wireless = wirelessGroup?.let { Iap2Csm.parseParams(it) }
-        val addresses = wireless
-            ?.filter { it.id == 3 }
-            ?.mapNotNull { param -> param.value.asStringOrEmpty()?.takeIf { it.isNotEmpty() } }
-            .orEmpty()
+        val addresses =
+            wireless
+                ?.filter { it.id == 3 }
+                ?.mapNotNull { param -> param.value.asStringOrEmpty()?.takeIf { it.isNotEmpty() } }
+                .orEmpty()
         return CarPlayEndpoint(
             ssid = wifi.ssid,
             passphrase = wifi.passphrase,
@@ -486,7 +529,12 @@ class Iap2SenderSession(
         for (groupId in intArrayOf(10, 11, 12)) {
             val value = params[groupId]?.value ?: continue
             val sub = Iap2Csm.parseParams(value).associateBy { it.id }
-            val protocolId = sub[0]?.value?.firstOrNull()?.toInt()?.and(0xFF) ?: continue
+            val protocolId =
+                sub[0]
+                    ?.value
+                    ?.firstOrNull()
+                    ?.toInt()
+                    ?.and(0xFF) ?: continue
             val name = sub[1]?.value?.asStringOrEmpty() ?: "?"
             out += protocolId to name
             log("iap2 0x1d01 EA 组件[$groupId] protocol=$protocolId name=$name")
@@ -494,7 +542,8 @@ class Iap2SenderSession(
         return out
     }
 
-    private fun logIdentification(frame: Iap2Csm.Frame) {        val params = Iap2Csm.parseParams(frame.body).associateBy { it.id }
+    private fun logIdentification(frame: Iap2Csm.Frame) {
+        val params = Iap2Csm.parseParams(frame.body).associateBy { it.id }
         val name = params[0]?.value?.asStringOrEmpty()
         val model = params[1]?.value?.asStringOrEmpty()
         val manufacturer = params[2]?.value?.asStringOrEmpty()
@@ -517,13 +566,17 @@ class Iap2SenderSession(
         return remaining.coerceIn(0, 60_000L)
     }
 
-    private fun u64Bytes(value: Long): ByteArray = ByteArray(8) { index ->
-        (value ushr (8 * (7 - index))).toByte()
-    }
+    private fun u64Bytes(value: Long): ByteArray =
+        ByteArray(8) { index ->
+            (value ushr (8 * (7 - index))).toByte()
+        }
 
     /** 设备 UUID：由蓝牙 MAC 确定性派生，跨会话稳定（车机按它标识设备）。 */
     private fun deviceUuid(): String =
-        java.util.UUID.nameUUIDFromBytes(bluetoothMac.toByteArray()).toString().uppercase()
+        java.util.UUID
+            .nameUUIDFromBytes(bluetoothMac.toByteArray())
+            .toString()
+            .uppercase()
 
     private fun ByteArray.asStringOrEmpty(): String? =
         if (isNotEmpty() && last() == 0.toByte()) {

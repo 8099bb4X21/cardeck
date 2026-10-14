@@ -103,18 +103,20 @@ class AudioSender(
     private fun mutePhoneMedia() {
         val ctx = context ?: return
         try {
-            val manager = ctx.getSystemService(android.content.Context.AUDIO_SERVICE)
-                as android.media.AudioManager
+            val manager =
+                ctx.getSystemService(android.content.Context.AUDIO_SERVICE)
+                    as android.media.AudioManager
             if (mutedOriginalVolume >= 0) return
             val prefs = ctx.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
             val saved = prefs.getInt(KEY_SAVED_VOLUME, -1)
             val current = manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
             // 目标恢复值：优先上次未恢复成功的保存值；否则当前值（>0 才可信）
-            val restoreTarget = when {
-                saved > 0 -> saved
-                current > 0 -> current
-                else -> -1
-            }
+            val restoreTarget =
+                when {
+                    saved > 0 -> saved
+                    current > 0 -> current
+                    else -> -1
+                }
             if (restoreTarget > 0) {
                 prefs.edit().putInt(KEY_SAVED_VOLUME, restoreTarget).apply()
             }
@@ -132,13 +134,15 @@ class AudioSender(
     private fun restorePhoneMedia() {
         val ctx = context ?: return
         try {
-            val manager = ctx.getSystemService(android.content.Context.AUDIO_SERVICE)
-                as android.media.AudioManager
+            val manager =
+                ctx.getSystemService(android.content.Context.AUDIO_SERVICE)
+                    as android.media.AudioManager
             val prefs = ctx.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
-            val target = when {
-                mutedOriginalVolume > 0 -> mutedOriginalVolume
-                else -> prefs.getInt(KEY_SAVED_VOLUME, -1)
-            }
+            val target =
+                when {
+                    mutedOriginalVolume > 0 -> mutedOriginalVolume
+                    else -> prefs.getInt(KEY_SAVED_VOLUME, -1)
+                }
             if (target > 0) {
                 manager.setStreamVolume(
                     android.media.AudioManager.STREAM_MUSIC,
@@ -167,16 +171,20 @@ class AudioSender(
             socket = client
 
             val captureConfig = buildCaptureConfig(projection)
-            val audioFormat = AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(SAMPLE_RATE)
-                .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
-                .build()
-            val recorder = AudioRecord.Builder()
-                .setAudioPlaybackCaptureConfig(captureConfig)
-                .setAudioFormat(audioFormat)
-                .setBufferSizeInBytes(PACKET_BYTES * 8)
-                .build()
+            val audioFormat =
+                AudioFormat
+                    .Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(SAMPLE_RATE)
+                    .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+                    .build()
+            val recorder =
+                AudioRecord
+                    .Builder()
+                    .setAudioPlaybackCaptureConfig(captureConfig)
+                    .setAudioFormat(audioFormat)
+                    .setBufferSizeInBytes(PACKET_BYTES * 8)
+                    .build()
             if (recorder.state != AudioRecord.STATE_INITIALIZED) {
                 log("AUDIO: AudioRecord 初始化失败（state=${recorder.state}）")
                 runCatching { recorder.release() }
@@ -243,12 +251,13 @@ class AudioSender(
         var nonceCounter = 0L
         try {
             while (running.get()) {
-                val read = try {
-                    recorder.read(pcm, 0, pcm.size, AudioRecord.READ_BLOCKING)
-                } catch (error: Exception) {
-                    log("AUDIO: 采集读取异常 - ${error.message}")
-                    break
-                }
+                val read =
+                    try {
+                        recorder.read(pcm, 0, pcm.size, AudioRecord.READ_BLOCKING)
+                    } catch (error: Exception) {
+                        log("AUDIO: 采集读取异常 - ${error.message}")
+                        break
+                    }
                 if (read < 0) {
                     readFailures++
                     if (readFailures == 1 || readFailures % 100 == 0) {
@@ -317,7 +326,10 @@ class AudioSender(
         return wire
     }
 
-    private fun buildRtpHeader(sequence: Int, timestamp: Long): ByteArray {
+    private fun buildRtpHeader(
+        sequence: Int,
+        timestamp: Long,
+    ): ByteArray {
         val header = ByteArray(RTP_HEADER_LEN)
         header[0] = 0x80.toByte() // version=2
         header[1] = PAYLOAD_TYPE.toByte()

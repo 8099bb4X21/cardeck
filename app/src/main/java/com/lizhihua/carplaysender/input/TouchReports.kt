@@ -26,11 +26,15 @@ object TouchReports {
     )
 
     /** 按 uuid 选择解析器；未知 uuid 返回 null（调用方记日志）。 */
-    fun parseByUuid(uuid: String?, report: ByteArray): List<Contact>? = when (uuid) {
-        TOUCH_UUID_HEX -> parse(report)
-        AUDI_TOUCH_UUID_HEX -> parseSingleTouch(report)
-        else -> null
-    }
+    fun parseByUuid(
+        uuid: String?,
+        report: ByteArray,
+    ): List<Contact>? =
+        when (uuid) {
+            TOUCH_UUID_HEX -> parse(report)
+            AUDI_TOUCH_UUID_HEX -> parseSingleTouch(report)
+            else -> null
+        }
 
     fun parse(report: ByteArray): List<Contact> {
         if (report.size < SLOTS * BYTES_PER_FINGER) return emptyList()
@@ -58,6 +62,8 @@ object TouchReports {
         )
     }
 
-    private fun readU16Le(source: ByteArray, offset: Int): Int =
-        (source[offset].toInt() and 0xFF) or ((source[offset + 1].toInt() and 0xFF) shl 8)
+    private fun readU16Le(
+        source: ByteArray,
+        offset: Int,
+    ): Int = (source[offset].toInt() and 0xFF) or ((source[offset + 1].toInt() and 0xFF) shl 8)
 }

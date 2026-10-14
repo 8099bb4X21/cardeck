@@ -6,7 +6,6 @@ import android.media.MediaFormat
 import android.view.Surface
 import com.lizhihua.carplaysender.airplay.AirPlayCrypto
 import java.io.ByteArrayOutputStream
-import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -58,12 +57,13 @@ class VideoSender(
             socket = client
             log("VIDEO: TCP 已连通 $host:$dataPort，启动编码器 ${width}x$height@30")
 
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, 4_000_000)
-                setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-            }
+            val format =
+                MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                    setInteger(MediaFormat.KEY_BIT_RATE, 4_000_000)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                }
             val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             val surface = codec.createInputSurface()
@@ -105,11 +105,12 @@ class VideoSender(
         val bufferInfo = MediaCodec.BufferInfo()
         try {
             while (running.get()) {
-                val index = try {
-                    codec.dequeueOutputBuffer(bufferInfo, 10_000)
-                } catch (_: Exception) {
-                    break
-                }
+                val index =
+                    try {
+                        codec.dequeueOutputBuffer(bufferInfo, 10_000)
+                    } catch (_: Exception) {
+                        break
+                    }
                 when {
                     index == MediaCodec.INFO_TRY_AGAIN_LATER -> continue
 
@@ -136,7 +137,11 @@ class VideoSender(
         }
     }
 
-    private fun sendVideoConfig(buffer: java.nio.ByteBuffer, size: Int, output: java.io.OutputStream) {
+    private fun sendVideoConfig(
+        buffer: java.nio.ByteBuffer,
+        size: Int,
+        output: java.io.OutputStream,
+    ) {
         val annexB = ByteArray(size)
         buffer.get(annexB)
         val nalUnits = splitAnnexB(annexB)
@@ -204,7 +209,10 @@ class VideoSender(
     }
 
     /** 128 字节消息头：u32LE body 长度、opcode、NTP 32.32 LE 时间戳，其余为零。 */
-    private fun buildHeader(opcode: Int, bodyLength: Int): ByteArray {
+    private fun buildHeader(
+        opcode: Int,
+        bodyLength: Int,
+    ): ByteArray {
         val header = ByteArray(HEADER_LEN)
         header[0] = (bodyLength and 0xFF).toByte()
         header[1] = ((bodyLength ushr 8) and 0xFF).toByte()
@@ -221,7 +229,12 @@ class VideoSender(
         return header
     }
 
-    private fun writeMessage(opcode: Int, body: ByteArray, declaredLength: Int, output: java.io.OutputStream) {
+    private fun writeMessage(
+        opcode: Int,
+        body: ByteArray,
+        declaredLength: Int,
+        output: java.io.OutputStream,
+    ) {
         output.write(buildHeader(opcode, declaredLength))
         output.write(body)
         output.flush()

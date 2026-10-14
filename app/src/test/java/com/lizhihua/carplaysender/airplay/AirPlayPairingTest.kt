@@ -14,7 +14,6 @@ import java.security.SecureRandom
  * 且双方派生的控制密钥方向一致。
  */
 class AirPlayPairingTest {
-
     private val random = SecureRandom()
 
     @Test
@@ -43,12 +42,13 @@ class AirPlayPairingTest {
     @Test
     fun tlv8FragmentationRoundTrip() {
         val big = ByteArray(600) { (it % 251).toByte() }
-        val encoded = Tlv8.encode(
-            listOf(
-                Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(1)),
-                Tlv8.Item(Tlv8.TYPE_PUBLIC_KEY, big),
-            ),
-        )
+        val encoded =
+            Tlv8.encode(
+                listOf(
+                    Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(1)),
+                    Tlv8.Item(Tlv8.TYPE_PUBLIC_KEY, big),
+                ),
+            )
         val decoded = Tlv8.decode(encoded)
         assertEquals(1, decoded[Tlv8.TYPE_STATE]?.firstOrNull()?.toInt())
         assertArrayEquals(big, decoded[Tlv8.TYPE_PUBLIC_KEY])
@@ -78,22 +78,27 @@ class AirPlayPairingTest {
         private var pvShared = ByteArray(0)
         private var pvEncryptionKey = ByteArray(0)
 
-        fun handle(path: String, body: ByteArray): ByteArray {
+        fun handle(
+            path: String,
+            body: ByteArray,
+        ): ByteArray {
             val tlv = Tlv8.decode(body)
             val state = tlv[Tlv8.TYPE_STATE]?.firstOrNull()?.toInt()?.and(0xFF) ?: 0
             return when (path) {
-                "/pair-setup" -> when (state) {
-                    1 -> setupM2()
-                    3 -> setupM4(tlv)
-                    5 -> setupM6(tlv)
-                    else -> error(state)
-                }
+                "/pair-setup" ->
+                    when (state) {
+                        1 -> setupM2()
+                        3 -> setupM4(tlv)
+                        5 -> setupM6(tlv)
+                        else -> error(state)
+                    }
 
-                "/pair-verify" -> when (state) {
-                    1 -> verifyM2(tlv)
-                    3 -> verifyM4(tlv)
-                    else -> error(state)
-                }
+                "/pair-verify" ->
+                    when (state) {
+                        1 -> verifyM2(tlv)
+                        3 -> verifyM4(tlv)
+                        else -> error(state)
+                    }
 
                 else -> error(state)
             }
@@ -102,12 +107,23 @@ class AirPlayPairingTest {
         private fun setupM2(): ByteArray {
             salt = ByteArray(16).also(random::nextBytes)
             val identifier = Srp6aClient.USERNAME.toByteArray()
-            val x = Srp6aClient.toBigInt(
-                AirPlayCrypto.sha512(salt, AirPlayCrypto.sha512(identifier, byteArrayOf(':'.code.toByte()), Srp6aClient.SETUP_CODE.toByteArray())),
-            )
+            val x =
+                Srp6aClient.toBigInt(
+                    AirPlayCrypto.sha512(
+                        salt,
+                        AirPlayCrypto.sha512(identifier, byteArrayOf(':'.code.toByte()), Srp6aClient.SETUP_CODE.toByteArray()),
+                    ),
+                )
             verifier = Srp6aClient.generator().modPow(x, Srp6aClient.modulus())
             privateB = Srp6aClient.toBigInt(ByteArray(32).also(random::nextBytes))
-            publicKeyB = (Srp6aClient.multiplier() * verifier + Srp6aClient.generator().modPow(privateB, Srp6aClient.modulus())).mod(Srp6aClient.modulus())
+            publicKeyB =
+                (
+                    Srp6aClient.multiplier() * verifier +
+                        Srp6aClient.generator().modPow(
+                            privateB,
+                            Srp6aClient.modulus(),
+                        )
+                ).mod(Srp6aClient.modulus())
             return Tlv8.encode(
                 listOf(
                     Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(2)),
@@ -132,14 +148,15 @@ class AirPlayPairingTest {
                 hashXor[index] = (hashN[index].toInt() xor hashG[index].toInt()).toByte()
             }
             val identifier = Srp6aClient.USERNAME.toByteArray()
-            val expected = AirPlayCrypto.sha512(
-                hashXor,
-                AirPlayCrypto.sha512(identifier),
-                salt,
-                Srp6aClient.pad(a),
-                Srp6aClient.pad(publicKeyB),
-                sessionKey,
-            )
+            val expected =
+                AirPlayCrypto.sha512(
+                    hashXor,
+                    AirPlayCrypto.sha512(identifier),
+                    salt,
+                    Srp6aClient.pad(a),
+                    Srp6aClient.pad(publicKeyB),
+                    sessionKey,
+                )
             if (!expected.contentEquals(clientProof)) return error(4)
             val serverProof = AirPlayCrypto.sha512(Srp6aClient.pad(a), clientProof, sessionKey)
             return Tlv8.encode(
@@ -167,13 +184,14 @@ class AirPlayPairingTest {
             val accessoryId = pairingId.toByteArray(Charsets.UTF_8)
             val accessorySignKey = hkdf("Pair-Setup-Accessory-Sign-Salt", "Pair-Setup-Accessory-Sign-Info")
             val signature = AirPlayCrypto.ed25519Sign(staticKey.privateKey, accessorySignKey + accessoryId + staticKey.publicKey)
-            val subResponse = Tlv8.encode(
-                listOf(
-                    Tlv8.Item(Tlv8.TYPE_IDENTIFIER, accessoryId),
-                    Tlv8.Item(Tlv8.TYPE_PUBLIC_KEY, staticKey.publicKey),
-                    Tlv8.Item(Tlv8.TYPE_SIGNATURE, signature),
-                ),
-            )
+            val subResponse =
+                Tlv8.encode(
+                    listOf(
+                        Tlv8.Item(Tlv8.TYPE_IDENTIFIER, accessoryId),
+                        Tlv8.Item(Tlv8.TYPE_PUBLIC_KEY, staticKey.publicKey),
+                        Tlv8.Item(Tlv8.TYPE_SIGNATURE, signature),
+                    ),
+                )
             return Tlv8.encode(
                 listOf(
                     Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(6)),
@@ -194,16 +212,18 @@ class AirPlayPairingTest {
             pvEncryptionKey = hkdf("Pair-Verify-Encrypt-Salt", "Pair-Verify-Encrypt-Info")
 
             val accessoryId = pairingId.toByteArray(Charsets.UTF_8)
-            val signature = AirPlayCrypto.ed25519Sign(
-                staticKey.privateKey,
-                pair.publicKey + accessoryId + clientEphemeral,
-            )
-            val sub = Tlv8.encode(
-                listOf(
-                    Tlv8.Item(Tlv8.TYPE_IDENTIFIER, accessoryId),
-                    Tlv8.Item(Tlv8.TYPE_SIGNATURE, signature),
-                ),
-            )
+            val signature =
+                AirPlayCrypto.ed25519Sign(
+                    staticKey.privateKey,
+                    pair.publicKey + accessoryId + clientEphemeral,
+                )
+            val sub =
+                Tlv8.encode(
+                    listOf(
+                        Tlv8.Item(Tlv8.TYPE_IDENTIFIER, accessoryId),
+                        Tlv8.Item(Tlv8.TYPE_SIGNATURE, signature),
+                    ),
+                )
             return Tlv8.encode(
                 listOf(
                     Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(2)),
@@ -237,16 +257,20 @@ class AirPlayPairingTest {
 
         private var pvClientEphemeral: ByteArray? = null
 
-        private fun hkdf(salt: String, info: String): ByteArray {
+        private fun hkdf(
+            salt: String,
+            info: String,
+        ): ByteArray {
             val material = if (pvShared.isNotEmpty()) pvShared else sessionKey
             return AirPlayCrypto.hkdfSha512(material, salt.toByteArray(), info.toByteArray())
         }
 
-        private fun error(state: Int): ByteArray = Tlv8.encode(
-            listOf(
-                Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(state.toByte())),
-                Tlv8.Item(Tlv8.TYPE_ERROR, byteArrayOf(2)),
-            ),
-        )
+        private fun error(state: Int): ByteArray =
+            Tlv8.encode(
+                listOf(
+                    Tlv8.Item(Tlv8.TYPE_STATE, byteArrayOf(state.toByte())),
+                    Tlv8.Item(Tlv8.TYPE_ERROR, byteArrayOf(2)),
+                ),
+            )
     }
 }

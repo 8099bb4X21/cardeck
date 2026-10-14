@@ -54,7 +54,9 @@ class Iap2BluetoothClient(
      * 防止「stop 后线程残活、用户再次启动时新旧两代并发连车机」
      * （2026-10-11 实测：多个僵尸线程并发 RFCOMM 会让车机频繁拆链）。
      */
-    private val generation = java.util.concurrent.atomic.AtomicLong(0)
+    private val generation =
+        java.util.concurrent.atomic
+            .AtomicLong(0)
 
     @Volatile
     private var activeChannel: Iap2LinkChannel? = null
@@ -74,11 +76,12 @@ class Iap2BluetoothClient(
             log("BT-C: 缺少 BLUETOOTH_CONNECT 权限")
             return false
         }
-        val adapter = try {
-            context.getSystemService(BluetoothManager::class.java)?.adapter
-        } catch (_: Exception) {
-            null
-        }
+        val adapter =
+            try {
+                context.getSystemService(BluetoothManager::class.java)?.adapter
+            } catch (_: Exception) {
+                null
+            }
         if (adapter == null || !adapter.isEnabled) {
             log("BT-C: 蓝牙不可用或未开启")
             return false
@@ -96,11 +99,12 @@ class Iap2BluetoothClient(
 
     @SuppressLint("MissingPermission")
     private fun connectLoop(myGeneration: Long) {
-        val adapter = try {
-            context.getSystemService(BluetoothManager::class.java)?.adapter
-        } catch (_: Exception) {
-            null
-        } ?: return
+        val adapter =
+            try {
+                context.getSystemService(BluetoothManager::class.java)?.adapter
+            } catch (_: Exception) {
+                null
+            } ?: return
         var lastFailureLogAt = 0L
         while (running && generation.get() == myGeneration) {
             // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
@@ -121,11 +125,12 @@ class Iap2BluetoothClient(
             var connected: BluetoothSocket? = null
             for (device in candidates) {
                 if (!running || generation.get() != myGeneration) return
-                val name = try {
-                    device.name
-                } catch (_: SecurityException) {
-                    null
-                } ?: device.address
+                val name =
+                    try {
+                        device.name
+                    } catch (_: SecurityException) {
+                        null
+                    } ?: device.address
                 runCatching { adapter.cancelDiscovery() }
                 val socket = tryConnect(device)
                 if (socket != null) {
@@ -161,24 +166,27 @@ class Iap2BluetoothClient(
      */
     @SuppressLint("MissingPermission")
     private fun candidateDevices(adapter: android.bluetooth.BluetoothAdapter): List<BluetoothDevice> {
-        val bonded = try {
-            adapter.bondedDevices?.toList().orEmpty()
-        } catch (_: SecurityException) {
-            emptyList()
-        }
-        val withService = bonded.filter { device ->
-            device.uuids?.any { it.uuid == ACCESSORY_IAP2_UUID } == true
-        }
+        val bonded =
+            try {
+                adapter.bondedDevices?.toList().orEmpty()
+            } catch (_: SecurityException) {
+                emptyList()
+            }
+        val withService =
+            bonded.filter { device ->
+                device.uuids?.any { it.uuid == ACCESSORY_IAP2_UUID } == true
+            }
         return if (withService.isNotEmpty()) withService else bonded
     }
 
     @SuppressLint("MissingPermission")
     private fun tryConnect(device: BluetoothDevice): BluetoothSocket? {
-        val socket = try {
-            device.createRfcommSocketToServiceRecord(ACCESSORY_IAP2_UUID)
-        } catch (error: IOException) {
-            return null
-        }
+        val socket =
+            try {
+                device.createRfcommSocketToServiceRecord(ACCESSORY_IAP2_UUID)
+            } catch (error: IOException) {
+                return null
+            }
         // 连接前就登记：connect() 是阻塞调用（SDP 查询 + 建链最长可达数十秒），
         // stop() 只有能拿到 socket 引用才能 close() 打断它，否则线程会滞留。
         currentSocket.set(socket)
@@ -193,21 +201,27 @@ class Iap2BluetoothClient(
     }
 
     private fun runSession(socket: BluetoothSocket) {
-        val stream = StreamDuplexStream(socket.inputStream, socket.outputStream) {
-            runCatching { socket.close() }
-        }
+        val stream =
+            StreamDuplexStream(socket.inputStream, socket.outputStream) {
+                runCatching { socket.close() }
+            }
         val channel = Iap2LinkChannel(stream, name = "iap2-bt-car") { line -> log(line) }
         activeChannel = channel
         try {
-            val mac = com.lizhihua.carplaysender.util.DeviceIdentity.bluetoothMac(context)
-            val name = com.lizhihua.carplaysender.util.DeviceIdentity.deviceName(context)
-            val session = Iap2SenderSession(
-                channel,
-                { line -> log(line) },
-                mac,
-                name,
-                onWifiCredentials,
-            )
+            val mac =
+                com.lizhihua.carplaysender.util.DeviceIdentity
+                    .bluetoothMac(context)
+            val name =
+                com.lizhihua.carplaysender.util.DeviceIdentity
+                    .deviceName(context)
+            val session =
+                Iap2SenderSession(
+                    channel,
+                    { line -> log(line) },
+                    mac,
+                    name,
+                    onWifiCredentials,
+                )
             val endpoint = session.run(SESSION_TIMEOUT_MILLIS)
             onEndpoint(endpoint)
             session.pumpIncomingForever()

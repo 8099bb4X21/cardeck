@@ -15,7 +15,6 @@ import android.content.pm.ActivityInfo
  * 竖屏检测读启动 Activity 的 screenOrientation（PORTRAIT/REVERSE/SENSOR/USER）。
  */
 object SupersamplePrefs {
-
     const val MODE_AUTO = 0
     const val MODE_ON = 1
     const val MODE_OFF = 2
@@ -24,19 +23,31 @@ object SupersamplePrefs {
     private const val KEY_PREFIX = "ss_"
 
     /** 读偏好（默认自动）。 */
-    fun mode(context: Context, component: android.content.ComponentName): Int =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    fun mode(
+        context: Context,
+        component: android.content.ComponentName,
+    ): Int =
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getInt(KEY_PREFIX + component.flattenToString(), MODE_AUTO)
 
-    fun setMode(context: Context, component: android.content.ComponentName, mode: Int) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    fun setMode(
+        context: Context,
+        component: android.content.ComponentName,
+        mode: Int,
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putInt(KEY_PREFIX + component.flattenToString(), mode)
             .apply()
     }
 
     /** 本次启动是否走超采样应用屏（三态解析后的最终结果）。 */
-    fun shouldSupersample(context: Context, component: android.content.ComponentName): Boolean =
+    fun shouldSupersample(
+        context: Context,
+        component: android.content.ComponentName,
+    ): Boolean =
         when (mode(context, component)) {
             MODE_ON -> true
             MODE_OFF -> false
@@ -44,7 +55,10 @@ object SupersamplePrefs {
         }
 
     /** 自动检测：启动 Activity 是否竖屏锁定（在横屏应用屏上会被 letterbox 的形态）。 */
-    fun isPortraitActivity(context: Context, component: android.content.ComponentName): Boolean =
+    fun isPortraitActivity(
+        context: Context,
+        component: android.content.ComponentName,
+    ): Boolean =
         try {
             val info = context.packageManager.getActivityInfo(component, 0)
             when (info.screenOrientation) {

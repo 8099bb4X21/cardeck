@@ -6,9 +6,14 @@ package com.lizhihua.carplaysender.airplay
  * nonce = 4 字节零 + 8 字节小端计数器，收发方向各自的密钥与计数器独立递增。
  * 单帧明文上限 0x4000，超出自动分帧。
  */
-class ControlCipher(private val readKey: ByteArray, private val writeKey: ByteArray) {
-
-    class Decrypted(val data: ByteArray, val rest: ByteArray)
+class ControlCipher(
+    private val readKey: ByteArray,
+    private val writeKey: ByteArray,
+) {
+    class Decrypted(
+        val data: ByteArray,
+        val rest: ByteArray,
+    )
 
     private var readCounter = 0L
     private var writeCounter = 0L
@@ -36,12 +41,13 @@ class ControlCipher(private val readKey: ByteArray, private val writeKey: ByteAr
         do {
             val chunk = plaintext.copyOfRange(offset, minOf(offset + MAX_PAYLOAD, plaintext.size))
             val header = byteArrayOf(chunk.size.toByte(), (chunk.size ushr 8).toByte())
-            val ciphertextAndTag = AirPlayCrypto.chachaSeal(
-                writeKey,
-                AirPlayCrypto.nonce64(writeCounter),
-                chunk,
-                header,
-            )
+            val ciphertextAndTag =
+                AirPlayCrypto.chachaSeal(
+                    writeKey,
+                    AirPlayCrypto.nonce64(writeCounter),
+                    chunk,
+                    header,
+                )
             output += header
             output += ciphertextAndTag
             writeCounter++
@@ -50,8 +56,10 @@ class ControlCipher(private val readKey: ByteArray, private val writeKey: ByteAr
         return output.reduce { acc, bytes -> acc + bytes }
     }
 
-    private fun readU16Le(source: ByteArray, offset: Int): Int =
-        (source[offset].toInt() and 0xFF) or ((source[offset + 1].toInt() and 0xFF) shl 8)
+    private fun readU16Le(
+        source: ByteArray,
+        offset: Int,
+    ): Int = (source[offset].toInt() and 0xFF) or ((source[offset + 1].toInt() and 0xFF) shl 8)
 
     private companion object {
         const val HEADER_SIZE = 2

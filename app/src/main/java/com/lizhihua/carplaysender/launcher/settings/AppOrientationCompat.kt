@@ -22,14 +22,19 @@ object AppOrientationCompat {
     /** 偏好键统一按「包名」存取（am compat 也以包名为对象；读取侧统一 removePrefix 兼容旧键）。 */
     private fun key(pkg: String) = "force_$pkg"
 
-    private fun prefs(context: Context) =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    fun isEnabled(context: Context, pkg: String): Boolean =
-        prefs(context).getBoolean(key(pkg), false)
+    fun isEnabled(
+        context: Context,
+        pkg: String,
+    ): Boolean = prefs(context).getBoolean(key(pkg), false)
 
     /** 用户开关：写偏好 + 立即写系统覆盖（设置页用）。返回系统写入是否成功。 */
-    fun setEnabled(context: Context, pkg: String, enable: Boolean): Boolean {
+    fun setEnabled(
+        context: Context,
+        pkg: String,
+        enable: Boolean,
+    ): Boolean {
         prefs(context).edit().putBoolean(key(pkg), enable).apply()
         val action = if (enable) "enable" else "disable"
         val ok1 = Shell.exec("am compat $action $CHANGE_UNDEFINED_TO_NOSENSOR $pkg", timeoutMs = 4000).ok
@@ -60,6 +65,9 @@ object AppOrientationCompat {
     }
 
     private fun enabledPkgs(context: Context): List<String> =
-        prefs(context).all.filterValues { it == true }.keys
+        prefs(context)
+            .all
+            .filterValues { it == true }
+            .keys
             .map { it.removePrefix("force_") }
 }

@@ -1,7 +1,5 @@
 package com.lizhihua.carplaysender.launcher
 
-import com.lizhihua.carplaysender.R
-
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -16,6 +14,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import com.lizhihua.carplaysender.R
 
 /**
  * CarPlay dock（独立虚拟屏，含时钟/电量/运行中应用/回桌面）。
@@ -26,7 +25,6 @@ import androidx.appcompat.app.AppCompatActivity
  * 形态由 dock 虚拟屏自身宽高决定（竖条 height>width；横条 width>height），与车机方向自动对齐。
  */
 class DockActivity : AppCompatActivity() {
-
     private var appsContainer: LinearLayout? = null
     private var clockView: TextView? = null
     private var batteryText: TextView? = null
@@ -37,23 +35,27 @@ class DockActivity : AppCompatActivity() {
     private val refreshListener: () -> Unit = { runOnUiThread { refresh() } }
 
     private val pollHandler = Handler(Looper.getMainLooper())
-    private val pollRunnable = object : Runnable {
-        override fun run() {
-            refresh()
-            pollHandler.postDelayed(this, 3_000)
+    private val pollRunnable =
+        object : Runnable {
+            override fun run() {
+                refresh()
+                pollHandler.postDelayed(this, 3_000)
+            }
         }
-    }
 
     private val clockHandler = Handler(Looper.getMainLooper())
-    private val clockTicker = object : Runnable {
-        override fun run() {
-            // 无秒显示（用户要求）：对齐到下一分钟边界刷新，秒内不做无用重绘
-            clockView?.text = android.text.format.DateFormat.format("HH:mm", System.currentTimeMillis())
-            clockView?.let { fitClockText(it) }
-            val now = System.currentTimeMillis()
-            clockHandler.postDelayed(this, 60_000L - now % 60_000L + 80L)
+    private val clockTicker =
+        object : Runnable {
+            override fun run() {
+                // 无秒显示（用户要求）：对齐到下一分钟边界刷新，秒内不做无用重绘
+                clockView?.text =
+                    android.text.format.DateFormat
+                        .format("HH:mm", System.currentTimeMillis())
+                clockView?.let { fitClockText(it) }
+                val now = System.currentTimeMillis()
+                clockHandler.postDelayed(this, 60_000L - now % 60_000L + 80L)
+            }
         }
-    }
 
     /** 壁纸背景（全流画布切片，与桌面同源同路径——交界处逐像素连续）。 */
     private var wallpaperView: ImageView? = null
@@ -65,9 +67,13 @@ class DockActivity : AppCompatActivity() {
     /** dock 外观偏好监听（设置页拖动滑条即时生效）。 */
     private val dockPrefsListener: () -> Unit = { runOnUiThread { applyDockPrefs() } }
 
-    private val batteryReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) = updateBattery(intent)
-    }
+    private val batteryReceiver =
+        object : BroadcastReceiver() {
+            override fun onReceive(
+                context: Context,
+                intent: Intent,
+            ) = updateBattery(intent)
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -105,7 +111,8 @@ class DockActivity : AppCompatActivity() {
         clockView?.post { fitClockText(clockView!!) }
         setupWallpaper()
         // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
-        com.lizhihua.carplaysender.ui.WallpaperStore.addListener(wallpaperListener)
+        com.lizhihua.carplaysender.ui.WallpaperStore
+            .addListener(wallpaperListener)
         refreshWallpaperIfChanged()
         // dock 外观（暗幕/模糊）：应用当前值 + 监听设置页调整
         DockPrefs.addListener(dockPrefsListener)
@@ -118,7 +125,8 @@ class DockActivity : AppCompatActivity() {
         VirtualLauncher.removeRunningAppsListener(refreshListener)
         pollHandler.removeCallbacksAndMessages(null)
         clockHandler.removeCallbacks(clockTicker)
-        com.lizhihua.carplaysender.ui.WallpaperStore.removeListener(wallpaperListener)
+        com.lizhihua.carplaysender.ui.WallpaperStore
+            .removeListener(wallpaperListener)
         DockPrefs.removeListener(dockPrefsListener)
         runCatching { unregisterReceiver(batteryReceiver) }
         super.onDestroy()
@@ -163,9 +171,10 @@ class DockActivity : AppCompatActivity() {
     private fun applyDockPrefs() {
         val scrim = findViewById<View>(R.id.dockScrim) ?: return
         val alpha = (DockPrefs.scrimOpacity(this) * 255 / 100).coerceIn(0, 255)
-        scrim.background = android.graphics.drawable.ColorDrawable(
-            android.graphics.Color.argb(alpha, 0, 0, 0),
-        )
+        scrim.background =
+            android.graphics.drawable.ColorDrawable(
+                android.graphics.Color.argb(alpha, 0, 0, 0),
+            )
         val wallpaper = wallpaperView ?: return
         val percent = DockPrefs.blur(this)
         if (percent <= 0) {
@@ -174,7 +183,9 @@ class DockActivity : AppCompatActivity() {
             val radius = percent / 100f * 40f
             wallpaper.setRenderEffect(
                 android.graphics.RenderEffect.createBlurEffect(
-                    radius, radius, android.graphics.Shader.TileMode.CLAMP,
+                    radius,
+                    radius,
+                    android.graphics.Shader.TileMode.CLAMP,
                 ),
             )
         }
@@ -188,13 +199,14 @@ class DockActivity : AppCompatActivity() {
         wallpaperShownVersion = current
         val params = view.layoutParams as? FrameLayout.LayoutParams ?: return
         Thread({
-            val bitmap = runCatching {
-                com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
-                    this@DockActivity,
-                    params.width,
-                    params.height,
-                )
-            }.getOrNull()
+            val bitmap =
+                runCatching {
+                    com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
+                        this@DockActivity,
+                        params.width,
+                        params.height,
+                    )
+                }.getOrNull()
             if (bitmap != null) {
                 VirtualLauncher.logSink?.invoke(
                     "WALLPAPER-DOCK: bitmap=${bitmap.width}x${bitmap.height} " +
@@ -226,8 +238,9 @@ class DockActivity : AppCompatActivity() {
         if (level < 0 || scale <= 0) return
         val percent = level * 100 / scale
         val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-            status == BatteryManager.BATTERY_STATUS_FULL
+        val charging =
+            status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL
         runOnUiThread {
             batteryText?.text = (if (charging) "⚡" else "") + "$percent%"
             val bar = batteryBar
@@ -236,10 +249,12 @@ class DockActivity : AppCompatActivity() {
                 bar.post {
                     val width = bar.width
                     if (width > 0) {
-                        fill.layoutParams = (fill.layoutParams as FrameLayout.LayoutParams).apply {
-                            this.width = (width * percent / 100)
-                                .coerceAtLeast((3 * resources.displayMetrics.density).toInt())
-                        }
+                        fill.layoutParams =
+                            (fill.layoutParams as FrameLayout.LayoutParams).apply {
+                                this.width =
+                                    (width * percent / 100)
+                                        .coerceAtLeast((3 * resources.displayMetrics.density).toInt())
+                            }
                     }
                 }
                 fill.setBackgroundColor(if (percent <= 20) 0xFFFF6B6B.toInt() else 0xFF34C759.toInt())
@@ -251,9 +266,10 @@ class DockActivity : AppCompatActivity() {
 
     private fun refresh() {
         val container = appsContainer ?: return
-        val current = synchronized(VirtualLauncher.runningApps) {
-            VirtualLauncher.runningApps.map { it.flattenToString() }
-        }
+        val current =
+            synchronized(VirtualLauncher.runningApps) {
+                VirtualLauncher.runningApps.map { it.flattenToString() }
+            }
         if (current == lastRendered) return
         lastRendered = current
         container.removeAllViews()

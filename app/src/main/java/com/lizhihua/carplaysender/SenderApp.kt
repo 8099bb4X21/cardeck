@@ -22,16 +22,21 @@ class SenderApp : Application() {
             // 不调用 previous：默认处理器会 killProcess 杀死整个 app
         }
         // 应用安装/卸载/更新 → 桌面与车机设置的共享应用清单缓存失效
-        val packageFilter = IntentFilter().apply {
-            addAction(Intent.ACTION_PACKAGE_ADDED)
-            addAction(Intent.ACTION_PACKAGE_REMOVED)
-            addAction(Intent.ACTION_PACKAGE_REPLACED)
-            addDataScheme("package")
-        }
+        val packageFilter =
+            IntentFilter().apply {
+                addAction(Intent.ACTION_PACKAGE_ADDED)
+                addAction(Intent.ACTION_PACKAGE_REMOVED)
+                addAction(Intent.ACTION_PACKAGE_REPLACED)
+                addDataScheme("package")
+            }
         registerReceiver(
             object : BroadcastReceiver() {
-                override fun onReceive(context: Context, intent: Intent) {
-                    com.lizhihua.carplaysender.launcher.VirtualLauncher.invalidateAppsCache()
+                override fun onReceive(
+                    context: Context,
+                    intent: Intent,
+                ) {
+                    com.lizhihua.carplaysender.launcher.VirtualLauncher
+                        .invalidateAppsCache()
                     Log.i(TAG, "应用清单缓存已失效（包变化）")
                 }
             },

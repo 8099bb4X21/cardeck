@@ -20,7 +20,6 @@ package com.lizhihua.carplaysender.iap2
  * ">BBHHHBB"：version=1, maxOutgoing, maxLen, retransTimeout, ackTimeout, maxRetrans, maxAck）。
  */
 object Iap2LinkPacket {
-
     const val START_DATA = 0xFF5A
     const val START_SYN = 0xFF55
 
@@ -45,6 +44,7 @@ object Iap2LinkPacket {
     ) {
         val isSyn: Boolean get() = control and CTRL_SYN != 0
         val isAck: Boolean get() = control and CTRL_ACK != 0
+
         override fun equals(other: Any?): Boolean =
             other is LinkPacket &&
                 other.control == control &&
@@ -53,18 +53,25 @@ object Iap2LinkPacket {
                 other.sessionId == sessionId &&
                 other.payload.contentEquals(payload)
 
-        override fun hashCode(): Int =
-            control * 31 + seq * 961 + ack * 31 + sessionId + payload.contentHashCode()
+        override fun hashCode(): Int = control * 31 + seq * 961 + ack * 31 + sessionId + payload.contentHashCode()
     }
 
     /** 所有字节（含校验和）相加 mod 256 应为 0；因此校验和 = -(载荷和) & 0xFF。 */
-    fun checksum(bytes: ByteArray, from: Int = 0, to: Int = bytes.size): Int {
+    fun checksum(
+        bytes: ByteArray,
+        from: Int = 0,
+        to: Int = bytes.size,
+    ): Int {
         var sum = 0
         for (index in from until to) sum += bytes[index].toInt() and 0xFF
         return (-sum) and 0xFF
     }
 
-    fun verify(bytes: ByteArray, from: Int = 0, to: Int = bytes.size): Boolean {
+    fun verify(
+        bytes: ByteArray,
+        from: Int = 0,
+        to: Int = bytes.size,
+    ): Boolean {
         var sum = 0
         for (index in from until to) sum += bytes[index].toInt() and 0xFF
         return sum and 0xFF == 0
@@ -102,10 +109,16 @@ object Iap2LinkPacket {
         )
     }
 
-    private fun readU16(bytes: ByteArray, offset: Int): Int =
-        ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
+    private fun readU16(
+        bytes: ByteArray,
+        offset: Int,
+    ): Int = ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
 
-    private fun writeU16(bytes: ByteArray, offset: Int, value: Int) {
+    private fun writeU16(
+        bytes: ByteArray,
+        offset: Int,
+        value: Int,
+    ) {
         bytes[offset] = (value ushr 8).toByte()
         bytes[offset + 1] = value.toByte()
     }

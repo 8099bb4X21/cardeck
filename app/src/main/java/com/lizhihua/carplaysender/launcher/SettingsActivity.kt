@@ -1,24 +1,21 @@
 package com.lizhihua.carplaysender.launcher
 
-import com.lizhihua.carplaysender.R
-import com.lizhihua.carplaysender.launcher.settings.SettingsMenus
-import com.lizhihua.carplaysender.launcher.settings.SettingsToastHost
-
 import android.os.Bundle
-import android.view.View
-import android.view.ViewGroup
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
+import com.lizhihua.carplaysender.R
+import com.lizhihua.carplaysender.launcher.settings.SettingsMenus
+import com.lizhihua.carplaysender.launcher.settings.SettingsToastHost
 
 /**
  * 车机设置（双栏宿主：左菜单 / 右内容 Fragment 容器）。
  * 内容页以 Fragment 实现（settings 包），车机双栏与手机侧二级菜单共用同一套面板。
  */
-class SettingsActivity : AppCompatActivity(), SettingsToastHost {
-
+class SettingsActivity :
+    AppCompatActivity(),
+    SettingsToastHost {
     private var toastView: TextView? = null
     private val menus = mutableListOf<LinearLayout>()
     private var currentMenu = -1
@@ -35,13 +32,14 @@ class SettingsActivity : AppCompatActivity(), SettingsToastHost {
 
     /** 从 XML 菜单条目收集（按 id 顺序即菜单顺序）。 */
     private fun collectMenus() {
-        val ids = intArrayOf(
-            R.id.menuDesktopApps,
-            R.id.menuSupersample,
-            R.id.menuOrientation,
-            R.id.menuDock,
-            R.id.menuDefaultMap,
-        )
+        val ids =
+            intArrayOf(
+                R.id.menuDesktopApps,
+                R.id.menuSupersample,
+                R.id.menuOrientation,
+                R.id.menuDock,
+                R.id.menuDefaultMap,
+            )
         ids.forEach { id -> menus.add(findViewById<LinearLayout>(id)) }
         menus.forEachIndexed { index, menu ->
             menu.setOnClickListener { showMenu(index) }
@@ -57,7 +55,8 @@ class SettingsActivity : AppCompatActivity(), SettingsToastHost {
         currentMenu = index
         applyMenuStyle(index)
         val fragment = fragmentFor(index)
-        supportFragmentManager.beginTransaction()
+        supportFragmentManager
+            .beginTransaction()
             .replace(R.id.settingsContainer, fragment)
             .commit()
     }
@@ -65,23 +64,25 @@ class SettingsActivity : AppCompatActivity(), SettingsToastHost {
     private fun restoreCurrentMenu() {
         currentMenu = -1
         val restored = supportFragmentManager.findFragmentById(R.id.settingsContainer)
-        val index = when (restored) {
-            is com.lizhihua.carplaysender.launcher.settings.DesktopPanelFragment -> SettingsMenus.DESKTOP
-            is com.lizhihua.carplaysender.launcher.settings.SupersamplePanelFragment -> SettingsMenus.SUPERSAMPLE
-            is com.lizhihua.carplaysender.launcher.settings.OrientationPanelFragment -> SettingsMenus.ORIENTATION
-            is com.lizhihua.carplaysender.launcher.settings.DockPanelFragment -> SettingsMenus.DOCK
-            is com.lizhihua.carplaysender.launcher.settings.DefaultMapPanelFragment -> SettingsMenus.DEFAULT_MAP
-            else -> 0
-        }
+        val index =
+            when (restored) {
+                is com.lizhihua.carplaysender.launcher.settings.DesktopPanelFragment -> SettingsMenus.DESKTOP
+                is com.lizhihua.carplaysender.launcher.settings.SupersamplePanelFragment -> SettingsMenus.SUPERSAMPLE
+                is com.lizhihua.carplaysender.launcher.settings.OrientationPanelFragment -> SettingsMenus.ORIENTATION
+                is com.lizhihua.carplaysender.launcher.settings.DockPanelFragment -> SettingsMenus.DOCK
+                is com.lizhihua.carplaysender.launcher.settings.DefaultMapPanelFragment -> SettingsMenus.DEFAULT_MAP
+                else -> 0
+            }
         showMenu(index)
     }
 
     private fun applyMenuStyle(index: Int) {
-        val ripple = runCatching {
-            val out = android.util.TypedValue()
-            theme.resolveAttribute(android.R.attr.selectableItemBackground, out, true)
-            getDrawable(out.resourceId)
-        }.getOrNull()
+        val ripple =
+            runCatching {
+                val out = android.util.TypedValue()
+                theme.resolveAttribute(android.R.attr.selectableItemBackground, out, true)
+                getDrawable(out.resourceId)
+            }.getOrNull()
         menus.forEachIndexed { i, menu ->
             menu.background = if (i == index) getDrawable(R.drawable.bg_menu_item) else ripple
             for (c in 0 until menu.childCount) {
@@ -108,8 +109,18 @@ class SettingsActivity : AppCompatActivity(), SettingsToastHost {
         view.text = text
         view.animate().cancel()
         view.alpha = 0f
-        view.animate().alpha(1f).setDuration(160).withEndAction {
-            view.postDelayed({ view.animate().alpha(0f).setDuration(220).start() }, 1_250)
-        }.start()
+        view
+            .animate()
+            .alpha(1f)
+            .setDuration(160)
+            .withEndAction {
+                view.postDelayed({
+                    view
+                        .animate()
+                        .alpha(0f)
+                        .setDuration(220)
+                        .start()
+                }, 1_250)
+            }.start()
     }
 }

@@ -12,19 +12,23 @@ import java.io.ByteArrayOutputStream
  * CSM 字节流再由链路层 [Iap2LinkPacket]（会话ID 0）分片承载。
  */
 object Iap2Csm {
-
     const val START = 0x4040
     const val HEADER_BYTES = 6
     const val MAX_FRAME_BYTES = 0xFFFF
 
-    data class Frame(val messageId: Int, val body: ByteArray) {
-        override fun equals(other: Any?): Boolean =
-            other is Frame && other.messageId == messageId && other.body.contentEquals(body)
+    data class Frame(
+        val messageId: Int,
+        val body: ByteArray,
+    ) {
+        override fun equals(other: Any?): Boolean = other is Frame && other.messageId == messageId && other.body.contentEquals(body)
 
         override fun hashCode(): Int = messageId * 31 + body.contentHashCode()
     }
 
-    fun encode(messageId: Int, body: ByteArray = ByteArray(0)): ByteArray {
+    fun encode(
+        messageId: Int,
+        body: ByteArray = ByteArray(0),
+    ): ByteArray {
         require(messageId in 0..0xFFFF) { "messageId must fit u16" }
         require(body.size <= MAX_FRAME_BYTES - HEADER_BYTES) { "body too large" }
         val out = ByteArray(HEADER_BYTES + body.size)
@@ -75,14 +79,19 @@ object Iap2Csm {
 
     // ---- TLV 参数体 ----
 
-    data class Param(val id: Int, val value: ByteArray) {
-        override fun equals(other: Any?): Boolean =
-            other is Param && other.id == id && other.value.contentEquals(value)
+    data class Param(
+        val id: Int,
+        val value: ByteArray,
+    ) {
+        override fun equals(other: Any?): Boolean = other is Param && other.id == id && other.value.contentEquals(value)
 
         override fun hashCode(): Int = id * 31 + value.contentHashCode()
     }
 
-    fun param(id: Int, value: ByteArray): ByteArray {
+    fun param(
+        id: Int,
+        value: ByteArray,
+    ): ByteArray {
         require(id in 0..0xFFFF) { "paramId must fit u16" }
         val out = ByteArray(4 + value.size)
         writeU16(out, 0, out.size)
@@ -91,28 +100,43 @@ object Iap2Csm {
         return out
     }
 
-    fun u8(id: Int, value: Int): ByteArray = param(id, byteArrayOf(value.toByte()))
+    fun u8(
+        id: Int,
+        value: Int,
+    ): ByteArray = param(id, byteArrayOf(value.toByte()))
 
-    fun u16(id: Int, value: Int): ByteArray =
-        param(id, byteArrayOf((value ushr 8).toByte(), value.toByte()))
+    fun u16(
+        id: Int,
+        value: Int,
+    ): ByteArray = param(id, byteArrayOf((value ushr 8).toByte(), value.toByte()))
 
-    fun u32(id: Int, value: Long): ByteArray = param(
-        id,
-        byteArrayOf(
-            (value ushr 24).toByte(),
-            (value ushr 16).toByte(),
-            (value ushr 8).toByte(),
-            value.toByte(),
-        ),
-    )
+    fun u32(
+        id: Int,
+        value: Long,
+    ): ByteArray =
+        param(
+            id,
+            byteArrayOf(
+                (value ushr 24).toByte(),
+                (value ushr 16).toByte(),
+                (value ushr 8).toByte(),
+                value.toByte(),
+            ),
+        )
 
-    fun string(id: Int, value: String): ByteArray {
+    fun string(
+        id: Int,
+        value: String,
+    ): ByteArray {
         val nul: Char = 0.toChar()
         require(nul !in value) { "NUL-terminated string must not contain U+0000" }
         return param(id, value.encodeToByteArray() + byteArrayOf(0))
     }
 
-    fun u16List(id: Int, values: IntArray): ByteArray {
+    fun u16List(
+        id: Int,
+        values: IntArray,
+    ): ByteArray {
         val out = ByteArray(values.size * 2)
         values.forEachIndexed { index, value ->
             out[index * 2] = (value ushr 8).toByte()
@@ -121,7 +145,10 @@ object Iap2Csm {
         return param(id, out)
     }
 
-    fun group(id: Int, vararg children: ByteArray): ByteArray {
+    fun group(
+        id: Int,
+        vararg children: ByteArray,
+    ): ByteArray {
         val output = ByteArrayOutputStream()
         children.forEach(output::write)
         return param(id, output.toByteArray())
@@ -139,10 +166,16 @@ object Iap2Csm {
         return params
     }
 
-    private fun readU16(bytes: ByteArray, offset: Int): Int =
-        ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
+    private fun readU16(
+        bytes: ByteArray,
+        offset: Int,
+    ): Int = ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
 
-    private fun writeU16(bytes: ByteArray, offset: Int, value: Int) {
+    private fun writeU16(
+        bytes: ByteArray,
+        offset: Int,
+        value: Int,
+    ) {
         bytes[offset] = (value ushr 8).toByte()
         bytes[offset + 1] = value.toByte()
     }

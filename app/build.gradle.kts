@@ -33,6 +33,14 @@ android {
     buildFeatures {
         aidl = true
     }
+
+    lint {
+        // 新代码引入 lint 问题（error 级）直接使构建失败；存量问题在基线文件中豁免。
+        //  ./gradlew :app:lintDebug          —— 检查（pre-commit 钩子提交前自动执行）
+        //  ./gradlew :app:updateLintBaseline —— 修复问题后重建基线（有意豁免时）
+        abortOnError = true
+        baseline = file("lint-baseline.xml")
+    }
 }
 
 dependencies {

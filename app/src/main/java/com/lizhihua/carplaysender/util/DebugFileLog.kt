@@ -17,14 +17,21 @@ object DebugFileLog {
     private val lock = Any()
     private val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
-    fun append(context: Context, message: String) {
+    fun append(
+        context: Context,
+        message: String,
+    ) {
         try {
             synchronized(lock) {
                 val file = File(context.filesDir, "main_debug.log")
                 if (file.length() > 2_000_000) file.delete()
                 FileWriter(file, true).use { writer ->
-                    writer.append('[').append(timestamp.format(Date())).append("] ")
-                        .append(message).append('\n')
+                    writer
+                        .append('[')
+                        .append(timestamp.format(Date()))
+                        .append("] ")
+                        .append(message)
+                        .append('\n')
                 }
             }
         } catch (_: Throwable) {

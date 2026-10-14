@@ -1,8 +1,8 @@
 package com.lizhihua.carplaysender.input
 
 import android.content.Context
-import com.lizhihua.carplaysender.shizuku.CarInputClient
 import com.lizhihua.carplaysender.input.TouchReports.Contact
+import com.lizhihua.carplaysender.shizuku.CarInputClient
 
 /**
  * 触摸路由：把车机 hidSendReport 触点注入到车机侧虚拟屏（隐形屏模式）。
@@ -14,7 +14,6 @@ import com.lizhihua.carplaysender.input.TouchReports.Contact
  *   已按需移除，2026-10-10。）
  */
 object TouchRouter {
-
     /** 诊断日志出口（由 MainActivity 接到文件日志）。 */
     @Volatile
     var logSink: ((String) -> Unit)? = null
@@ -32,7 +31,10 @@ object TouchRouter {
     private var pressedDisplay = -1
     private var failStreak = 0
 
-    fun onContact(context: Context, contact: Contact) {
+    fun onContact(
+        context: Context,
+        contact: Contact,
+    ) {
         // 空闲槽占位（未按下且 0,0）忽略
         if (!contact.down && contact.xPixels == 0 && contact.yPixels == 0) return
 
@@ -83,11 +85,12 @@ object TouchRouter {
                     targetDisplay = launcher.mapDisplayId
                     // 地图屏按应用区全尺寸创建；分屏时合成器采样其画面中央带区
                     // （宽的一半居中），触摸坐标需加回同一偏移
-                    localX = if (launcher.mapFullscreen) {
-                        tileX
-                    } else {
-                        tileX + launcher.appAreaWidth / 4
-                    }
+                    localX =
+                        if (launcher.mapFullscreen) {
+                            tileX
+                        } else {
+                            tileX + launcher.appAreaWidth / 4
+                        }
                     localY = contact.yPixels
                     routedToMap = true
                 }
@@ -104,27 +107,28 @@ object TouchRouter {
             return
         }
         try {
-            val ok: Boolean = when {
-                contact.down && !pressed -> {
-                    pressed = true
-                    pressedDisplay = targetDisplay
-                    svc.pointerDown(targetDisplay, localX, localY)
-                }
+            val ok: Boolean =
+                when {
+                    contact.down && !pressed -> {
+                        pressed = true
+                        pressedDisplay = targetDisplay
+                        svc.pointerDown(targetDisplay, localX, localY)
+                    }
 
-                contact.down && pressedDisplay != targetDisplay -> {
-                    // 跨屏拖动：先在旧屏收笔，再在新屏按下
-                    runCatching { svc.pointerUp(pressedDisplay, 0, 0) }
-                    pressedDisplay = targetDisplay
-                    svc.pointerDown(targetDisplay, localX, localY)
-                }
+                    contact.down && pressedDisplay != targetDisplay -> {
+                        // 跨屏拖动：先在旧屏收笔，再在新屏按下
+                        runCatching { svc.pointerUp(pressedDisplay, 0, 0) }
+                        pressedDisplay = targetDisplay
+                        svc.pointerDown(targetDisplay, localX, localY)
+                    }
 
-                contact.down -> svc.pointerMove(targetDisplay, localX, localY)
+                    contact.down -> svc.pointerMove(targetDisplay, localX, localY)
 
-                else -> {
-                    pressed = false
-                    svc.pointerUp(pressedDisplay, localX, localY)
+                    else -> {
+                        pressed = false
+                        svc.pointerUp(pressedDisplay, localX, localY)
+                    }
                 }
-            }
             if (!ok) {
                 diag(
                     "注入被拒 disp=$targetDisplay ($localX,$localY) " +
@@ -140,8 +144,9 @@ object TouchRouter {
         // 仪表盘模式：地图 tile 的触摸同时喂给「点按 → 全屏地图」检测器
         // （注入逻辑不受影响；点按 = 快速轻点，平移/双击/双指等地图手势不触发）
         if (!launcher.dockAtBottom) {
-            val tileHit = !inDock && targetDisplay == launcher.mapDisplayId &&
-                launcher.dashboardMode && !launcher.mapFullscreen
+            val tileHit =
+                !inDock && targetDisplay == launcher.mapDisplayId &&
+                    launcher.dashboardMode && !launcher.mapFullscreen
             updateMapTileTap(launcher, contact, tileHit, contact.xPixels - dockW)
         }
     }
@@ -178,7 +183,7 @@ object TouchRouter {
         }
         if (contact.down) {
             if (inTile && tapConfirm != null) {
-                cancelMapTileTap()  // 确认窗内再次按下 = 双击缩放，取消全屏触发
+                cancelMapTileTap() // 确认窗内再次按下 = 双击缩放，取消全屏触发
                 return
             }
             if (tapArmSlot < 0 && inTile) {
@@ -187,23 +192,27 @@ object TouchRouter {
                 tapX = tileX
                 tapY = contact.yPixels
             } else if (tapArmSlot >= 0 &&
-                (!inTile || contact.slot != tapArmSlot ||
-                    kotlin.math.abs(tileX - tapX) + kotlin.math.abs(contact.yPixels - tapY) > TAP_MAX_MOVE_PX)
+                (
+                    !inTile || contact.slot != tapArmSlot ||
+                        kotlin.math.abs(tileX - tapX) + kotlin.math.abs(contact.yPixels - tapY) > TAP_MAX_MOVE_PX
+                )
             ) {
-                cancelMapTileTap()  // 拖动 / 拖出 tile / 双指
+                cancelMapTileTap() // 拖动 / 拖出 tile / 双指
             }
         } else if (tapArmSlot >= 0 && contact.slot == tapArmSlot) {
-            val ok = inTile && now - tapDownAt <= TAP_MAX_MS &&
-                kotlin.math.abs(tileX - tapX) + kotlin.math.abs(contact.yPixels - tapY) <= TAP_MAX_MOVE_PX
+            val ok =
+                inTile && now - tapDownAt <= TAP_MAX_MS &&
+                    kotlin.math.abs(tileX - tapX) + kotlin.math.abs(contact.yPixels - tapY) <= TAP_MAX_MOVE_PX
             cancelMapTileTap()
             if (ok) {
-                tapConfirm = Runnable {
-                    tapConfirm = null
-                    if (launcher.dashboardMode && !launcher.mapFullscreen) {
-                        logSink?.invoke("LAUNCHER: 地图卡片点按 → 全屏地图")
-                        launcher.setMapFullscreen(true)
+                tapConfirm =
+                    Runnable {
+                        tapConfirm = null
+                        if (launcher.dashboardMode && !launcher.mapFullscreen) {
+                            logSink?.invoke("LAUNCHER: 地图卡片点按 → 全屏地图")
+                            launcher.setMapFullscreen(true)
+                        }
                     }
-                }
                 tapHandler.postDelayed(tapConfirm!!, TAP_CONFIRM_MS)
             }
         }

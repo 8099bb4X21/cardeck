@@ -4,21 +4,20 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Base64
 
 /** 用 macOS plutil 生成的真实 bplist00 向量验证解析器。 */
 class BinaryPlistTest {
-
-    private val vector = Base64.getDecoder().decode(
-        "YnBsaXN0MDDXAQIDBAUGBwgJFxgZGhtcYXVkaW9MYXRlbmN5WGRpc3BsYXlzWGRldmljZUlEVW1vZGVsV3Jhd1Np" +
-            "emVYZmVhdHVyZXNUbmFtZRAAoQrWCwwNDg8QERITFBURWlVwc2lkZURvd25bUmVmcmVzaFJhdGVdV2lkdGhQaHlz" +
-            "aWNhbFRVVUlEXkhlaWdodFBoeXNpY2FsWFJvdGF0aW9uCCNATgAAAAAAABEDIF8QJGI3ZTZjNWEwLTExMTEtNDAw" +
-            "MC04MDAwLTAwMDAwMDAwMDAwMREB4AhfEBFGQToyMjo5MDoxMzozQjoxOFpEaVBsYXkyMCwxRgABAgMEBRJWYcyi" +
-            "VkRpUGxheQAIABcAJAAtADYAPABEAE0AUgBUAFYAYwBuAHoAiACNAJwApQCmAK8AsgDZANwA3QDxAPwBAwEIAAAA" +
-            "AAAAAgEAAAAAAAAAHAAAAAAAAAAAAAAAAAAAAQ8=",
-    )
+    private val vector =
+        Base64.getDecoder().decode(
+            "YnBsaXN0MDDXAQIDBAUGBwgJFxgZGhtcYXVkaW9MYXRlbmN5WGRpc3BsYXlzWGRldmljZUlEVW1vZGVsV3Jhd1Np" +
+                "emVYZmVhdHVyZXNUbmFtZRAAoQrWCwwNDg8QERITFBURWlVwc2lkZURvd25bUmVmcmVzaFJhdGVdV2lkdGhQaHlz" +
+                "aWNhbFRVVUlEXkhlaWdodFBoeXNpY2FsWFJvdGF0aW9uCCNATgAAAAAAABEDIF8QJGI3ZTZjNWEwLTExMTEtNDAw" +
+                "MC04MDAwLTAwMDAwMDAwMDAwMREB4AhfEBFGQToyMjo5MDoxMzozQjoxOFpEaVBsYXkyMCwxRgABAgMEBRJWYcyi" +
+                "VkRpUGxheQAIABcAJAAtADYAPABEAE0AUgBUAFYAYwBuAHoAiACNAJwApQCmAK8AsgDZANwA3QDxAPwBAwEIAAAA" +
+                "AAAAAgEAAAAAAAAAHAAAAAAAAAAAAAAAAAAAAQ8=",
+        )
 
     @Test
     fun parsesTopLevelDictScalars() {
@@ -57,15 +56,16 @@ class BinaryPlistTest {
 
     @Test
     fun encodeDecodeRoundTrip() {
-        val original = linkedMapOf<String, Any?>(
-            "deviceID" to "02:00:00:00:00:00",
-            "timingPort" to 0L,
-            "features" to listOf("videoPlayback", "iAPChannel"),
-            "flag" to true,
-            "missing" to null,
-            "blob" to byteArrayOf(1, 2, 3),
-            "ratio" to 3.5,
-        )
+        val original =
+            linkedMapOf<String, Any?>(
+                "deviceID" to "02:00:00:00:00:00",
+                "timingPort" to 0L,
+                "features" to listOf("videoPlayback", "iAPChannel"),
+                "flag" to true,
+                "missing" to null,
+                "blob" to byteArrayOf(1, 2, 3),
+                "ratio" to 3.5,
+            )
         val decoded = BinaryPlist.parse(BinaryPlist.encode(original)) as Map<*, *>
         assertEquals("02:00:00:00:00:00", decoded["deviceID"])
         assertEquals(0L, decoded["timingPort"])
@@ -87,15 +87,51 @@ class BinaryPlistTest {
     @Test
     fun parsesHandCraftedMinimalPlist() {
         // 最小 bplist：唯一对象 true @8，offset 表 @9（1 字节 = 0x08），尾部 trailer
-        val minimal = byteArrayOf(
-            0x62, 0x70, 0x6C, 0x69, 0x73, 0x74, 0x30, 0x30, // bplist00
-            0x09, // object #0 = true
-            0x08, // offset 表：object#0 在偏移 8
-            0, 0, 0, 0, 0, 0, 1, 1, // offsetIntSize=1, objectRefSize=1
-            0, 0, 0, 0, 0, 0, 0, 1, // numObjects=1
-            0, 0, 0, 0, 0, 0, 0, 0, // topObject=0
-            0, 0, 0, 0, 0, 0, 0, 9, // offsetTableOffset=9
-        )
+        val minimal =
+            byteArrayOf(
+                0x62,
+                0x70,
+                0x6C,
+                0x69,
+                0x73,
+                0x74,
+                0x30,
+                0x30, // bplist00
+                0x09, // object #0 = true
+                0x08, // offset 表：object#0 在偏移 8
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1, // offsetIntSize=1, objectRefSize=1
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1, // numObjects=1
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0, // topObject=0
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                9, // offsetTableOffset=9
+            )
         assertEquals(java.lang.Boolean.TRUE, BinaryPlist.parse(minimal))
     }
 }

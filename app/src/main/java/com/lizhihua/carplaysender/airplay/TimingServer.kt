@@ -14,8 +14,9 @@ import java.net.DatagramSocket
  * 线格式（大端）：[0x80][pt][length=7][rtp_ts=0][t1(8)][t2(8)][t3(8)]，
  * pt：0xD2 请求 / 0xD3 应答；时间 = NTP 64 位（秒<<32 | 2^32 分数），取自单调时钟。
  */
-class TimingServer(private val log: (String) -> Unit = {}) {
-
+class TimingServer(
+    private val log: (String) -> Unit = {},
+) {
     private var socket: DatagramSocket? = null
 
     @Volatile
@@ -74,7 +75,10 @@ class TimingServer(private val log: (String) -> Unit = {}) {
          * 构造 timesync 应答；非 timesync 请求返回 null。
          * [nowNanos]：单调时钟当前值（System.nanoTime 语义，可为任意起点——NTP 差值计算只用相对量）。
          */
-        fun buildResponse(request: ByteArray, nowNanos: Long): ByteArray? {
+        fun buildResponse(
+            request: ByteArray,
+            nowNanos: Long,
+        ): ByteArray? {
             if (request.size < PACKET_BYTES) return null
             val version = (request[0].toInt() and 0xFF) shr 6
             if (version != 2) return null

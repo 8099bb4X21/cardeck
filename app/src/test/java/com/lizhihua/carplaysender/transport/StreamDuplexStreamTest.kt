@@ -13,7 +13,6 @@ import java.util.concurrent.TimeUnit
  * 写永久等待——真机蓝牙上实际触发（日志停在 link ready 之后）。
  */
 class StreamDuplexStreamTest {
-
     @Test
     fun writeCompletesWhileReaderBlocksInRead() {
         val source = PipedInputStream(1 shl 16)
@@ -21,18 +20,19 @@ class StreamDuplexStreamTest {
         sink.connect(source)
         val stream = StreamDuplexStream(source, sink)
 
-        val reader = Thread {
-            val buffer = ByteArray(1024)
-            try {
-                while (stream.read(buffer) >= 0) {
-                    // 持续阻塞读，模拟链路通道的读线程
+        val reader =
+            Thread {
+                val buffer = ByteArray(1024)
+                try {
+                    while (stream.read(buffer) >= 0) {
+                        // 持续阻塞读，模拟链路通道的读线程
+                    }
+                } catch (_: Exception) {
                 }
-            } catch (_: Exception) {
+            }.apply {
+                isDaemon = true
+                start()
             }
-        }.apply {
-            isDaemon = true
-            start()
-        }
 
         Thread.sleep(200) // 确保读线程已经阻塞在 read()
 

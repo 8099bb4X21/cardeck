@@ -13,7 +13,12 @@ interface ScreenSource {
     val name: String
 
     /** 绑定（或重绑）编码 Surface；返回是否成功 */
-    fun attach(surface: Surface, width: Int, height: Int, densityDpi: Int): Boolean
+    fun attach(
+        surface: Surface,
+        width: Int,
+        height: Int,
+        densityDpi: Int,
+    ): Boolean
 
     /** 解绑 Surface（保留底层资源以便快速重连） */
     fun detach()

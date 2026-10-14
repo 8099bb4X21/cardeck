@@ -39,9 +39,12 @@ class WifiCarPlayConnector(
     fun gatewayAddress(): String? {
         val network = boundNetwork.get() ?: return null
         return try {
-            connectivityManager.getLinkProperties(network)
-                ?.routes?.firstOrNull { it.isDefaultRoute }
-                ?.gateway?.hostAddress
+            connectivityManager
+                .getLinkProperties(network)
+                ?.routes
+                ?.firstOrNull { it.isDefaultRoute }
+                ?.gateway
+                ?.hostAddress
         } catch (_: Exception) {
             null
         }
@@ -55,7 +58,8 @@ class WifiCarPlayConnector(
     fun localIpv4Address(): String? {
         val network = boundNetwork.get() ?: return null
         return try {
-            connectivityManager.getLinkProperties(network)
+            connectivityManager
+                .getLinkProperties(network)
                 ?.linkAddresses
                 ?.mapNotNull { it.address.hostAddress }
                 ?.firstOrNull { it.contains('.') && !it.contains(':') }
@@ -67,32 +71,37 @@ class WifiCarPlayConnector(
 
     fun request(ssid: String) {
         release()
-        val specifier = WifiNetworkSpecifier.Builder()
-            .setSsid(ssid)
-            .build()
-        val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .setNetworkSpecifier(specifier)
-            .build()
-        val newCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                boundNetwork.set(network)
-                val bound = connectivityManager.bindProcessToNetwork(network)
-                log("WiFi: 网络可用 network=$network bindProcessToNetwork=$bound（请在弹窗输入热点密码）")
-            }
+        val specifier =
+            WifiNetworkSpecifier
+                .Builder()
+                .setSsid(ssid)
+                .build()
+        val request =
+            NetworkRequest
+                .Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .setNetworkSpecifier(specifier)
+                .build()
+        val newCallback =
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    boundNetwork.set(network)
+                    val bound = connectivityManager.bindProcessToNetwork(network)
+                    log("WiFi: 网络可用 network=$network bindProcessToNetwork=$bound（请在弹窗输入热点密码）")
+                }
 
-            override fun onUnavailable() {
-                log("WiFi: 请求失败（超时/用户拒绝/未找到该 SSID）")
-            }
+                override fun onUnavailable() {
+                    log("WiFi: 请求失败（超时/用户拒绝/未找到该 SSID）")
+                }
 
-            override fun onLost(network: Network) {
-                if (boundNetwork.compareAndSet(network, null)) {
-                    connectivityManager.bindProcessToNetwork(null)
-                    log("WiFi: 网络已断开")
+                override fun onLost(network: Network) {
+                    if (boundNetwork.compareAndSet(network, null)) {
+                        connectivityManager.bindProcessToNetwork(null)
+                        log("WiFi: 网络已断开")
+                    }
                 }
             }
-        }
         callback.set(newCallback)
         log("WiFi: 请求加入 \"$ssid\"（若弹出系统面板请选择该热点并输入密码）")
         connectivityManager.requestNetwork(request, newCallback)
@@ -107,30 +116,33 @@ class WifiCarPlayConnector(
      */
     fun bindCurrentWifi(onResult: (Boolean) -> Unit = {}) {
         release()
-        val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
+        val request =
+            NetworkRequest
+                .Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
         var reported = false
-        val newCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                boundNetwork.set(network)
-                val bound = connectivityManager.bindProcessToNetwork(network)
-                log("WiFi: 已绑定当前WiFi网络 $network bindProcessToNetwork=$bound")
-                if (!reported) {
-                    reported = true
-                    onResult(true)
+        val newCallback =
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    boundNetwork.set(network)
+                    val bound = connectivityManager.bindProcessToNetwork(network)
+                    log("WiFi: 已绑定当前WiFi网络 $network bindProcessToNetwork=$bound")
+                    if (!reported) {
+                        reported = true
+                        onResult(true)
+                    }
                 }
-            }
 
-            override fun onUnavailable() {
-                log("WiFi: 没有可用的WiFi连接——请先在系统设置里加入接收端热点")
-                if (!reported) {
-                    reported = true
-                    onResult(false)
+                override fun onUnavailable() {
+                    log("WiFi: 没有可用的WiFi连接——请先在系统设置里加入接收端热点")
+                    if (!reported) {
+                        reported = true
+                        onResult(false)
+                    }
                 }
             }
-        }
         callback.set(newCallback)
         connectivityManager.requestNetwork(request, newCallback)
         Thread({

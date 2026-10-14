@@ -19,115 +19,131 @@ import com.lizhihua.carplaysender.R
  *  CONNECTED  青弧慢呼吸（2.8s）+ 轨道慢旋（9s/圈）
  * 设计稿坐标以 210×176 为基准，按实际宽度等比缩放。
  */
-class SignalWavesView @JvmOverloads constructor(
-    context: Context,
-    attrs: AttributeSet? = null,
-) : View(context, attrs) {
+class SignalWavesView
+    @JvmOverloads
+    constructor(
+        context: Context,
+        attrs: AttributeSet? = null,
+    ) : View(context, attrs) {
+        enum class State { IDLE, CONNECTING, CONNECTED }
 
-    enum class State { IDLE, CONNECTING, CONNECTED }
+        var state: State = State.IDLE
+            private set
 
-    var state: State = State.IDLE
-        private set
+        private val density = resources.displayMetrics.density
 
-    private val density = resources.displayMetrics.density
+        private val orbitPaint =
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                color = currentColor(R.color.m3_orbit)
+                strokeWidth = 1.6f * density
+                pathEffect = DashPathEffect(floatArrayOf(3f * density, 9f * density), 0f)
+            }
+        private val arcPaint =
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+            }
 
-    private val orbitPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        color = currentColor(R.color.m3_orbit)
-        strokeWidth = 1.6f * density
-        pathEffect = DashPathEffect(floatArrayOf(3f * density, 9f * density), 0f)
-    }
-    private val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-    }
+        // 设计稿基准：圆心 (105,88)，三层弧半径 50/68/86，跨 -135°..-45°（12 点方向 ±45°）
+        private val designWidth = 210f
+        private val cx = 105f
+        private val cy = 88f
+        private val radii = floatArrayOf(50f, 68f, 86f)
+        private val arcWidths = floatArrayOf(2.6f, 2.4f, 2.4f)
 
-    // 设计稿基准：圆心 (105,88)，三层弧半径 50/68/86，跨 -135°..-45°（12 点方向 ±45°）
-    private val designWidth = 210f
-    private val cx = 105f
-    private val cy = 88f
-    private val radii = floatArrayOf(50f, 68f, 86f)
-    private val arcWidths = floatArrayOf(2.6f, 2.4f, 2.4f)
+        private var animator: ValueAnimator? = null
+        private var orbitRotation = 0f
 
-    private var animator: ValueAnimator? = null
-    private var orbitRotation = 0f
-
-    fun setState(next: State) {
-        if (state == next) return
-        state = next
-        startAnimation()
-        invalidate()
-    }
-
-    override fun onAttachedToWindow() {
-        super.onAttachedToWindow()
-        startAnimation()
-    }
-
-    override fun onDetachedFromWindow() {
-        animator?.cancel()
-        animator = null
-        super.onDetachedFromWindow()
-    }
-
-    private fun startAnimation() {
-        animator?.cancel()
-        orbitRotation = 0f
-        val idle = state == State.IDLE
-        if (idle) {
+        fun setState(next: State) {
+            if (state == next) return
+            state = next
+            startAnimation()
             invalidate()
-            return
         }
-        val period = if (state == State.CONNECTING) 1_500L else 2_800L
-        val newAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = period
-            repeatCount = ValueAnimator.INFINITE
-            interpolator = LinearInterpolator()
-            addUpdateListener { a ->
-                arcPhase = (a.animatedValue as Float) * 2f * Math.PI.toFloat()
-                val playMs = a.currentPlayTime.toLong()
-                val orbitPeriod = if (state == State.CONNECTING) 2_600L else 9_000L
-                orbitRotation = (playMs % orbitPeriod) * 360f / orbitPeriod
+
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            startAnimation()
+        }
+
+        override fun onDetachedFromWindow() {
+            animator?.cancel()
+            animator = null
+            super.onDetachedFromWindow()
+        }
+
+        private fun startAnimation() {
+            animator?.cancel()
+            orbitRotation = 0f
+            val idle = state == State.IDLE
+            if (idle) {
                 invalidate()
+                return
+            }
+            val period = if (state == State.CONNECTING) 1_500L else 2_800L
+            val newAnim =
+                ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = period
+                    repeatCount = ValueAnimator.INFINITE
+                    interpolator = LinearInterpolator()
+                    addUpdateListener { a ->
+                        arcPhase = (a.animatedValue as Float) * 2f * Math.PI.toFloat()
+                        val playMs = a.currentPlayTime.toLong()
+                        val orbitPeriod = if (state == State.CONNECTING) 2_600L else 9_000L
+                        orbitRotation = (playMs % orbitPeriod) * 360f / orbitPeriod
+                        invalidate()
+                    }
+                }
+            animator = newAnim
+            post(newAnim::start)
+        }
+
+        private var arcPhase = 0f
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val scale = width / designWidth
+            val centerX = cx * scale
+            val centerY = cy * scale
+
+            canvas.save()
+            canvas.rotate(orbitRotation, centerX, centerY)
+            canvas.drawCircle(centerX, centerY, radii[2] * scale, orbitPaint)
+            canvas.restore()
+
+            val baseColor =
+                when (state) {
+                    State.IDLE -> currentColor(R.color.m3_wave_idle)
+                    State.CONNECTING -> currentColor(R.color.m3_wave_connecting)
+                    State.CONNECTED -> currentColor(R.color.m3_wave_connected)
+                }
+            for (i in radii.indices) {
+                // 相位错开：连接中 0.25s/层，已连接 0.4s/层；IDLE 不做明暗变化
+                val offset = if (state == State.CONNECTING) i * 0.25f else i * 0.4f
+                val alpha =
+                    if (state == State.IDLE) {
+                        1f
+                    } else {
+                        0.625f + 0.375f * kotlin.math.sin(arcPhase - offset * 2f * Math.PI.toFloat())
+                    }
+                arcPaint.color = baseColor
+                arcPaint.alpha = (alpha.coerceIn(0.15f, 1f) * 255).toInt()
+                arcPaint.strokeWidth = arcWidths[i] * scale
+                canvas.drawArc(
+                    centerX - radii[i] * scale,
+                    centerY - radii[i] * scale,
+                    centerX + radii[i] * scale,
+                    centerY + radii[i] * scale,
+                    -135f,
+                    90f,
+                    false,
+                    arcPaint,
+                )
             }
         }
-        animator = newAnim
-        post(newAnim::start)
+
+        private fun currentColor(id: Int) =
+            androidx.core.content.ContextCompat
+                .getColor(context, id)
     }
-
-    private var arcPhase = 0f
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        val scale = width / designWidth
-        val centerX = cx * scale
-        val centerY = cy * scale
-
-        canvas.save()
-        canvas.rotate(orbitRotation, centerX, centerY)
-        canvas.drawCircle(centerX, centerY, radii[2] * scale, orbitPaint)
-        canvas.restore()
-
-        val baseColor = when (state) {
-            State.IDLE -> currentColor(R.color.m3_wave_idle)
-            State.CONNECTING -> currentColor(R.color.m3_wave_connecting)
-            State.CONNECTED -> currentColor(R.color.m3_wave_connected)
-        }
-        for (i in radii.indices) {
-            // 相位错开：连接中 0.25s/层，已连接 0.4s/层；IDLE 不做明暗变化
-            val offset = if (state == State.CONNECTING) i * 0.25f else i * 0.4f
-            val alpha = if (state == State.IDLE) 1f else
-                0.625f + 0.375f * kotlin.math.sin(arcPhase - offset * 2f * Math.PI.toFloat())
-            arcPaint.color = baseColor
-            arcPaint.alpha = (alpha.coerceIn(0.15f, 1f) * 255).toInt()
-            arcPaint.strokeWidth = arcWidths[i] * scale
-            canvas.drawArc(
-                centerX - radii[i] * scale, centerY - radii[i] * scale,
-                centerX + radii[i] * scale, centerY + radii[i] * scale,
-                -135f, 90f, false, arcPaint,
-            )
-        }
-    }
-
-    private fun currentColor(id: Int) = androidx.core.content.ContextCompat.getColor(context, id)
-}

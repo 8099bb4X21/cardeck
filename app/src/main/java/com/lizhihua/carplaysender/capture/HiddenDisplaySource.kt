@@ -1,11 +1,8 @@
 package com.lizhihua.carplaysender.capture
 
 import android.content.Context
-import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplay
 import android.view.Surface
 import com.lizhihua.carplaysender.shizuku.CarInputClient
-import com.lizhihua.carplaysender.shizuku.Shell
 import com.lizhihua.carplaysender.shizuku.ShizukuGate
 
 /**
@@ -20,14 +17,18 @@ class HiddenDisplaySource(
     private val context: Context,
     private val log: (String) -> Unit = {},
 ) : ScreenSource {
-
     override val name: String = "隐形屏"
 
     /** 兼容字段：双屏架构下指向应用屏 displayId。 */
     var displayId: Int = -1
         private set
 
-    override fun attach(surface: Surface, width: Int, height: Int, densityDpi: Int): Boolean {
+    override fun attach(
+        surface: Surface,
+        width: Int,
+        height: Int,
+        densityDpi: Int,
+    ): Boolean {
         detach()
         // 逐状态诊断：Shizuku「开着」≠ 已授权本应用（服务端授权必须弹窗点一次）
         when (val gate = ShizukuGate.state(context)) {
@@ -51,21 +52,23 @@ class HiddenDisplaySource(
         }
         CarInputClient.ensure(context)
         // 双屏启动器：GL 合成器（dock 屏 + 应用屏）→ 编码 Surface
-        val ok = com.lizhihua.carplaysender.launcher.VirtualLauncher.attach(
-            context,
-            surface,
-            width,
-            height,
-            densityDpi,
-            log,
-        )
+        val ok =
+            com.lizhihua.carplaysender.launcher.VirtualLauncher.attach(
+                context,
+                surface,
+                width,
+                height,
+                densityDpi,
+                log,
+            )
         displayId =
             if (ok) com.lizhihua.carplaysender.launcher.VirtualLauncher.appDisplayId else -1
         return ok
     }
 
     override fun detach() {
-        com.lizhihua.carplaysender.launcher.VirtualLauncher.detach()
+        com.lizhihua.carplaysender.launcher.VirtualLauncher
+            .detach()
         displayId = -1
     }
 

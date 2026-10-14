@@ -2,7 +2,6 @@ package com.lizhihua.carplaysender.bt
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.content.Context
@@ -61,11 +60,12 @@ class Iap2BluetoothServer(
             log("BT: 缺少 BLUETOOTH_CONNECT 权限")
             return false
         }
-        val adapter = try {
-            context.getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter
-        } catch (_: Exception) {
-            null
-        }
+        val adapter =
+            try {
+                context.getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter
+            } catch (_: Exception) {
+                null
+            }
         if (adapter == null || !adapter.isEnabled) {
             log("BT: 蓝牙不可用或未开启")
             return false
@@ -90,17 +90,19 @@ class Iap2BluetoothServer(
     @SuppressLint("MissingPermission")
     private fun acceptLoop() {
         while (running) {
-            val socket: BluetoothSocket = try {
-                serverSocket.get()?.accept() ?: break
-            } catch (error: IOException) {
-                if (running) log("BT: accept 失败 - ${error.message}")
-                break
-            }
-            val peerName = try {
-                socket.remoteDevice?.name
-            } catch (_: SecurityException) {
-                null
-            } ?: "unknown"
+            val socket: BluetoothSocket =
+                try {
+                    serverSocket.get()?.accept() ?: break
+                } catch (error: IOException) {
+                    if (running) log("BT: accept 失败 - ${error.message}")
+                    break
+                }
+            val peerName =
+                try {
+                    socket.remoteDevice?.name
+                } catch (_: SecurityException) {
+                    null
+                } ?: "unknown"
             log("BT: 接收端已连入 name=$peerName，开始 iAP2 发送端会话")
             Thread({ runSession(socket) }, "iap2-bt-session").apply {
                 isDaemon = true
@@ -110,22 +112,28 @@ class Iap2BluetoothServer(
     }
 
     private fun runSession(socket: BluetoothSocket) {
-        val stream = StreamDuplexStream(socket.inputStream, socket.outputStream) {
-            runCatching { socket.close() }
-        }
+        val stream =
+            StreamDuplexStream(socket.inputStream, socket.outputStream) {
+                runCatching { socket.close() }
+            }
         val channel = Iap2LinkChannel(stream, name = "iap2-bt") { line -> log(line) }
         activeChannel = channel
         BtSessionGate.inboundActive = true
         try {
-            val mac = com.lizhihua.carplaysender.util.DeviceIdentity.bluetoothMac(context)
-            val name = com.lizhihua.carplaysender.util.DeviceIdentity.deviceName(context)
-            val session = Iap2SenderSession(
-                channel,
-                { line -> log(line) },
-                mac,
-                name,
-                onWifiCredentials,
-            )
+            val mac =
+                com.lizhihua.carplaysender.util.DeviceIdentity
+                    .bluetoothMac(context)
+            val name =
+                com.lizhihua.carplaysender.util.DeviceIdentity
+                    .deviceName(context)
+            val session =
+                Iap2SenderSession(
+                    channel,
+                    { line -> log(line) },
+                    mac,
+                    name,
+                    onWifiCredentials,
+                )
             val endpoint = session.run(SESSION_TIMEOUT_MILLIS)
             onEndpoint(endpoint)
             // Phase 2 过渡：保持控制通道存活记录配件消息；AirPlay 配对由

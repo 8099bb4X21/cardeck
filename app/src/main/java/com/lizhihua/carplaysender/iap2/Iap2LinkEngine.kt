@@ -26,7 +26,11 @@ class Iap2LinkEngine(
 ) {
     enum class State { IDLE, NEGOTIATING, NORMAL, DEAD }
 
-    data class SessionDescriptor(val id: Int, val kind: Int, val version: Int)
+    data class SessionDescriptor(
+        val id: Int,
+        val kind: Int,
+        val version: Int,
+    )
 
     data class SynchronizationPayload(
         val maxOutgoing: Int,
@@ -60,11 +64,12 @@ class Iap2LinkEngine(
                 val sessions = ArrayList<SessionDescriptor>()
                 var offset = 10
                 while (offset + 3 <= bytes.size) {
-                    sessions += SessionDescriptor(
-                        u8(bytes[offset]),
-                        u8(bytes[offset + 1]),
-                        u8(bytes[offset + 2]),
-                    )
+                    sessions +=
+                        SessionDescriptor(
+                            u8(bytes[offset]),
+                            u8(bytes[offset + 1]),
+                            u8(bytes[offset + 2]),
+                        )
                     offset += 3
                 }
                 return SynchronizationPayload(
@@ -81,8 +86,13 @@ class Iap2LinkEngine(
     }
 
     sealed class Event {
-        class Control(val bytes: ByteArray) : Event()
-        class Dead(val reason: String?) : Event()
+        class Control(
+            val bytes: ByteArray,
+        ) : Event()
+
+        class Dead(
+            val reason: String?,
+        ) : Event()
     }
 
     private class Packet(
@@ -192,7 +202,10 @@ class Iap2LinkEngine(
         state = State.NEGOTIATING
     }
 
-    fun feed(bytes: ByteArray, nowMillis: Long) {
+    fun feed(
+        bytes: ByteArray,
+        nowMillis: Long,
+    ) {
         if (state == State.DEAD) return
         var offset = 0
         while (offset < bytes.size && state != State.DEAD) {
@@ -220,8 +233,7 @@ class Iap2LinkEngine(
 
     fun pollEvent(): Event? = if (pendingEvents.isEmpty()) null else pendingEvents.removeFirst()
 
-    fun nextDeadlineMillis(): Long? =
-        listOfNotNull(markerDeadline, syncDeadline, retransmitDeadline).minOrNull()
+    fun nextDeadlineMillis(): Long? = listOfNotNull(markerDeadline, syncDeadline, retransmitDeadline).minOrNull()
 
     fun advanceTime(nowMillis: Long) {
         if (state == State.DEAD) return
@@ -258,7 +270,11 @@ class Iap2LinkEngine(
      * 而死亡**。用于 Audi 实测中「接受但从不 ACK」的消息（0x4E0E 传输标识：车机对
      * 其他包毫秒级 ACK、唯独不认它，重传看门狗曾据此在 +20s 杀掉整条蓝牙链路）。
      */
-    fun sendControl(bytes: ByteArray, nowMillis: Long, awaitAck: Boolean = true): Boolean {
+    fun sendControl(
+        bytes: ByteArray,
+        nowMillis: Long,
+        awaitAck: Boolean = true,
+    ): Boolean {
         if (state == State.DEAD) return false
         val limit = (peerSynchronization?.maxLength ?: 0xFFFF) - HEADER_BYTES - 1
         if (limit <= 0 || bytes.size > limit) {
@@ -297,9 +313,12 @@ class Iap2LinkEngine(
             receive.discard(1)
             return true
         }
-        val payload = if (payloadWithChecksum.isEmpty()) null else {
-            payloadWithChecksum.copyOf(payloadWithChecksum.size - 1)
-        }
+        val payload =
+            if (payloadWithChecksum.isEmpty()) {
+                null
+            } else {
+                payloadWithChecksum.copyOf(payloadWithChecksum.size - 1)
+            }
         processFrame(
             control = u8(frame[4]),
             sequence = u8(frame[5]),
@@ -362,10 +381,11 @@ class Iap2LinkEngine(
         if (control and CONTROL_ACKNOWLEDGEMENT != 0) {
             handleAcknowledgement(ack, nowMillis)
         }
-        val isDataFrame = payload != null &&
-            (control and CONTROL_ACKNOWLEDGEMENT) != 0 &&
-            (control and CONTROL_SYNCHRONIZE) == 0 &&
-            (control and CONTROL_EXTENDED_ACKNOWLEDGEMENT) == 0
+        val isDataFrame =
+            payload != null &&
+                (control and CONTROL_ACKNOWLEDGEMENT) != 0 &&
+                (control and CONTROL_SYNCHRONIZE) == 0 &&
+                (control and CONTROL_EXTENDED_ACKNOWLEDGEMENT) == 0
         if (isDataFrame) {
             // 控制消息的会话 ID：本国表 10 或采纳表（Audi=1；测试台两者一致）
             if (sessionId == SESSION_CONTROL || sessionId == adoptedPeerControlSessionId) {
@@ -391,7 +411,10 @@ class Iap2LinkEngine(
         }
     }
 
-    private fun reportUnknownSessionData(sessionId: Int, size: Int) {
+    private fun reportUnknownSessionData(
+        sessionId: Int,
+        size: Int,
+    ) {
         unknownSessionDropped++
         if (unknownSessionDropped <= 5) onUnknownSessionData?.invoke(sessionId, size)
     }
@@ -408,7 +431,10 @@ class Iap2LinkEngine(
         onSynchronizationEchoSent?.invoke()
     }
 
-    private fun handleAcknowledgement(acknowledgement: Int, nowMillis: Long) {
+    private fun handleAcknowledgement(
+        acknowledgement: Int,
+        nowMillis: Long,
+    ) {
         completeNegotiationIfPending(nowMillis)
         lastSentAcknowledged = acknowledgement
         val window = (peerSynchronization?.maxOutgoing ?: maxOutgoing) + ACK_SLACK
@@ -417,7 +443,10 @@ class Iap2LinkEngine(
         drainSendWindow(nowMillis)
     }
 
-    private fun handleData(sequence: Int, payload: ByteArray) {
+    private fun handleData(
+        sequence: Int,
+        payload: ByteArray,
+    ) {
         val distance = sequenceDistance(sequence, lastReceivedInOrder)
         val peerWindow = peerSynchronization?.maxOutgoing ?: maxOutgoing
         if (distance == 0 || distance > peerWindow + ACK_SLACK) {
@@ -479,19 +508,21 @@ class Iap2LinkEngine(
     }
 
     private fun sendSynchronization() {
-        val payload = SynchronizationPayload(
-            maxOutgoing = maxOutgoing,
-            maxLength = 0xFFFF,
-            retransmissionTimeoutMillis = retransmissionTimeoutMillis.toInt().coerceIn(0, 0xFFFF),
-            acknowledgementTimeoutMillis = 500,
-            maxRetransmissions = maxRetransmissions,
-            maxAcknowledgements = 3,
-            sessions = listOf(
-                SessionDescriptor(SESSION_CONTROL, 0, 2),
-                SessionDescriptor(SESSION_EA, 2, 1),
-                SessionDescriptor(SESSION_FILE_TRANSFER, 1, 2),
-            ),
-        ).encode()
+        val payload =
+            SynchronizationPayload(
+                maxOutgoing = maxOutgoing,
+                maxLength = 0xFFFF,
+                retransmissionTimeoutMillis = retransmissionTimeoutMillis.toInt().coerceIn(0, 0xFFFF),
+                acknowledgementTimeoutMillis = 500,
+                maxRetransmissions = maxRetransmissions,
+                maxAcknowledgements = 3,
+                sessions =
+                    listOf(
+                        SessionDescriptor(SESSION_CONTROL, 0, 2),
+                        SessionDescriptor(SESSION_EA, 2, 1),
+                        SessionDescriptor(SESSION_FILE_TRANSFER, 1, 2),
+                    ),
+            ).encode()
         writePacket(payload, sentSequence, CONTROL_SYNCHRONIZE, 0)
     }
 
@@ -499,7 +530,12 @@ class Iap2LinkEngine(
         writePacket(null, sentSequence, CONTROL_ACKNOWLEDGEMENT, 0)
     }
 
-    private fun writePacket(payload: ByteArray?, sequence: Int, control: Int, sessionId: Int) {
+    private fun writePacket(
+        payload: ByteArray?,
+        sequence: Int,
+        control: Int,
+        sessionId: Int,
+    ) {
         if (state == State.DEAD) return
         onFrameSent?.invoke(control, sequence, lastReceivedInOrder, sessionId, payload?.size ?: 0)
         val length = payload?.size?.plus(HEADER_BYTES + 1) ?: HEADER_BYTES
@@ -556,7 +592,11 @@ class Iap2LinkEngine(
 
         operator fun get(index: Int): Byte = bytes[head + index]
 
-        fun append(source: ByteArray, offset: Int, count: Int) {
+        fun append(
+            source: ByteArray,
+            offset: Int,
+            count: Int,
+        ) {
             source.copyInto(bytes, tail, offset, offset + count)
             tail += count
         }
@@ -605,7 +645,11 @@ class Iap2LinkEngine(
         private const val SYNC_RESEND_MILLIS = 500L
         private const val ACK_SLACK = 10
 
-        private fun sequenceDistance(sequence: Int, previous: Int): Int = (sequence - previous) and 0xFF
+        private fun sequenceDistance(
+            sequence: Int,
+            previous: Int,
+        ): Int = (sequence - previous) and 0xFF
+
         private fun nextSequence(sequence: Int): Int = (sequence + 1) and 0xFF
 
         private fun checksumValid(bytes: ByteArray): Boolean {
@@ -614,10 +658,15 @@ class Iap2LinkEngine(
             return sum and 0xFF == 0
         }
 
-        private fun readU16(bytes: ByteArray, offset: Int): Int =
-            (u8(bytes[offset]) shl 8) or u8(bytes[offset + 1])
+        private fun readU16(
+            bytes: ByteArray,
+            offset: Int,
+        ): Int = (u8(bytes[offset]) shl 8) or u8(bytes[offset + 1])
 
-        private fun writeU16(out: ByteArrayOutputStream, value: Int) {
+        private fun writeU16(
+            out: ByteArrayOutputStream,
+            value: Int,
+        ) {
             out.write(value ushr 8)
             out.write(value)
         }

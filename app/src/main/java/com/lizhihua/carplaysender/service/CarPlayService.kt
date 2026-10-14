@@ -16,7 +16,6 @@ import androidx.core.app.NotificationCompat
  * 连接逻辑仍运行在 MainActivity 派生的线程里——本服务负责保住进程。
  */
 class CarPlayService : Service() {
-
     private var wakeLock: android.os.PowerManager.WakeLock? = null
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
@@ -29,18 +28,21 @@ class CarPlayService : Service() {
     private fun acquireLocks() {
         if (wakeLock?.isHeld == true && wifiLock?.isHeld == true) return
         val power = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-        wakeLock = power.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "CarPlaySender:session").apply {
-            setReferenceCounted(false)
-            acquire()
-        }
+        wakeLock =
+            power.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "CarPlaySender:session").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
-        wifiLock = wifi.createWifiLock(
-            android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY,
-            "CarPlaySender:wifi",
-        ).apply {
-            setReferenceCounted(false)
-            acquire()
-        }
+        wifiLock =
+            wifi
+                .createWifiLock(
+                    android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY,
+                    "CarPlaySender:wifi",
+                ).apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
     }
 
     private fun releaseLocks() {
@@ -50,7 +52,11 @@ class CarPlayService : Service() {
         wifiLock = null
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    override fun onStartCommand(
+        intent: Intent?,
+        flags: Int,
+        startId: Int,
+    ): Int {
         // 必须显式指定类型为 connectedDevice：
         // 2 参 startForeground 会拾取 manifest 声明的全部类型（含 mediaProjection），
         // 而 Android 14 启动 mediaProjection 类型要求 AppOps PROJECT_MEDIA（用户当次授权才有效）——
@@ -129,7 +135,8 @@ class CarPlayService : Service() {
     /** 投影生命周期等关键事件：logcat + 文件双写（HKS 环境下文件是唯一可读通道）。 */
     private fun fileLog(message: String) {
         android.util.Log.i("CarPlayService", message)
-        com.lizhihua.carplaysender.util.DebugFileLog.append(this, message)
+        com.lizhihua.carplaysender.util.DebugFileLog
+            .append(this, message)
     }
 
     companion object {
@@ -168,15 +175,17 @@ class CarPlayService : Service() {
             )
         }
         // 点击通知 → 打开 App 主界面（此前缺 setContentIntent，点击无反应）
-        val contentIntent = android.app.PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, com.lizhihua.carplaysender.MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            },
-            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
-        )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val contentIntent =
+            android.app.PendingIntent.getActivity(
+                this,
+                0,
+                Intent(this, com.lizhihua.carplaysender.MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                },
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+            )
+        return NotificationCompat
+            .Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setContentTitle("CarPlay Sender 运行中")
             .setContentText("正在保持与车机的连接，点开应用可查看日志")

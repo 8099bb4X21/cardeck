@@ -15,7 +15,6 @@ interface SettingsToastHost {
  * 应用清单进程级共享（VirtualLauncher 缓存），桌面扫描后各面板秒开。
  */
 abstract class SettingsPanelFragment : Fragment() {
-
     var apps: List<VirtualLauncher.AppEntry> = emptyList()
         private set
 
@@ -43,12 +42,16 @@ abstract class SettingsPanelFragment : Fragment() {
         if (host is SettingsToastHost) {
             host.showToast(text)
         } else {
-            android.widget.Toast.makeText(requireContext(), text, android.widget.Toast.LENGTH_SHORT)
+            android.widget.Toast
+                .makeText(requireContext(), text, android.widget.Toast.LENGTH_SHORT)
                 .show()
         }
     }
 
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+    override fun onViewCreated(
+        view: View,
+        savedInstanceState: Bundle?,
+    ) {
         super.onViewCreated(view, savedInstanceState)
         onViewCreated(view)
     }

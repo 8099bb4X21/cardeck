@@ -5,7 +5,6 @@ import org.junit.Test
 
 /** 控制通道加密帧与参考接收端格式互操作（双向、分帧、分片送达）。 */
 class ControlCipherTest {
-
     @Test
     fun phoneAndReceiverCiphersInteropBothDirections() {
         val phoneWriteKey = ByteArray(32) { it.toByte() }
@@ -13,8 +12,9 @@ class ControlCipherTest {
         val phone = ControlCipher(phoneReadKey, phoneWriteKey)
         val receiver = ControlCipher(phoneWriteKey, phoneReadKey) // 接收端视角：读我写、写我读
 
-        val request = "SETUP rtsp://192.168.149.253:7000/ RTSP/1.0\r\nContent-Length: 4\r\n\r\nbody"
-            .toByteArray()
+        val request =
+            "SETUP rtsp://192.168.149.253:7000/ RTSP/1.0\r\nContent-Length: 4\r\n\r\nbody"
+                .toByteArray()
         assertArrayEquals(request, receiver.decrypt(phone.encrypt(request)).data)
 
         val reply = "RTSP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n".toByteArray()

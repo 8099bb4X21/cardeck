@@ -5,8 +5,6 @@ import com.lizhihua.carplaysender.transport.InMemoryStreamPair
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Test
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * 发送端会话对 mock 配件端的端到端回环测试：
@@ -14,7 +12,6 @@ import java.util.concurrent.TimeUnit
  * 验证 Phase 1 全序列（识别→MFi 跳过→HID→WiFi 配置→CarPlay 启动→通知）。
  */
 class Iap2SenderSessionTest {
-
     @Test
     fun fullBringUpAgainstMockAccessory() {
         val pair = InMemoryStreamPair()
@@ -26,12 +23,13 @@ class Iap2SenderSessionTest {
         accessoryThread.isDaemon = true
         accessoryThread.start()
 
-        val endpoint = Iap2SenderSession(
-            phoneChannel,
-            log = { line -> println("PHONE $line") },
-            bluetoothMac = "34:86:DA:86:BB:96",
-            deviceName = "test-device",
-        ).run(timeoutMillis = 10_000L)
+        val endpoint =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "34:86:DA:86:BB:96",
+                deviceName = "test-device",
+            ).run(timeoutMillis = 10_000L)
 
         assertEquals("MockAP", endpoint.ssid)
         assertEquals("secret-passphrase", endpoint.passphrase)
@@ -47,7 +45,9 @@ class Iap2SenderSessionTest {
     }
 
     /** 按 DiPlay Iap2WirelessControlClient 的时序脚本化应答。 */
-    private class MockAccessory(private val channel: Iap2LinkChannel) {
+    private class MockAccessory(
+        private val channel: Iap2LinkChannel,
+    ) {
         private val parser = Iap2Csm.Parser()
         private val pending = ArrayDeque<Iap2Csm.Frame>()
 
@@ -120,12 +120,16 @@ class Iap2SenderSessionTest {
             expect(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER)
         }
 
-        private fun send(messageId: Int, vararg body: ByteArray) {
-            val joined = when (body.size) {
-                0 -> ByteArray(0)
-                1 -> body[0]
-                else -> body.reduce { acc, bytes -> acc + bytes }
-            }
+        private fun send(
+            messageId: Int,
+            vararg body: ByteArray,
+        ) {
+            val joined =
+                when (body.size) {
+                    0 -> ByteArray(0)
+                    1 -> body[0]
+                    else -> body.reduce { acc, bytes -> acc + bytes }
+                }
             val frame = Iap2Csm.encode(messageId, joined)
             var offset = 0
             val limit = channel.peerMaxControlPayload() ?: 2048
@@ -138,8 +142,9 @@ class Iap2SenderSessionTest {
 
         private fun expect(messageId: Int) {
             println("MOCK expect 0x${messageId.toString(16)}")
-            val frame = recvFrame(10_000)
-                ?: error("mock timed out waiting 0x${messageId.toString(16)}")
+            val frame =
+                recvFrame(10_000)
+                    ?: error("mock timed out waiting 0x${messageId.toString(16)}")
             check(frame.messageId == messageId) {
                 "mock expected 0x${messageId.toString(16)} got 0x${frame.messageId.toString(16)}"
             }
@@ -147,7 +152,10 @@ class Iap2SenderSessionTest {
         }
 
         private fun recvFrame(timeoutMillis: Long): Iap2Csm.Frame? {
-            pending.firstOrNull()?.let { pending.removeFirst(); return it }
+            pending.firstOrNull()?.let {
+                pending.removeFirst()
+                return it
+            }
             val bytes = channel.recvControl(timeoutMillis) ?: return null
             val frames = parser.offer(bytes)
             if (frames.isEmpty()) return null

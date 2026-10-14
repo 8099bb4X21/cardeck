@@ -24,7 +24,6 @@ import com.lizhihua.carplaysender.shizuku.Shell
  * - 触摸由 TouchRouter 按主画面 x 坐标分流：x < dockWidth → dock 屏，否则 → 应用屏（平移）。
  */
 object VirtualLauncher {
-
     private const val TAG = "VirtualLauncher"
 
     /** dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。CarPlay 化后含时钟/电量。 */
@@ -136,8 +135,6 @@ object VirtualLauncher {
     var tileSlideFraction: Float = 0f
         private set
 
-
-
     /** 由 GridActivity 随 pager 滑动驱动 tile 视觉位移。 */
     fun setTileSlide(fraction: Float) {
         tileSlideFraction = fraction
@@ -202,12 +199,13 @@ object VirtualLauncher {
     }
 
     /** 地图应用白名单（优先序：车机版高德 → 手机高德 → 百度 → 腾讯）。 */
-    val MAP_PACKAGES_PRIORITY = listOf(
-        "com.autonavi.amapauto",
-        "com.autonavi.minimap",
-        "com.baidu.BaiduMap",
-        "com.tencent.map",
-    )
+    val MAP_PACKAGES_PRIORITY =
+        listOf(
+            "com.autonavi.amapauto",
+            "com.autonavi.minimap",
+            "com.baidu.BaiduMap",
+            "com.tencent.map",
+        )
 
     fun isMapPackage(packageName: String): Boolean = packageName in MAP_PACKAGES_PRIORITY
 
@@ -215,15 +213,13 @@ object VirtualLauncher {
      * 已安装的默认地图（用户显式设置优先——DefaultMapPrefs；否则按优先序取
      * 第一个已安装者；null = 无任何地图应用）。
      */
-    fun defaultMapComponent(context: Context): ComponentName? =
-        DefaultMapPrefs.resolve(context)
+    fun defaultMapComponent(context: Context): ComponentName? = DefaultMapPrefs.resolve(context)
 
     /**
      * 桌面所在屏相对视频流的渲染倍率（原生屏=1，超采样屏=hiScale）。
      * 桌面内绘制「全流画布壁纸切片」时的尺寸/偏移换算用。
      */
-    fun gridScale(): Float =
-        if (gridDisplayId >= 0 && gridDisplayId == appHiDisplayId) hiScale else 1f
+    fun gridScale(): Float = if (gridDisplayId >= 0 && gridDisplayId == appHiDisplayId) hiScale else 1f
 
     private var dockDisplay: VirtualDisplay? = null
     private var appDisplay: VirtualDisplay? = null
@@ -231,12 +227,10 @@ object VirtualLauncher {
     private var composer: DualDisplayComposer? = null
 
     /** 当前活动应用屏 ID（TouchRouter 注入目标）。 */
-    fun activeAppDisplayId(): Int =
-        if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) appHiDisplayId else appDisplayId
+    fun activeAppDisplayId(): Int = if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) appHiDisplayId else appDisplayId
 
     /** 当前活动应用屏的坐标倍率（超采样屏=hiScale，原生屏=1）。 */
-    fun activeAppScale(): Float =
-        if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) hiScale else 1f
+    fun activeAppScale(): Float = if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) hiScale else 1f
 
     /**
      * 挂载：建 GL 合成器 → 就绪回调里建两块虚拟屏 → 拉起 Dock/Grid。
@@ -288,39 +282,44 @@ object VirtualLauncher {
         // （28dp@560dpi=98px 原始像素，与显示密度无关），在 540px 高的流里占 18%、
         // 手机上仅 3.5%——无法去除（应用内部绘制），只能靠「渲染更多像素再缩回」
         // 把固定像素的占比压小。×2：98px→49px（9%）；超采样高度上限 1620px。
-        val appScaleFactor = if (landscapeApp) {
-            minOf(APP_SUPERSAMPLE, SUPERSAMPLE_MAX_HEIGHT.toFloat() / appHeightPx)
-        } else {
-            1f
-        }
+        val appScaleFactor =
+            if (landscapeApp) {
+                minOf(APP_SUPERSAMPLE, SUPERSAMPLE_MAX_HEIGHT.toFloat() / appHeightPx)
+            } else {
+                1f
+            }
         val appHiWidth = (appWidth * appScaleFactor).toInt()
         val appHiHeight = (appHeightPx * appScaleFactor).toInt()
         this.hiScale = appScaleFactor
-        val appHiDensity = if (landscapeApp) {
-            val letterboxWindowPx = appHiHeight / LETTERBOX_ASPECT_RATIO
-            (letterboxWindowPx / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(180, 640)
-        } else {
-            densityDpi
-        }
+        val appHiDensity =
+            if (landscapeApp) {
+                val letterboxWindowPx = appHiHeight / LETTERBOX_ASPECT_RATIO
+                (letterboxWindowPx / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(180, 640)
+            } else {
+                densityDpi
+            }
         // 原生应用屏密度：与超采样屏保持**相同逻辑尺寸**（应用布局不受所在屏影响，
         // 超采样只是渲染分辨率差异）。横屏：原生 1034×540 @~200dpi = 827×432dp，
         // 与超采样屏（1551×810 @301dpi）的 824×431dp 等值；竖屏车机：直接用流密度。
-        val appNativeDensity = if (landscapeApp) {
-            val hiLogicalHeightDp = appHiHeight * 160f / appHiDensity
-            (appHeightPx * 160f / hiLogicalHeightDp).toInt().coerceIn(160, 640)
-        } else {
-            densityDpi
-        }
+        val appNativeDensity =
+            if (landscapeApp) {
+                val hiLogicalHeightDp = appHiHeight * 160f / appHiDensity
+                (appHeightPx * 160f / hiLogicalHeightDp).toInt().coerceIn(160, 640)
+            } else {
+                densityDpi
+            }
 
         // 等待 Shizuku UserService 绑定（受信虚拟屏需要 shell 权限创建）
         var svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
         if (svc == null &&
-            com.lizhihua.carplaysender.shizuku.ShizukuGate.state(context) ==
+            com.lizhihua.carplaysender.shizuku.ShizukuGate
+                .state(context) ==
             com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
         ) {
             val deadline = SystemClock.uptimeMillis() + 2_500L
             while (svc == null && SystemClock.uptimeMillis() < deadline) {
-                com.lizhihua.carplaysender.shizuku.CarInputClient.ensure(context)
+                com.lizhihua.carplaysender.shizuku.CarInputClient
+                    .ensure(context)
                 Thread.sleep(150)
                 svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
             }
@@ -342,37 +341,62 @@ object VirtualLauncher {
                     val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
                     dm.displays
                         .filter {
-                            it.name == "CarPlayDock" || it.name == "CarPlayApp" ||
-                                it.name == "CarPlayAppHi" || it.name == "CarPlayMap"
-                        }
-                        .forEach { stale ->
+                            it.name == "CarPlayDock" ||
+                                it.name == "CarPlayApp" ||
+                                it.name == "CarPlayAppHi" ||
+                                it.name == "CarPlayMap"
+                        }.forEach { stale ->
                             runCatching { svc!!.releaseDisplay(stale.displayId) }
                                 .onSuccess { log("LAUNCHER: 已释放残留虚拟屏 ${stale.name}#${stale.displayId}") }
                         }
                     Thread.sleep(150) // 等系统完成注销
                     // dock 屏不声明受信：只承载自有 DockActivity，杜绝第三方任务逃逸上来
-                    val dockId = svc!!.createDisplay(
-                        "CarPlayDock", dockWidthPx, dockHeightPx, densityDpi, dockSurface, false,
-                    )
-                    val appId = svc!!.createDisplay(
-                        "CarPlayApp", appWidth, appHeightPx, appNativeDensity, appSurface, true,
-                    )
+                    val dockId =
+                        svc!!.createDisplay(
+                            "CarPlayDock",
+                            dockWidthPx,
+                            dockHeightPx,
+                            densityDpi,
+                            dockSurface,
+                            false,
+                        )
+                    val appId =
+                        svc!!.createDisplay(
+                            "CarPlayApp",
+                            appWidth,
+                            appHeightPx,
+                            appNativeDensity,
+                            appSurface,
+                            true,
+                        )
                     // 超采样屏（竖屏车机无、应用侧回退时也无）
-                    val appHiId = if (appHiSurface != null) {
-                        svc!!.createDisplay(
-                            "CarPlayAppHi", appHiWidth, appHiHeight, appHiDensity, appHiSurface, true,
-                        )
-                    } else {
-                        -1
-                    }
+                    val appHiId =
+                        if (appHiSurface != null) {
+                            svc!!.createDisplay(
+                                "CarPlayAppHi",
+                                appHiWidth,
+                                appHiHeight,
+                                appHiDensity,
+                                appHiSurface,
+                                true,
+                            )
+                        } else {
+                            -1
+                        }
                     // 地图屏（全屏尺寸创建；分屏形态由合成器中央带区采样实现）
-                    val mapId = if (mapSurface != null && !dockAtBottom) {
-                        svc!!.createDisplay(
-                            "CarPlayMap", appWidth, appHeightPx, 200, mapSurface, true,
-                        )
-                    } else {
-                        -1
-                    }
+                    val mapId =
+                        if (mapSurface != null && !dockAtBottom) {
+                            svc!!.createDisplay(
+                                "CarPlayMap",
+                                appWidth,
+                                appHeightPx,
+                                200,
+                                mapSurface,
+                                true,
+                            )
+                        } else {
+                            -1
+                        }
                     if (dockId >= 0 && appId >= 0) {
                         dockDisplayId = dockId
                         appDisplayId = appId
@@ -406,46 +430,51 @@ object VirtualLauncher {
                 // 会话建立：为「强制应用横屏」名单内的应用逐个写入兼容覆盖
                 // （会话结束/断开时由 SessionController 统一复原，见 retireSession/onEnded）
                 runCatching {
-                    val applied = com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat.applyAll(context)
+                    val applied =
+                        com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
+                            .applyAll(context)
                     if (applied > 0) log("ORIENTATION: 已为 $applied 个应用启用强制横屏（会话期间生效）")
                 }
             } else {
                 // 回退：应用侧 PUBLIC 屏（应用内跳转任务会逃逸到手机主屏，尽量可用的降级形态）
                 val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-                dockDisplay = dm.createVirtualDisplay(
-                    "CarPlayDock",
-                    dockWidthPx,
-                    dockHeightPx,
-                    densityDpi,
-                    dockSurface,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                        DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
-                    null,
-                    null,
-                )
-                appDisplay = dm.createVirtualDisplay(
-                    "CarPlayApp",
-                    appWidth,
-                    appHeightPx,
-                    appNativeDensity,
-                    appSurface,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                        DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
-                    null,
-                    null,
-                )
-                if (appHiSurface != null) {
-                    appHiDisplay = dm.createVirtualDisplay(
-                        "CarPlayAppHi",
-                        appHiWidth,
-                        appHiHeight,
-                        appHiDensity,
-                        appHiSurface,
+                dockDisplay =
+                    dm.createVirtualDisplay(
+                        "CarPlayDock",
+                        dockWidthPx,
+                        dockHeightPx,
+                        densityDpi,
+                        dockSurface,
                         DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
                             DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
                         null,
                         null,
                     )
+                appDisplay =
+                    dm.createVirtualDisplay(
+                        "CarPlayApp",
+                        appWidth,
+                        appHeightPx,
+                        appNativeDensity,
+                        appSurface,
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
+                            DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                        null,
+                        null,
+                    )
+                if (appHiSurface != null) {
+                    appHiDisplay =
+                        dm.createVirtualDisplay(
+                            "CarPlayAppHi",
+                            appHiWidth,
+                            appHiHeight,
+                            appHiDensity,
+                            appHiSurface,
+                            DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
+                                DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                            null,
+                            null,
+                        )
                     appHiDisplayId = appHiDisplay?.display?.displayId ?: -1
                 }
                 dockDisplayId = dockDisplay?.display?.displayId ?: -1
@@ -494,7 +523,8 @@ object VirtualLauncher {
             if (appHiDisplayId >= 0) composer.requestActiveApp(true)
             startShizukuHealer()
             // 暗幕组件就绪（常亮+暗幕功能；主界面开关控制启停）
-            com.lizhihua.carplaysender.ui.ScreenDimmer.attach(context)
+            com.lizhihua.carplaysender.ui.ScreenDimmer
+                .attach(context)
             dockOk && gridOk
         } catch (error: IllegalStateException) {
             log("LAUNCHER: GL 合成器启动失败 - ${error.message}")
@@ -508,7 +538,8 @@ object VirtualLauncher {
     private var displaysViaService = false
 
     fun detach() {
-        com.lizhihua.carplaysender.ui.ScreenDimmer.detach()
+        com.lizhihua.carplaysender.ui.ScreenDimmer
+            .detach()
         if (displaysViaService) {
             val svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
             if (svc != null) {
@@ -523,7 +554,10 @@ object VirtualLauncher {
         appContextRef = null
         watchdogActive = false
         // 还原 letterbox 宽高比为系统默认（不把会话调参留在系统里）
-        runCatching { com.lizhihua.carplaysender.shizuku.Shell.exec("cmd window reset-letterbox-style aspectRatio") }
+        runCatching {
+            com.lizhihua.carplaysender.shizuku.Shell
+                .exec("cmd window reset-letterbox-style aspectRatio")
+        }
         runCatching { composer?.stop() }
         composer = null
         runCatching { dockDisplay?.release() }
@@ -555,12 +589,16 @@ object VirtualLauncher {
         streamHeightPx = 0
     }
 
-    private fun startOn(displayId: Int, component: String): Boolean {
+    private fun startOn(
+        displayId: Int,
+        component: String,
+    ): Boolean {
         if (displayId < 0) return false
-        val result = Shell.exec(
-            "am start -n $component --display $displayId --windowingMode 1",
-            timeoutMs = 8000,
-        )
+        val result =
+            Shell.exec(
+                "am start -n $component --display $displayId --windowingMode 1",
+                timeoutMs = 8000,
+            )
         return result.ok && result.output.contains("Starting:", ignoreCase = true)
     }
 
@@ -606,6 +644,7 @@ object VirtualLauncher {
     }
 
     /** 回普通桌面：隐藏地图层并复位全屏标志，桌面恢复全宽图标网格（地图任务保留）。 */
+
     /**
      * 仪表盘模式唯一对账口：置 dashboardMode → 通知（dock 图标/GridActivity pager）
      * → 进入时补地图任务并切 SPLIT，退出时隐藏 tile。
@@ -649,8 +688,11 @@ object VirtualLauncher {
         if (mapDisplayId < 0 || mapFullscreen == fullscreen) return
         mapFullscreen = fullscreen
         composer?.setTileLayout(
-            if (fullscreen) DualDisplayComposer.TileLayout.FULLSCREEN
-            else DualDisplayComposer.TileLayout.SPLIT,
+            if (fullscreen) {
+                DualDisplayComposer.TileLayout.FULLSCREEN
+            } else {
+                DualDisplayComposer.TileLayout.SPLIT
+            },
         )
         notifyMapLayout()
         logSink?.invoke("LAUNCHER: 地图屏 ${if (fullscreen) "全屏" else "分屏"}")
@@ -664,11 +706,12 @@ object VirtualLauncher {
         dashboardMode = false
         notifyDashboard()
         setMapFullscreen(true)
-        val target = if (component.packageName == "com.autonavi.amapauto") {
-            "com.autonavi.amapauto/.MainMapActivity"
-        } else {
-            component.flattenToShortString()
-        }
+        val target =
+            if (component.packageName == "com.autonavi.amapauto") {
+                "com.autonavi.amapauto/.MainMapActivity"
+            } else {
+                component.flattenToShortString()
+            }
         // 同屏已有其他地图任务时清掉（白名单互斥；默认地图任务保留复用）
         val ctx = appContextRef
         val defaultPkg = ctx?.let { defaultMapComponent(it)?.packageName }
@@ -677,10 +720,11 @@ object VirtualLauncher {
                 Shell.exec("am stack remove $taskId", timeoutMs = 4000)
             }
         }
-        val result = Shell.exec(
-            "am start -n $target --display $mapDisplayId -f 0x18000000",
-            timeoutMs = 8000,
-        )
+        val result =
+            Shell.exec(
+                "am start -n $target --display $mapDisplayId -f 0x18000000",
+                timeoutMs = 8000,
+            )
         val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
         logSink?.invoke(
             "LAUNCH(${component.packageName}): → 地图屏全屏 ok=$ok out=${result.output.take(80)}",
@@ -693,7 +737,10 @@ object VirtualLauncher {
     }
 
     /** 指定屏上指定包的任务 ID 列表（清屏用）。 */
-    private fun taskIdsOnDisplayPkg(pkg: String, displayId: Int): List<String> {
+    private fun taskIdsOnDisplayPkg(
+        pkg: String,
+        displayId: Int,
+    ): List<String> {
         val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
         var current = -1
         val ids = ArrayList<String>()
@@ -714,15 +761,17 @@ object VirtualLauncher {
     private fun ensureMapTask() {
         if (mapDisplayId < 0) return
         val ctx = appContextRef ?: return
-        val component = defaultMapComponent(ctx) ?: run {
-            logSink?.invoke("LAUNCHER: 未找到任何地图应用（白名单内）——地图 tile 空")
-            return
-        }
-        val target = if (component.packageName == "com.autonavi.amapauto") {
-            "com.autonavi.amapauto/.MainMapActivity"
-        } else {
-            component.flattenToShortString()
-        }
+        val component =
+            defaultMapComponent(ctx) ?: run {
+                logSink?.invoke("LAUNCHER: 未找到任何地图应用（白名单内）——地图 tile 空")
+                return
+            }
+        val target =
+            if (component.packageName == "com.autonavi.amapauto") {
+                "com.autonavi.amapauto/.MainMapActivity"
+            } else {
+                component.flattenToShortString()
+            }
         // 不带 MULTIPLE_TASK：任务已在地图屏时等价于带回前台
         val result = Shell.exec("am start -n $target --display $mapDisplayId", timeoutMs = 8000)
         logSink?.invoke(
@@ -756,8 +805,10 @@ object VirtualLauncher {
             return launchMapOnMapDisplay(component)
         }
         val ctx = appContextRef
-        val wantHi = ctx != null && appHiDisplayId >= 0 &&
-            SupersamplePrefs.shouldSupersample(ctx, component)
+        val wantHi =
+            ctx != null &&
+                appHiDisplayId >= 0 &&
+                SupersamplePrefs.shouldSupersample(ctx, component)
         val targetDisplay = if (wantHi) appHiDisplayId else appDisplayId
         val onTarget = packagesOnDisplay(component.packageName, targetDisplay)
         if (!onTarget) {
@@ -776,12 +827,13 @@ object VirtualLauncher {
             } else {
                 component.flattenToShortString()
             }
-        val result = if (onTarget) {
-            Shell.exec("am start -n $target --display $targetDisplay", timeoutMs = 8000)
-        } else {
-            // MULTIPLE_TASK：即使该应用在其他屏有任务，也强制在目标屏新建实例
-            Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
-        }
+        val result =
+            if (onTarget) {
+                Shell.exec("am start -n $target --display $targetDisplay", timeoutMs = 8000)
+            } else {
+                // MULTIPLE_TASK：即使该应用在其他屏有任务，也强制在目标屏新建实例
+                Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
+            }
         var ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
         if (!ok && onTarget) {
             // 复用路径失败（任务可能已被系统移走）：退回 MULTIPLE_TASK 新建
@@ -812,22 +864,22 @@ object VirtualLauncher {
         return ok
     }
 
-
     // ICU 汉字→拼音转写（Android 内置，无需第三方拼音库）。
     // "Han-Latin" 输出带声调，追加 Latin-ASCII 去音调（gāo → gao）。
     // Transliterator 非线程安全，统一加锁访问。
     private val hanLatinLock = Any()
     private val hanLatin by lazy {
-        android.icu.text.Transliterator.getInstance("Han-Latin; Latin-ASCII")
+        android.icu.text.Transliterator
+            .getInstance("Han-Latin; Latin-ASCII")
     }
 
-    private fun toLatin(text: String): String = synchronized(hanLatinLock) {
-        runCatching { hanLatin.transliterate(text) }.getOrDefault(text)
-    }
+    private fun toLatin(text: String): String =
+        synchronized(hanLatinLock) {
+            runCatching { hanLatin.transliterate(text) }.getOrDefault(text)
+        }
 
     /** 排序键：全名转拼音小写、仅保留字母数字（数字 < 字母，即 # 组自然在前）。 */
-    private fun pinyinKey(label: String): String =
-        toLatin(label).lowercase().filter { it.isLetterOrDigit() }
+    private fun pinyinKey(label: String): String = toLatin(label).lowercase().filter { it.isLetterOrDigit() }
 
     /** 拼音排序键（设置页等外部列表按字母分组排序用）。 */
     fun sortKeyOf(label: String): String = pinyinKey(label)
@@ -836,8 +888,7 @@ object VirtualLauncher {
     private var appsCache: List<AppEntry>? = null
 
     /** 应用清单缓存（桌面与车机设置共享；安装/卸载广播时失效）。 */
-    fun cachedApps(context: Context): List<AppEntry> =
-        appsCache ?: scanLaunchableApps(context).also { appsCache = it }
+    fun cachedApps(context: Context): List<AppEntry> = appsCache ?: scanLaunchableApps(context).also { appsCache = it }
 
     /**
      * 仅读取共享缓存，**绝不扫描**：设置页等必须在主线程取列表的界面用这个，
@@ -858,11 +909,13 @@ object VirtualLauncher {
 
     private fun scanLaunchableApps(context: Context): List<AppEntry> {
         val pm = context.packageManager
-        val intent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
-            addCategory(android.content.Intent.CATEGORY_LAUNCHER)
-        }
+        val intent =
+            android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
+                addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+            }
         // 拼音键每应用只算一次（此前在比较器里逐对重复转写，150 应用 ≈ 上千次 ICU 调用）
-        return pm.queryIntentActivities(intent, 0)
+        return pm
+            .queryIntentActivities(intent, 0)
             .asSequence()
             .map { it.activityInfo }
             .filter { it.packageName != context.packageName }
@@ -873,12 +926,13 @@ object VirtualLauncher {
                     label = label,
                     icon = info.loadIcon(pm),
                 ) to pinyinKey(label)
-            }
-            .take(200)
+            }.take(200)
             .toList()
             .sortedBy { it.second }
             .map { it.first }
-    }    /** 字母导航条分组键：数字→"#"，ASCII 字母→大写字母，汉字→拼音首字母。 */
+    }
+
+    /** 字母导航条分组键：数字→"#"，ASCII 字母→大写字母，汉字→拼音首字母。 */
     fun indexLetterOf(label: String): String {
         val first = label.firstOrNull() ?: return "#"
         return when {
@@ -919,32 +973,37 @@ object VirtualLauncher {
     private fun startShizukuHealer() {
         if (watchdogActive) return
         watchdogActive = true
-        watchdogThread = Thread({
-            while (watchdogActive && appDisplayId >= 0) {
-                try {
-                    val ctx = appContextRef
-                    if (ctx != null && com.lizhihua.carplaysender.shizuku.CarInputClient.service == null) {
-                        runCatching {
-                            Shell.exec("am unfreeze moe.shizuku.privileged.api", timeoutMs = 2500)
+        watchdogThread =
+            Thread({
+                while (watchdogActive && appDisplayId >= 0) {
+                    try {
+                        val ctx = appContextRef
+                        if (ctx != null && com.lizhihua.carplaysender.shizuku.CarInputClient.service == null) {
+                            runCatching {
+                                Shell.exec("am unfreeze moe.shizuku.privileged.api", timeoutMs = 2500)
+                            }
+                            com.lizhihua.carplaysender.shizuku.CarInputClient
+                                .ensure(ctx)
                         }
-                        com.lizhihua.carplaysender.shizuku.CarInputClient.ensure(ctx)
+                    } catch (_: Exception) {
                     }
-                } catch (_: Exception) {
+                    try {
+                        Thread.sleep(4000)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
                 }
-                try {
-                    Thread.sleep(4000)
-                } catch (_: InterruptedException) {
-                    break
-                }
+            }, "shizuku-healer").apply {
+                isDaemon = true
+                start()
             }
-        }, "shizuku-healer").apply {
-            isDaemon = true
-            start()
-        }
     }
 
     /** 重新 dump 一次，判断包是否有任务在指定 display。 */
-    private fun packagesOnDisplay(pkg: String, displayId: Int): Boolean {
+    private fun packagesOnDisplay(
+        pkg: String,
+        displayId: Int,
+    ): Boolean {
         val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
         var current = -1
         for (line in dump.lineSequence()) {
@@ -956,7 +1015,10 @@ object VirtualLauncher {
     }
 
     /** 列出包在指定 display 上的任务 ID（偏好切换后清理旧屏任务用）。 */
-    private fun taskIdsOnDisplay(pkg: String, displayId: Int): List<String> {
+    private fun taskIdsOnDisplay(
+        pkg: String,
+        displayId: Int,
+    ): List<String> {
         val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
         var current = -1
         val ids = ArrayList<String>()

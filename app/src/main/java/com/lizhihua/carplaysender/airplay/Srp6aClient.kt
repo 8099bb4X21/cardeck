@@ -18,7 +18,9 @@ object Srp6aClient {
     private val COLON = byteArrayOf(':'.code.toByte())
 
     internal fun modulus(): BigInteger = n
+
     internal fun generator(): BigInteger = g
+
     internal fun multiplier(): BigInteger = k
 
     const val USERNAME = "Pair-Setup"
@@ -65,7 +67,10 @@ object Srp6aClient {
         }
     }
 
-    fun start(salt: ByteArray, publicKeyB: ByteArray): Session {
+    fun start(
+        salt: ByteArray,
+        publicKeyB: ByteArray,
+    ): Session {
         val a = toBigInt(ByteArray(32).also(random::nextBytes))
         val publicKeyA = pad(g.modPow(a, n))
         return Session(

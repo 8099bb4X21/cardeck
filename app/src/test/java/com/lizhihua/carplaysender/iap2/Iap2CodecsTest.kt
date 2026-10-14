@@ -7,36 +7,35 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
-import com.lizhihua.carplaysender.iap2.asString
-import com.lizhihua.carplaysender.iap2.asU16List
 
 class Iap2CodecsTest {
-
     // ---- 链路层 ----
 
     @Test
     fun linkPacketChecksumSumsToZero() {
-        val packet = Iap2LinkPacket.encode(
-            Iap2LinkPacket.LinkPacket(
-                control = Iap2LinkPacket.CTRL_ACK,
-                seq = 3,
-                ack = 7,
-                sessionId = Iap2LinkPacket.SESSION_CONTROL,
-                payload = byteArrayOf(0x40, 0x40, 0x00, 0x08, 0x1D, 0x00),
-            ),
-        )
+        val packet =
+            Iap2LinkPacket.encode(
+                Iap2LinkPacket.LinkPacket(
+                    control = Iap2LinkPacket.CTRL_ACK,
+                    seq = 3,
+                    ack = 7,
+                    sessionId = Iap2LinkPacket.SESSION_CONTROL,
+                    payload = byteArrayOf(0x40, 0x40, 0x00, 0x08, 0x1D, 0x00),
+                ),
+            )
         assertTrue(Iap2LinkPacket.verify(packet))
     }
 
     @Test
     fun linkPacketRoundTrip() {
-        val original = Iap2LinkPacket.LinkPacket(
-            control = 0xC0,
-            seq = 11,
-            ack = 22,
-            sessionId = 1,
-            payload = "hello iap2".encodeToByteArray(),
-        )
+        val original =
+            Iap2LinkPacket.LinkPacket(
+                control = 0xC0,
+                seq = 11,
+                ack = 22,
+                sessionId = 1,
+                payload = "hello iap2".encodeToByteArray(),
+            )
         val decoded = Iap2LinkPacket.decode(Iap2LinkPacket.encode(original))
         assertNotNull(decoded)
         assertEquals(original, decoded)
@@ -44,9 +43,10 @@ class Iap2CodecsTest {
 
     @Test
     fun linkPacketRejectsCorruptedChecksum() {
-        val bytes = Iap2LinkPacket.encode(
-            Iap2LinkPacket.LinkPacket(0x40, 1, 1, 0, byteArrayOf(1, 2, 3)),
-        )
+        val bytes =
+            Iap2LinkPacket.encode(
+                Iap2LinkPacket.LinkPacket(0x40, 1, 1, 0, byteArrayOf(1, 2, 3)),
+            )
         bytes[bytes.size - 1] = (bytes[bytes.size - 1] + 1).toByte()
         assertNull(Iap2LinkPacket.decode(bytes))
     }
@@ -93,12 +93,13 @@ class Iap2CodecsTest {
 
     @Test
     fun tlvParamsRoundTrip() {
-        val body = Iap2Csm.group(
-            17,
-            Iap2Csm.u16(0, 0),
-            Iap2Csm.string(1, "blue"),
-            Iap2Csm.param(3, byteArrayOf(1, 2, 3, 4, 5, 6)),
-        ) + Iap2Csm.string(0, "Sonata") + Iap2Csm.u16List(6, intArrayOf(0x5000, 0x4301))
+        val body =
+            Iap2Csm.group(
+                17,
+                Iap2Csm.u16(0, 0),
+                Iap2Csm.string(1, "blue"),
+                Iap2Csm.param(3, byteArrayOf(1, 2, 3, 4, 5, 6)),
+            ) + Iap2Csm.string(0, "Sonata") + Iap2Csm.u16List(6, intArrayOf(0x5000, 0x4301))
 
         val params = Iap2Csm.parseParams(body)
         assertEquals(3, params.size)

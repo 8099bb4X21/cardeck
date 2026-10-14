@@ -52,7 +52,10 @@ class CarPlayCtrlAdvertiser(
      * @param force true = 无条件重新注册（用于「绑定进程网络后」的时机修正：
      *   mDNS 组播跟随 bindProcessToNetwork 的网络，注册必须发生在绑定之后）。
      */
-    fun ensureForNetwork(ssid: String, force: Boolean = false): Boolean {
+    fun ensureForNetwork(
+        ssid: String,
+        force: Boolean = false,
+    ): Boolean {
         if (registered && registeredSsid == ssid && !force) return true
         if (registered) {
             log("$TAG: 重新注册 mDNS 广播（${registeredSsid ?: "?"}${if (force) "，绑定后时机修正" else " → $ssid"}）")
@@ -77,16 +80,19 @@ class CarPlayCtrlAdvertiser(
         return try {
             val socket = ServerSocket(0)
             serverSocket = socket
-            val mac = com.lizhihua.carplaysender.util.DeviceIdentity.bluetoothMac(context)
-            val info = NsdServiceInfo().apply {
-                serviceName = "sender"
-                serviceType = SERVICE_TYPE
-                setPort(socket.localPort)
-                // TXT id = 本机真实蓝牙 MAC（catplay CarPlayInviter 实证：车机按此
-                // 匹配待邀请的手机，占位值会导致车机永远不邀请 → 0x4301 永不到达）。
-                setAttribute("id", mac)
-                setAttribute("srcvers", "950.7.1")
-            }
+            val mac =
+                com.lizhihua.carplaysender.util.DeviceIdentity
+                    .bluetoothMac(context)
+            val info =
+                NsdServiceInfo().apply {
+                    serviceName = "sender"
+                    serviceType = SERVICE_TYPE
+                    setPort(socket.localPort)
+                    // TXT id = 本机真实蓝牙 MAC（catplay CarPlayInviter 实证：车机按此
+                    // 匹配待邀请的手机，占位值会导致车机永远不邀请 → 0x4301 永不到达）。
+                    setAttribute("id", mac)
+                    setAttribute("srcvers", "950.7.1")
+                }
             // 每次注册用全新 listener：unregisterService 是异步的，复用同一个 listener
             // 会撞上 "listener already in use"（真车实测 10-11 卡住 ctrl 广播）
             val freshListener = createListener()
@@ -108,11 +114,12 @@ class CarPlayCtrlAdvertiser(
     private fun acceptLoop() {
         val socket = serverSocket ?: return
         while (registered) {
-            val client = try {
-                socket.accept()
-            } catch (_: Exception) {
-                break
-            }
+            val client =
+                try {
+                    socket.accept()
+                } catch (_: Exception) {
+                    break
+                }
             Thread({ handleClient(client) }, "ctrl-client").apply {
                 isDaemon = true
                 start()
@@ -131,24 +138,27 @@ class CarPlayCtrlAdvertiser(
                 return
             }
             val requestLine = head.lineSequence().firstOrNull() ?: ""
-            val headers = head.substringAfter("\r\n", "")
-                .lineSequence()
-                .filter { it.contains(':') }
-                .joinToString("; ") { it.trim() }
+            val headers =
+                head
+                    .substringAfter("\r\n", "")
+                    .lineSequence()
+                    .filter { it.contains(':') }
+                    .joinToString("; ") { it.trim() }
             log("$TAG: $peer -> [$requestLine] $headers")
 
             val output = client.getOutputStream()
-            val response = when {
-                requestLine.startsWith("GET /ctrl-int/") -> {
-                    log("$TAG: ✓ 应答 ctrl-int 探测 200 OK")
-                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                }
+            val response =
+                when {
+                    requestLine.startsWith("GET /ctrl-int/") -> {
+                        log("$TAG: ✓ 应答 ctrl-int 探测 200 OK")
+                        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    }
 
-                else -> {
-                    log("$TAG: 未识别的请求，按 200 空应答处理（后续实现按需细化）")
-                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    else -> {
+                        log("$TAG: 未识别的请求，按 200 空应答处理（后续实现按需细化）")
+                        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    }
                 }
-            }
             output.write(response.toByteArray(Charsets.US_ASCII))
             output.flush()
 
@@ -186,11 +196,12 @@ class CarPlayCtrlAdvertiser(
         val buffer = ByteArrayOutputStream()
         val chunk = ByteArray(2048)
         while (buffer.size() < MAX_HEAD_BYTES) {
-            val count = try {
-                input.read(chunk)
-            } catch (_: IOException) {
-                break
-            }
+            val count =
+                try {
+                    input.read(chunk)
+                } catch (_: IOException) {
+                    break
+                }
             if (count < 0) break
             buffer.write(chunk, 0, count)
             val text = buffer.toString("ISO-8859-1")
@@ -210,18 +221,26 @@ class CarPlayCtrlAdvertiser(
     }
 
     /** 每次注册新建 listener（见 start() 注释；复用同一实例会触发 already in use）。 */
-    private fun createListener(): NsdManager.RegistrationListener = object : NsdManager.RegistrationListener {
-        override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
-            log("$TAG: mDNS 注册成功 ${serviceInfo.serviceName}")
-        }
+    private fun createListener(): NsdManager.RegistrationListener =
+        object : NsdManager.RegistrationListener {
+            override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
+                log("$TAG: mDNS 注册成功 ${serviceInfo.serviceName}")
+            }
 
-        override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-            // 重置状态：下一次 ensureForNetwork（新会话的 0x5703）会重新注册
-            registered = false
-            log("$TAG: mDNS 注册失败 code=$errorCode（下次会话自动重试）")
-        }
+            override fun onRegistrationFailed(
+                serviceInfo: NsdServiceInfo,
+                errorCode: Int,
+            ) {
+                // 重置状态：下一次 ensureForNetwork（新会话的 0x5703）会重新注册
+                registered = false
+                log("$TAG: mDNS 注册失败 code=$errorCode（下次会话自动重试）")
+            }
 
-        override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
-        override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
-    }
+            override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
+
+            override fun onUnregistrationFailed(
+                serviceInfo: NsdServiceInfo,
+                errorCode: Int,
+            ) = Unit
+        }
 }
