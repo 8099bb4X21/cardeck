@@ -439,10 +439,20 @@ class MainActivity : AppCompatActivity() {
         // ---- 连接准备 ----
         findViewById<TextView>(R.id.btnWifi).setOnClickListener {
             val ssid = ssidInput.text.toString().trim()
-            log(
-                "WiFi: 打开系统WLAN设置——请选择 \"$ssid\" 并输入热点密码连接；" +
-                    "若提示\"无法访问互联网\"请选择保持连接；连上后回来等待自动连接",
-            )
+            // 自动加入不可用时的手动兜底：密码先进剪贴板，系统 WLAN 页粘贴即可
+            val psk = SessionController.lastWifiPsk
+            if (psk != null) {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("carplay-wifi", psk))
+                snack("热点密码已复制（${psk.length} 位）——粘贴到密码框即可")
+                log(
+                    "WiFi: 热点密码已复制到剪贴板，选择 \"$ssid\" 粘贴密码；" +
+                        "若提示\"无法访问互联网\"请选择保持连接",
+                )
+            } else {
+                snack("暂无热点密码——蓝牙连上后自动获取")
+                log("WiFi: 尚未拿到热点密码（需蓝牙会话 0x5703）——打开 WLAN 设置手动选择 \"$ssid\"")
+            }
             try {
                 startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
             } catch (_: Exception) {

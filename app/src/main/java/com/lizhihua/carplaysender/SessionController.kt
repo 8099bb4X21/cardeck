@@ -132,6 +132,13 @@ object SessionController {
         phaseHint = "正在取消连接…"
     }
 
+    /**
+     * 最近一次 0x5703 的热点密码（仅内存，不落盘）。
+     * 「车机热点 → 去连接」按钮复制到剪贴板用（手动加入兜底场景）。
+     */
+    @Volatile
+    var lastWifiPsk: String? = null
+
     /** 挂屏 UI 钩子：SSID 变化时通知当前 Activity 回填输入框（可空）。 */
     @Volatile
     var ssidSink: ((String) -> Unit)? = null
@@ -279,22 +286,124 @@ object SessionController {
      */
     fun onWifiCredentials(wifi: com.lizhihua.carplaysender.iap2.Iap2SenderSession.WifiConfiguration) {
         ssidSink?.invoke(wifi.ssid)
+        lastWifiPsk = wifi.passphrase
         phaseHint = "拿到车机热点凭据，绑定 WiFi…"
         appendLog(">>> 拿到车机热点凭据（0x5703）——立即绑定 WiFi + 广播 _carplay-ctrl")
         // 先占位注册（此时可能尚未绑定到目标网络）；绑定成功后再 force 重注册，
         // 保证 mDNS 组播落在车机所在网络（真车实测必需：注册早于绑定会广播到错误网络）
         ctrlAdvertiser?.ensureForNetwork(wifi.ssid)
-        wifiConnector?.bindCurrentWifi { bound ->
-            if (!bound) {
-                phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${wifi.ssid}"
-                appendLog(">>> 手机不在车机热点 \"${wifi.ssid}\" —— 请到 系统设置>WLAN 加入后重新连接")
-            } else {
-                // 关键时机：bindProcessToNetwork 完成后再注册，车机才能看到 ctrl 广播
-                ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true)
-                appendLog(">>> WiFi 已绑定车机热点，ctrl 广播已重新注册，等待车机 ctrl 邀请（随后才回 0x4301）")
+        // 绑定与切换统一走自动加入流程：bindCurrentWifi 是「任意 WiFi 即成功」的盲绑，
+        // 手机连着公司 WiFi 时会误判已在车机热点（ctrl 广播落在错误网络 → 双方互等死锁），
+        // 必须先核对真实 SSID 再决定绑定或切换
+        autoJoinCarWifi(wifi)
+    }
+
+    /**
+     * 校对真实 WiFi 并加入车机热点（Shizuku shell，Android 12+ `cmd wifi`）：
+     *  1. `cmd wifi status` 查当前 SSID——已是车机热点直接绑定（快路径）；
+     *  2. 否则 `cmd wifi connect-network` 保存并切换（免系统弹窗、免输密码；
+     *     网络被系统保存，下次进入热点范围自动重连，契合上车即连）；
+     *  3. 轮询 SSID 确认切换完成后再绑定，各环节检查 [connectCancelled]——
+     *     用户取消后不得继续跑（否则 phaseHint 被覆盖、ctrl 广播被重新拉起，表现为「取消不了」）。
+     * Shizuku 未就绪/连接失败时回退「系统 WLAN 手动加入」指引（密码可经「去连接」复制）。
+     */
+    private fun autoJoinCarWifi(wifi: com.lizhihua.carplaysender.iap2.Iap2SenderSession.WifiConfiguration) {
+        val ctx = appContext
+        val shizukuReady =
+            ctx != null &&
+                com.lizhihua.carplaysender.shizuku.ShizukuGate
+                    .state(ctx) ==
+                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
+        if (!shizukuReady) {
+            phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${wifi.ssid}"
+            appendLog(
+                ">>> 手机不在车机热点 \"${wifi.ssid}\" 且 Shizuku 未就绪（无法自动加入）——" +
+                    "请到 系统设置>WLAN 手动加入（密码可点「去连接」复制）",
+            )
+            return
+        }
+        Thread {
+            val current = shellWifiSsid()
+            if (current == wifi.ssid) {
+                appendLog("WIFI: 手机已在车机热点 \"$current\"——直接绑定")
+                bindCarWifiAndRegister(wifi)
+                return@Thread
             }
+            if (connectCancelled) return@Thread
+            phaseHint = "正在自动加入车机热点 ${wifi.ssid}…"
+            appendLog(
+                ">>> 手机当前 WiFi: ${current ?: "未连接"}（非车机热点）——" +
+                    "经 Shizuku 自动切换到 \"${wifi.ssid}\"",
+            )
+            val security =
+                if (wifi.passphrase.isEmpty()) "open" else "wpa2 ${shellQuote(wifi.passphrase)}"
+            val result =
+                com.lizhihua.carplaysender.shizuku.Shell
+                    .exec("cmd wifi connect-network ${shellQuote(wifi.ssid)} $security", 10_000L)
+            if (!result.ok) {
+                phaseHint = "自动加入热点失败——请到 WLAN 设置加入 ${wifi.ssid}"
+                appendLog(
+                    "WIFI: connect-network 失败（${result.output.take(80).ifEmpty { "exit=${result.exitCode}" }}）" +
+                        "——请到 系统设置>WLAN 手动加入（密码可点「去连接」复制）",
+                )
+                return@Thread
+            }
+            appendLog("WIFI: connect-network 已发起（自动保存网络，等待切换…）")
+            // 系统切换是异步的（断开当前网/扫描/关联/DHCP，2-10 秒）：轮询 SSID 确认
+            repeat(8) {
+                if (connectCancelled) {
+                    appendLog("WIFI: 自动加入已取消（用户断开）")
+                    return@Thread
+                }
+                Thread.sleep(2_500)
+                val ssid = shellWifiSsid()
+                if (ssid == null) {
+                    // status 命令不可用（非 AOSP 系统）：退化为直接尝试绑定（无 SSID 校验）
+                    bindCarWifiAndRegister(wifi)
+                    return@Thread
+                }
+                if (ssid == wifi.ssid) {
+                    bindCarWifiAndRegister(wifi)
+                    return@Thread
+                }
+            }
+            phaseHint = "自动加入热点超时——请到 WLAN 设置加入 ${wifi.ssid}"
+            appendLog(">>> WiFi 自动加入超时——请到 系统设置>WLAN 手动加入（密码可点「去连接」复制）")
+        }.start()
+    }
+
+    /** 绑定当前 WiFi（应为车机热点）并重注册 ctrl 广播；绑定超时给出指引。 */
+    private fun bindCarWifiAndRegister(wifi: com.lizhihua.carplaysender.iap2.Iap2SenderSession.WifiConfiguration) {
+        var bound = false
+        val latch = java.util.concurrent.CountDownLatch(1)
+        wifiConnector?.bindCurrentWifi { ok ->
+            bound = ok
+            latch.countDown()
+        }
+        latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        if (bound && !connectCancelled) {
+            phaseHint = "已加入车机热点"
+            // 关键时机：bindProcessToNetwork 完成后再注册，车机才能看到 ctrl 广播
+            ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true)
+            appendLog(">>> WiFi 已绑定车机热点，ctrl 广播已重新注册，等待车机 ctrl 邀请（随后才回 0x4301）")
+        } else if (!connectCancelled) {
+            phaseHint = "已连上热点但绑定失败——请重新连接"
+            appendLog(">>> WiFi SSID 已匹配但网络绑定超时——请重新连接")
         }
     }
+
+    /** 当前连接的 WiFi SSID（`cmd wifi status`；null = 未连接或命令不可用）。 */
+    private fun shellWifiSsid(): String? {
+        val result =
+            com.lizhihua.carplaysender.shizuku.Shell
+                .exec("cmd wifi status", 5_000L)
+        if (!result.ok) return null
+        // 输出形如：Wifi is connected to "Redmi K40"（未连接时无此行）
+        return Regex("connected to \"(.*)\"").find(result.output)?.groupValues?.get(1)
+    }
+
+    /** 单引号包裹的 POSIX shell 字面量（SSID/密码可能含空格与特殊字符）。 */
+    private fun shellQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 
     /** 复现「BT 控制已结束」状态：断开当前任一路径的 iAP2 控制会话（DiPlay 只在此状态应答 RTSP）。 */
     private fun detachActiveBtSessions() {
