@@ -73,7 +73,8 @@ object TouchRouter {
             inDock = contact.xPixels < dockW
             var routedToMap = false
             if (!inDock && launcher.mapDisplayId >= 0 &&
-                (launcher.mapFullscreen || launcher.dashboardMode)
+                (launcher.mapFullscreen || launcher.dashboardMode) &&
+                launcher.tileSlideFraction <= 0.01f
             ) {
                 val tileX = contact.xPixels - dockW
                 val tileVisibleW = if (launcher.mapFullscreen) Int.MAX_VALUE else launcher.mapTileWidth

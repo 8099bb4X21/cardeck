@@ -131,6 +131,19 @@ object VirtualLauncher {
     var mapDisplayId: Int = -1
         private set
 
+    /** 仪表盘↔桌面滑动进度（0=tile 原位，1=完全滑出）：滑动期间抑制 tile 事件注入。 */
+    @Volatile
+    var tileSlideFraction: Float = 0f
+        private set
+
+
+
+    /** 由 GridActivity 随 pager 滑动驱动 tile 视觉位移。 */
+    fun setTileSlide(fraction: Float) {
+        tileSlideFraction = fraction
+        composer?.tileSlideFraction = fraction
+    }
+
     /** 地图屏 tile 尺寸（分屏形态；应用区左半）。 */
     @Volatile
     var mapTileWidth: Int = 0
@@ -586,29 +599,45 @@ object VirtualLauncher {
 
     /** 进入仪表盘：地图屏缩回 tile、默认地图占屏（缺则启动）、桌面切分屏布局。 */
     fun showDashboard() {
-        dashboardMode = true
-        notifyDashboard()
+        syncDashboard(true)
         goGrid()
         composer?.requestActiveApp(appHiDisplayId >= 0 && gridDisplayId == appHiDisplayId)
-        Thread({
-            ensureMapTask()
-            if (mapFullscreen) setMapFullscreen(false)
-            // 期间用户可能已点开普通应用（launchApp 会置 HIDDEN 并退出仪表盘）：
-            // 复查模式，别把地图层又盖回去
-            if (dashboardMode) {
-                composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
-            }
-        }, "dashboard-enter").start()
         logSink?.invoke("LAUNCHER: 仪表盘模式（地图 tile + 音乐卡）")
     }
 
     /** 回普通桌面：隐藏地图层并复位全屏标志，桌面恢复全宽图标网格（地图任务保留）。 */
+    /**
+     * 仪表盘模式唯一对账口：置 dashboardMode → 通知（dock 图标/GridActivity pager）
+     * → 进入时补地图任务并切 SPLIT，退出时隐藏 tile。
+     * pager 滑动过程只做 tile 位移预览（showMapTile），状态一律在落定（IDLE）时经此对账。
+     */
+    fun syncDashboard(dashboard: Boolean) {
+        val changed = dashboardMode != dashboard
+        dashboardMode = dashboard
+        if (changed) notifyDashboard()
+        if (dashboard) {
+            Thread({
+                ensureMapTask()
+                if (mapFullscreen) setMapFullscreen(false)
+                // 期间用户可能已点开普通应用（launchApp 会置 HIDDEN 并退出仪表盘）：
+                // 复查模式，别把地图层又盖回去
+                if (dashboardMode) {
+                    composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
+                }
+            }, "dashboard-enter").start()
+        } else {
+            composer?.setTileLayout(DualDisplayComposer.TileLayout.HIDDEN)
+        }
+    }
+
+    /** 滑动预览：仅切 tile 可见（不动 dashboardMode/监听），落定后由 syncDashboard 对账。 */
+    fun showMapTile() {
+        composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
+    }
+
     fun showDesktop() {
-        dashboardMode = false
-        mapFullscreen = false
-        notifyDashboard()
+        syncDashboard(false)
         goGrid()
-        composer?.setTileLayout(DualDisplayComposer.TileLayout.HIDDEN)
         logSink?.invoke("LAUNCHER: 桌面模式（图标网格）")
     }
 

@@ -31,6 +31,11 @@ class DualDisplayComposer(
     /** true：dock 是底部横条（竖屏车机）；false：dock 是左侧竖条（横屏车机）。 */
     private val dockAtBottom: Boolean = false,
 ) {
+
+    /** 仪表盘↔桌面滑动进度（0=tile 原位，1=完全滑出左侧），由 GridActivity 随滑动驱动。 */
+    @Volatile
+    var tileSlideFraction: Float = 0f
+
     companion object {
         private const val TAG = "DualComposer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
@@ -356,7 +361,6 @@ class DualDisplayComposer(
                     drawInput(activeInput, 0f, outWidth.toFloat(), dockH.toFloat(), outHeight.toFloat())
                 }
             } else {
-                if (dock.hasContent) drawInput(dock, 0f, dockW.toFloat(), 0f, outHeight.toFloat())
                 if (activeInput?.hasContent == true) {
                     drawInput(activeInput, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
                 }
@@ -370,18 +374,22 @@ class DualDisplayComposer(
                     } else {
                         // 卡片形态：四周留边 + 圆角（与音乐卡一致）。
                         // 中缝=TILE_MARGIN（16）：tile 右缘与音乐卡左缘各收半边距（8），
-                        // 否则两边各 16px 叠加出 32px 的中缝、比外侧 16px 边距宽一倍不协调
+                        // 否则两边各 16px 叠加出 32px 的中缝、比外侧 16px 边距宽一倍不协调。
+                        // tileSlideFraction：随 pager 滑动把 tile 平移出/入左侧（视觉跟手）。
                         val half = (outWidth - dockW) / 2f
                         val tileW = half - TILE_MARGIN - TILE_MARGIN / 2f
+                        val slide = tileSlideFraction * (outWidth - dockW)
                         drawInputUV(
                             map!!,
-                            dockW + TILE_MARGIN, dockW + TILE_MARGIN + tileW,
+                            dockW + TILE_MARGIN - slide, dockW + TILE_MARGIN + tileW - slide,
                             TILE_MARGIN, outHeight - TILE_MARGIN,
                             u0 = 0.25f, u1 = 0.75f,
                             cornerRadius = TILE_CORNER_RADIUS,
                         )
                     }
                 }
+                // dock 最后绘制（最上层）：tile 滑动经过 dock 区域时从其下方穿过
+                if (dock.hasContent) drawInput(dock, 0f, dockW.toFloat(), 0f, outHeight.toFloat())
             }
             if (fullRedraw || dock.hasContent || app.hasContent || hi?.hasContent == true || map?.hasContent == true) {
                 EGL14.eglSwapBuffers(display, outputSurface)
