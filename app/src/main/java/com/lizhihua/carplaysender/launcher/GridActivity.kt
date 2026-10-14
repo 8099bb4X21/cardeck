@@ -147,7 +147,31 @@ class GridActivity : AppCompatActivity() {
         }, "wallpaper-dash").start()
     }
 
-    /** 音乐卡渲染：标题/歌手/播放暂停按钮（播放中=暂停图标，暂停=播放图标）。 */
+    /** 音乐卡进度自刷新（1s；渲染尾部续调度，位置由锚点+速度推算）。 */
+    private val mediaTick =
+        object : Runnable {
+            override fun run() {
+                renderMediaCard()
+                tickHandler.postDelayed(this, 1_000)
+            }
+        }
+
+    private val tickHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** mm:ss（超 1 小时 h:mm:ss）。 */
+    private fun formatTime(ms: Long): String {
+        val totalSec = ms / 1_000
+        val h = totalSec / 3_600
+        val m = totalSec % 3_600 / 60
+        val s = totalSec % 60
+        return if (h > 0) {
+            String.format(java.util.Locale.US, "%d:%02d:%02d", h, m, s)
+        } else {
+            String.format(java.util.Locale.US, "%d:%02d", m, s)
+        }
+    }
+
+    /** 音乐卡渲染：封面/标题/歌手/进度/播放暂停按钮（播放中=暂停图标，暂停=播放图标）。 */
     private fun renderMediaCard() {
         val panel = dashboardView ?: return
         val now = com.lizhihua.carplaysender.media.MediaSessionsState.nowPlaying
@@ -158,6 +182,62 @@ class GridActivity : AppCompatActivity() {
         panel.findViewById<ImageView>(R.id.dashPlayPause).setImageResource(
             if (now?.playing == true) R.drawable.ic_media_pause else R.drawable.ic_media_play,
         )
+        panel.findViewById<TextView>(R.id.dashMediaTime)?.let { time ->
+            if (now != null && now.durationMs > 0) {
+                time.visibility = View.VISIBLE
+                time.text =
+                    "${formatTime(now.displayPositionAt(android.os.SystemClock.elapsedRealtime()))} / " +
+                    formatTime(now.durationMs)
+            } else {
+                time.visibility = View.GONE
+            }
+        }
+        panel.findViewById<ImageView>(R.id.dashCover)?.let { cover ->
+            val art = now?.art
+            if (art != null) {
+                cover.setImageBitmap(art)
+                cover.visibility = View.VISIBLE
+                // 封面圆角裁剪（outline 一次性设置）
+                if (cover.clipToOutline != true) {
+                    cover.clipToOutline = true
+                    val dp = resources.displayMetrics.density
+                    cover.outlineProvider =
+                        object : android.view.ViewOutlineProvider() {
+                            override fun getOutline(
+                                view: View,
+                                outline: android.graphics.Outline,
+                            ) {
+                                outline.setRoundRect(
+                                    0,
+                                    0,
+                                    view.width,
+                                    view.height,
+                                    10 * dp,
+                                )
+                            }
+                        }
+                }
+                // 点击封面 → 拉回正在播放的应用（任务复用：回到其播放界面）
+                cover.setOnClickListener {
+                    val pkg = now.pkg ?: return@setOnClickListener
+                    val component =
+                        packageManager.getLaunchIntentForPackage(pkg)?.component
+                            ?: run {
+                                VirtualLauncher.logSink
+                                    ?.invoke("MEDIA: $pkg 无可启动入口，忽略封面点击")
+                                return@setOnClickListener
+                            }
+                    Thread { VirtualLauncher.launchApp(component) }.start()
+                }
+            } else {
+                // 占位不消失（INVISIBLE）：封面异步加载/切歌间隙内容不上下跳动
+                cover.visibility = View.INVISIBLE
+                cover.setOnClickListener(null)
+            }
+        }
+        // 进度显示需要持续走秒：渲染尾部续调度（防重：先移除）
+        tickHandler.removeCallbacks(mediaTick)
+        tickHandler.postDelayed(mediaTick, 1_000)
     }
 
     /** 仪表盘模式 → pager 位置同步（0=仪表盘，1+=桌面；已在目标位则不动）。 */
@@ -445,12 +525,15 @@ class GridActivity : AppCompatActivity() {
                         android.view.KeyEvent.KEYCODE_MEDIA_PLAY
                     },
                 )
+                // 乐观更新保留封面等其它字段（copy）；400ms 后重同步真实状态
                 com.lizhihua.carplaysender.media.MediaSessionsState.publish(
-                    com.lizhihua.carplaysender.media.MediaSessionsState.NowPlaying(
-                        state?.title,
-                        state?.artist,
-                        !playing,
-                    ),
+                    state
+                        ?.copy(playing = !playing)
+                        ?: com.lizhihua.carplaysender.media.MediaSessionsState.NowPlaying(
+                            null,
+                            null,
+                            !playing,
+                        ),
                 )
                 panel.postDelayed(
                     {
@@ -460,9 +543,8 @@ class GridActivity : AppCompatActivity() {
                     400,
                 )
             }
-            panel.findViewById<TextView>(R.id.dashFullscreenMap).setOnClickListener {
-                Thread { VirtualLauncher.setMapFullscreen(!VirtualLauncher.mapFullscreen) }.start()
-            }
+            // 全屏地图的退出走 dock 的 home 按钮（showDashboard 路由闸门会自动
+            // setMapFullscreen(false)），仪表盘卡上不再放「全屏地图」按钮
             applyDashCardChrome()
             renderMediaCard()
             refreshDashWallpaper()
@@ -546,6 +628,7 @@ class GridActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        tickHandler.removeCallbacks(mediaTick)
         com.lizhihua.carplaysender.ui.WallpaperStore
             .removeListener(wallpaperListener)
         VirtualLauncher.removeDashboardListener(dashboardListener)

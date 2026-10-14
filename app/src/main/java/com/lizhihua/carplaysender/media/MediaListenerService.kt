@@ -41,6 +41,19 @@ class MediaListenerService : NotificationListenerService() {
             }
         }
 
+    /** 上次封面提取键（会话+歌名+封面 uri）——getBitmap 每次反序列化，1s 轮询不能重复做。 */
+    private var lastArtKey: String? = null
+
+    /** 封面位图缓存（键不变时复用同一实例，保证 NowPlaying 的 equals 判稳）。 */
+    private var cachedArt: android.graphics.Bitmap? = null
+
+    /** 上次「键匹配但封面为空」的时刻：切歌瞬间 metadata 常不完整（歌名先到、
+     *  封面字段滞后），空结果只保持 2 秒，之后重试直到封面就绪。 */
+    private var artEmptyAt = 0L
+
+    /** uri 型封面解码进行中（防重复发起）。 */
+    private var artLoading = false
+
     override fun onListenerConnected() {
         super.onListenerConnected()
         try {
@@ -97,16 +110,95 @@ class MediaListenerService : NotificationListenerService() {
         val now =
             picked?.let { controller ->
                 val meta = controller.metadata
-                val playing = controller.playbackState?.state == PlaybackState.STATE_PLAYING
+                val state = controller.playbackState
+                val playing = state?.state == PlaybackState.STATE_PLAYING
+                val title = meta?.getString(MediaMetadata.METADATA_KEY_TITLE)
                 MediaSessionsState.NowPlaying(
-                    title = meta?.getString(MediaMetadata.METADATA_KEY_TITLE),
+                    title = title,
                     artist =
                         meta?.getString(MediaMetadata.METADATA_KEY_ARTIST)
                             ?: meta?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST),
                     playing = playing,
+                    art = artFor(controller, meta, title),
+                    pkg = controller.packageName,
+                    positionMs = state?.position ?: 0L,
+                    playbackSpeed = if (playing) (state?.playbackSpeed ?: 1f) else 0f,
+                    durationMs = meta?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L,
+                    anchoredAtMs = android.os.SystemClock.elapsedRealtime(),
                 )
             }
         MediaSessionsState.publish(now)
+    }
+
+    /**
+     * 封面提取（带缓存）：仅「会话+歌名+封面 uri」变化时重新提取——位图键直接从
+     * metadata 取；uri 型封面（content:// 等）经后台线程解码，完成前先给无封面态。
+     */
+    private fun artFor(
+        controller: android.media.session.MediaController,
+        meta: MediaMetadata?,
+        title: String?,
+    ): android.graphics.Bitmap? {
+        val artUri =
+            meta?.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
+                ?: meta?.getString(MediaMetadata.METADATA_KEY_ART_URI)
+        val key = "${controller.sessionToken}/$title/$artUri"
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (key == lastArtKey) {
+            if (cachedArt != null) return cachedArt
+            // 键没变但封面为空：解码中等待；否则 2 秒内不重试（getBitmap 有成本），
+            // 超后重提取——app 在切歌后补封面（bitmap 键从无到有）靠这条路兜住
+            if (artLoading || now - artEmptyAt < 2_000) return null
+        }
+        lastArtKey = key
+        cachedArt = null
+        val direct =
+            meta
+                ?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                ?: meta?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+        if (direct != null) {
+            cachedArt = scaleArt(direct)
+            return cachedArt
+        }
+        artEmptyAt = now
+        if (artUri != null && !artLoading) {
+            artLoading = true
+            Thread(
+                {
+                    var decoded: android.graphics.Bitmap? = null
+                    try {
+                        val input =
+                            if (artUri.startsWith("http")) {
+                                java.net.URL(artUri).openStream()
+                            } else {
+                                contentResolver.openInputStream(android.net.Uri.parse(artUri))
+                            }
+                        input
+                            ?.use { android.graphics.BitmapFactory.decodeStream(it) }
+                            ?.let { decoded = it }
+                    } catch (_: Exception) {
+                    } finally {
+                        artLoading = false
+                    }
+                    if (decoded != null && key == lastArtKey) {
+                        cachedArt = scaleArt(decoded!!)
+                        mainHandler.post { refresh() }
+                    }
+                },
+                "media-art-load",
+            ).start()
+        }
+        return null
+    }
+
+    /** 封面缩到 ≤512px（卡片显示 ~120dp，控制内存）。 */
+    private fun scaleArt(src: android.graphics.Bitmap): android.graphics.Bitmap {
+        val maxSide = maxOf(src.width, src.height)
+        if (maxSide <= 512) return src
+        val sample =
+            generateSequence(1) { it * 2 }.first { maxSide / it <= 512 }
+        return android.graphics.Bitmap
+            .createScaledBitmap(src, src.width / sample, src.height / sample, true)
     }
 }
 
@@ -116,7 +208,29 @@ object MediaSessionsState {
         val title: String?,
         val artist: String?,
         val playing: Boolean,
-    )
+        val art: android.graphics.Bitmap? = null,
+        /** 媒体会话所属应用（点击封面拉回正在播放的应用）。 */
+        val pkg: String? = null,
+        /** 采样时刻的播放位置（ms）。 */
+        val positionMs: Long = 0L,
+        /** 播放速度（暂停时 0——不外推）。 */
+        val playbackSpeed: Float = 1f,
+        val durationMs: Long = 0L,
+        /** 位置采样的 SystemClock.elapsedRealtime 锚点。 */
+        val anchoredAtMs: Long = 0L,
+    ) {
+        /** 渲染时刻的推算播放位置（播放中按速度外推，钳制在时长内）。 */
+        fun displayPositionAt(elapsedRealtimeMs: Long): Long {
+            if (durationMs <= 0) return 0
+            val base =
+                if (playing && anchoredAtMs > 0) {
+                    positionMs + ((elapsedRealtimeMs - anchoredAtMs) * playbackSpeed).toLong()
+                } else {
+                    positionMs
+                }
+            return base.coerceIn(0, durationMs)
+        }
+    }
 
     @Volatile
     var nowPlaying: NowPlaying? = null
@@ -133,15 +247,24 @@ object MediaSessionsState {
     }
 
     fun publish(value: NowPlaying?) {
-        // 内容与当前一致时直接跳过（不通知、不写日志，避免轮询刷屏）
-        if (nowPlaying == value) return
+        val old = nowPlaying
         nowPlaying = value
-        com.lizhihua.carplaysender.launcher.VirtualLauncher.logSink?.invoke(
-            "MEDIA: " + (
-                value?.let { "${it.title ?: "?"} - ${it.artist ?: "?"} playing=${it.playing}" }
-                    ?: "无活跃会话"
-            ),
-        )
+        // 位置每秒都在变（1s 兜底轮询）——日志只看内容键，避免刷屏；
+        // listeners 仍每次通知（UI 据此刷新进度文本）
+        val contentChanged =
+            old?.title != value?.title ||
+                old?.artist != value?.artist ||
+                old?.playing != value?.playing ||
+                old?.art !== value?.art
+        if (contentChanged) {
+            com.lizhihua.carplaysender.launcher.VirtualLauncher.logSink?.invoke(
+                "MEDIA: " + (
+                    value?.let { "${it.title ?: "?"} - ${it.artist ?: "?"} playing=${it.playing}" }
+                        ?: "无活跃会话"
+                ),
+            )
+        }
+        if (old == value) return
         listeners.forEach { runCatching { it() } }
     }
 

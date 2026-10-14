@@ -32,6 +32,16 @@
             android:layout_height="0dp"
             android:layout_weight="0.75" />
 
+        <!-- 专辑封面（有封面时显示，圆角由代码裁剪） -->
+        <ImageView
+            android:id="@+id/dashCover"
+            android:layout_width="118dp"
+            android:layout_height="118dp"
+            android:layout_marginBottom="14dp"
+            android:importantForAccessibility="no"
+            android:scaleType="centerCrop"
+            android:visibility="gone" />
+
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -83,13 +93,12 @@
 
             <ImageView
                 android:id="@+id/dashPlayPause"
-                android:layout_width="62dp"
-                android:layout_height="62dp"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
                 android:layout_marginLeft="16dp"
                 android:layout_marginRight="16dp"
-                android:background="@drawable/bg_menu_chip"
                 android:importantForAccessibility="no"
-                android:padding="15dp"
+                android:padding="8dp"
                 android:src="@drawable/ic_media_play" />
 
             <ImageView
@@ -102,25 +111,19 @@
                 android:src="@drawable/ic_media_next" />
         </LinearLayout>
 
+        <TextView
+            android:id="@+id/dashMediaTime"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:fontFeatureSettings="tnum"
+            android:text="0:00 / 0:00"
+            android:textColor="#FF8E8E93"
+            android:textSize="11.5sp" />
+
         <View
             android:layout_width="0dp"
             android:layout_height="0dp"
             android:layout_weight="1" />
     </LinearLayout>
-
-    <TextView
-        android:id="@+id/dashFullscreenMap"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
-        android:layout_marginLeft="14dp"
-        android:layout_marginRight="14dp"
-        android:layout_marginBottom="10dp"
-        android:background="@drawable/bg_menu_item"
-        android:gravity="center"
-        android:paddingTop="10dp"
-        android:paddingBottom="10dp"
-        android:text="⤢ 全屏地图"
-        android:textColor="#FFF5F5F7"
-        android:textSize="14sp" />
 </FrameLayout>
