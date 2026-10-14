@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var hubCar: ImageView
     private lateinit var hubCaption: TextView
     private lateinit var heroStateText: TextView
+    private lateinit var btnResidualCleanup: TextView
     private lateinit var heroSubline: TextView
     private lateinit var heroProgress: View
     private lateinit var ctaButton: LinearLayout
@@ -72,6 +73,11 @@ class MainActivity : AppCompatActivity() {
     private var heroState: HeroState? = null
     private var connectedAt = 0L
     private var hubBlink: ObjectAnimator? = null
+
+    // 启动残留屏检查进行中（英雄卡显示「检查中」）；发现的残留暂缓清理时
+    // 记在 pendingResidualDisplays，状态旁的「清理残留屏」按钮可再次发起
+    private var startupCheckRunning = false
+    private var pendingResidualDisplays: List<Pair<Int, String>>? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val heroTick: Runnable =
@@ -308,6 +314,10 @@ class MainActivity : AppCompatActivity() {
         hubCar = findViewById(R.id.hubCar)
         hubCaption = findViewById(R.id.hubCaption)
         heroStateText = findViewById(R.id.heroStateText)
+        btnResidualCleanup = findViewById(R.id.btnResidualCleanup)
+        btnResidualCleanup.setOnClickListener {
+            pendingResidualDisplays?.let { promptResidualDisplays(it) }
+        }
         heroSubline = findViewById(R.id.heroSubline)
         heroProgress = findViewById(R.id.heroProgress)
         ctaButton = findViewById(R.id.ctaButton)
@@ -595,6 +605,12 @@ class MainActivity : AppCompatActivity() {
         if (s == HeroState.CONNECTING) {
             heroSubline.text = SessionController.phaseHint ?: DEFAULT_CONNECTING_HINT
         }
+        // 启动残留屏检查进行中：状态与副标题临时切换为检查提示
+        if (s == HeroState.IDLE && startupCheckRunning) {
+            heroStateText.text = "检查中"
+            heroSubline.text = "正在检查残留屏…"
+            heroProgress.visibility = View.VISIBLE
+        }
         updateConnectedSubline()
         updateAudioTag()
         updateReadyRow()
@@ -645,7 +661,13 @@ class MainActivity : AppCompatActivity() {
 
         when (s) {
             HeroState.IDLE -> {
-                heroSubline.text = "与车机蓝牙完成配对后，点击下方按钮发起无线连接"
+                val pending = pendingResidualDisplays
+                heroSubline.text =
+                    if (pending != null) {
+                        "上次会话异常退出，遗留 ${pending.size} 个虚拟屏待清理"
+                    } else {
+                        "与车机蓝牙完成配对后，点击下方按钮发起无线连接"
+                    }
                 ctaButton.setBackgroundResource(R.drawable.bg_cta_fill)
                 ctaLabel.setTextColor(getColor(R.color.m3_on_primary))
                 ctaIcon.imageTintList =
@@ -879,13 +901,21 @@ class MainActivity : AppCompatActivity() {
 
     /** 读取 shell 全局状态（后台线程 + UI 回填）。[startupCheck] 时顺带做残留虚拟屏检测。 */
     private fun refreshShellState(startupCheck: Boolean = false) {
+        if (startupCheck) {
+            startupCheckRunning = true
+            tickHero()
+        }
         shellStateText.text = "读取中…"
         Thread {
             if (com.lizhihua.carplaysender.shizuku.ShizukuGate
                     .state(this) !=
                 com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
             ) {
-                runOnUiThread { shellStateText.text = "Shizuku 未就绪——shell 状态读取需要 Shizuku" }
+                runOnUiThread {
+                    startupCheckRunning = false
+                    if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
+                    shellStateText.text = "Shizuku 未就绪——shell 状态读取需要 Shizuku"
+                }
                 return@Thread
             }
 
@@ -931,7 +961,14 @@ class MainActivity : AppCompatActivity() {
                                 .resetAll(applicationContext)
                         if (reset > 0) log("ORIENTATION: 残留会话的横屏覆盖已复原 $reset 个")
                     }
-                    runOnUiThread {
+                }
+                runOnUiThread {
+                    startupCheckRunning = false
+                    if (residual.isNotEmpty()) {
+                        // 用户「暂不」时保留 pending，状态旁的按钮可再次发起清理
+                        pendingResidualDisplays = residual
+                        updateResidualChip()
+                        if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
                         promptResidualDisplays(residual)
                         // 自动展开日志卡：启动清理的两条记录直接可见（卡片默认折叠）
                         findViewById<View>(R.id.logBody).visibility = View.VISIBLE
@@ -940,6 +977,9 @@ class MainActivity : AppCompatActivity() {
                             .rotation(180f)
                             .setDuration(250L)
                             .start()
+                    } else if (heroState == HeroState.IDLE) {
+                        // 无残留：恢复「未连接」默认状态展示
+                        applyHeroState(HeroState.IDLE)
                     }
                 }
             }
@@ -969,6 +1009,9 @@ class MainActivity : AppCompatActivity() {
                 "发现 ${residual.size} 个上次会话遗留的 CarPlay 虚拟屏：\n$names\n\n" +
                     "残留屏会持续占用显示资源，并可能影响下次连接。是否立即清理？",
             ).setPositiveButton("清理") { _, _ ->
+                pendingResidualDisplays = null
+                updateResidualChip()
+                if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
                 Thread {
                     val released = releaseDisplays(residual.map { it.first })
                     log("SHELL: 残留虚拟屏清理完成（释放 $released/${residual.size}）")
@@ -978,7 +1021,16 @@ class MainActivity : AppCompatActivity() {
                     }
                 }.start()
             }.setNegativeButton("暂不", null)
-            .show()
+            .setOnCancelListener {
+                // 返回键/点外部关闭 = 暂不：保留英雄卡的「清理残留屏」入口
+                updateResidualChip()
+            }.show()
+    }
+
+    /** 英雄卡状态旁的「清理残留屏」按钮显隐（有待清理残留时出现）。 */
+    private fun updateResidualChip() {
+        btnResidualCleanup.visibility =
+            if (pendingResidualDisplays != null) View.VISIBLE else View.GONE
     }
 
     /** 释放指定虚拟屏（CarInputClient 懒绑定 + 3 秒短等）。后台线程调用，返回成功数。 */
