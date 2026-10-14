@@ -99,7 +99,13 @@ class MainActivity : AppCompatActivity() {
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             log("BLUETOOTH_CONNECT 授权: $granted")
+            if (granted && pendingStartAfterBtPermission.compareAndSet(true, false)) {
+                ensureBluetoothReady { showAudioChoiceDialog() }
+            }
         }
+
+    /** 蓝牙权限授权后自动继续启动连接。 */
+    private val pendingStartAfterBtPermission = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** 车机壁纸选择（Photo Picker；无需存储权限）。选中即持久化并通知合成器换图。 */
     private val wallpaperPicker =
@@ -182,6 +188,43 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("取消连接") { _, _ -> SessionController.cancelConnecting(this) }
             .setNegativeButton("继续连接", null)
             .show()
+    }
+
+    /**
+     * 启动连接的前置检查：蓝牙权限 → 蓝牙开关。
+     * 任一不满足都弹窗引导（蓝牙关闭时可一键跳系统蓝牙设置），通过后回调继续。
+     */
+    private fun ensureBluetoothReady(onReady: () -> Unit) {
+        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            pendingStartAfterBtPermission.set(true)
+            permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+            return
+        }
+        val on = try {
+            (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
+                .adapter?.isEnabled == true
+        } catch (_: SecurityException) {
+            true
+        }
+        if (!on) {
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("蓝牙未开启")
+                .setMessage("与车机的无线配对通信依赖蓝牙。请先开启手机蓝牙，并确认已与车机配对。")
+                .setPositiveButton("去开启蓝牙") { _, _ ->
+                    runCatching {
+                        startActivity(
+                            android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS),
+                        )
+                    }.onFailure { log("BT: 无法打开蓝牙设置，请手动开启") }
+                }
+                .setNegativeButton("取消", null)
+                .show()
+            log("BT: 蓝牙未开启——本次连接未发起")
+            return
+        }
+        onReady()
     }
 
     /**
@@ -280,10 +323,18 @@ class MainActivity : AppCompatActivity() {
         logText.movementMethod = ScrollingMovementMethod()
         // 控制台在长页面 ScrollView 内：按下时申请父级不拦截竖向手势，否则无法手动滚动
         logText.setOnTouchListener { v, event ->
-            if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) {
-                v.parent.requestDisallowInterceptTouchEvent(true)
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN ->
+                    v.parent.requestDisallowInterceptTouchEvent(true)
+                android.view.MotionEvent.ACTION_MOVE,
+                android.view.MotionEvent.ACTION_UP,
+                -> updateLogBottomButton()
             }
             false
+        }
+        findViewById<ImageView>(R.id.btnLogBottom).setOnClickListener {
+            // 跳到底部：滚动后自动跟底也随之恢复
+            scrollConsoleToBottom()
         }
 
         // 进程重启兜底：若上次会话未正常退役，「常亮」改过的屏幕超时需要恢复
@@ -348,7 +399,8 @@ class MainActivity : AppCompatActivity() {
         ctaButton.setOnClickListener {
             when (heroState) {
                 HeroState.CONNECTED -> promptDisconnect()
-                HeroState.IDLE -> showAudioChoiceDialog()
+                // 前置检查：蓝牙权限/开关，静默失败 zero-tolerance
+                HeroState.IDLE -> ensureBluetoothReady { showAudioChoiceDialog() }
                 // 连接中可取消：卡在错误网络/等待回连时用户主动脱身（弹窗防误触）
                 HeroState.CONNECTING -> promptCancelConnecting()
                 null -> {}
@@ -700,16 +752,35 @@ class MainActivity : AppCompatActivity() {
         SessionController.appendLog(message)
     }
 
+    private fun updateLogBottomButton() {
+        findViewById<ImageView>(R.id.btnLogBottom)?.visibility =
+            if (consoleAtBottom()) View.INVISIBLE else View.VISIBLE
+    }
+
+    /** 日志内容最大滚动偏移。 */
+    private fun consoleMaxScroll(): Int {
+        val layout = logText.layout ?: return 0
+        return (layout.getLineBottom(layout.lineCount - 1) +
+            logText.paddingBottom - logText.height).coerceAtLeast(0)
+    }
+
+    /** 是否已在底部（40px 容差：吸收行高舍入，避免永远差几像素判不到底）。 */
+    private fun consoleAtBottom(): Boolean =
+        consoleMaxScroll() - logText.scrollY <= 40
+
+    private fun scrollConsoleToBottom() {
+        // +16px 过冲补齐舍入差（控制台深色底，过冲不可见；View 不钳制但视觉无感）
+        logText.scrollTo(0, consoleMaxScroll() + 16)
+        logText.post { updateLogBottomButton() }
+    }
+
     private fun renderConsole(text: String) {
         // 改文本前已在底部（或用户上翻阅读中）：决定本次是否自动跟底
-        val stick = !logText.canScrollVertically(1)
+        val follow = consoleAtBottom()
         logText.text =
             if (SessionController.logEnabled) text else "日志采集已关闭（打开「监听日志」开关恢复）"
         logText.post {
-            val layout = logText.layout ?: return@post
-            val bottom = layout.getLineBottom(layout.lineCount - 1) -
-                logText.height + logText.paddingBottom
-            if (stick) logText.scrollTo(0, bottom.coerceAtLeast(0))
+            if (follow) scrollConsoleToBottom() else updateLogBottomButton()
         }
     }
 

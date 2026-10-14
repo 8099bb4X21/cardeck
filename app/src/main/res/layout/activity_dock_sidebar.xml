@@ -93,12 +93,11 @@
 
     <ImageView
         android:id="@+id/dockHome"
-        android:layout_width="56px"
-        android:layout_height="56px"
-        android:layout_gravity="center_horizontal"
+        android:layout_width="match_parent"
+        android:layout_height="110px"
         android:background="?android:attr/selectableItemBackgroundBorderless"
         android:contentDescription="回到桌面"
-        android:padding="8px"
+        android:padding="26px"
         android:scaleType="fitCenter"
         android:src="@drawable/ic_dock_home" />
     </LinearLayout>

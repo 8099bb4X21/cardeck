@@ -1037,6 +1037,11 @@
                             android:src="@drawable/ic_copy" />
                     </LinearLayout>
 
+                    <FrameLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp">
+
                     <TextView
                         android:id="@+id/logText"
                         android:layout_width="match_parent"
@@ -1051,6 +1056,20 @@
                         android:scrollbars="vertical"
                         android:textColor="@color/m3_console_text"
                         android:textSize="10.5sp" />
+
+                        <ImageView
+                            android:id="@+id/btnLogBottom"
+                            android:layout_width="34dp"
+                            android:layout_height="34dp"
+                            android:layout_gravity="bottom|end"
+                            android:layout_margin="8dp"
+                            android:background="@drawable/bg_icon_tile"
+                            android:contentDescription="跳到底部"
+                            android:elevation="4dp"
+                            android:padding="7dp"
+                            android:src="@drawable/ic_chev_down"
+                            android:visibility="gone" />
+                    </FrameLayout>
                 </LinearLayout>
             </LinearLayout>
 
