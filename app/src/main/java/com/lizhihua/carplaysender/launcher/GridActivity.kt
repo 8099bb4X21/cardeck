@@ -127,8 +127,12 @@ class GridActivity : AppCompatActivity() {
                     )
                 }.getOrNull() ?: return@Thread
             val margin = (CARD_MARGIN_PX * scale).toInt()
-            // 音乐卡左缘收半边距（8）：与地图 tile 右缘之间形成 16px 中缝（两侧各让一半）
-            val cardX = ((VirtualLauncher.dockWidthPx + VirtualLauncher.mapTileWidth + CARD_MARGIN_PX / 2) * scale).toInt()
+            // 音乐卡左缘 = 应用区中线 + 半边距（8）：与地图 tile 右缘（中线-8）之间
+            // 形成 16px 中缝（两侧各让一半）。显式按中线算，勿引用 mapTileWidth——
+            // 其语义是 tile 实际宽度（含边距扣减），会随 tile 布局变化
+            val cardX =
+                ((VirtualLauncher.dockWidthPx + VirtualLauncher.appAreaWidth / 2 + CARD_MARGIN_PX / 2) * scale)
+                    .toInt()
             val cropX = cardX.coerceAtMost(bitmap.width - 2)
             val cropY = margin.coerceAtMost(bitmap.height - 2)
             val cropW = (bitmap.width - cropX - margin).coerceAtLeast(2)
@@ -405,8 +409,10 @@ class GridActivity : AppCompatActivity() {
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     ).apply {
-                        // 左缘收半边距（8）：与地图 tile 右缘之间形成 16px 中缝
-                        leftMargin = (VirtualLauncher.mapTileWidth * scale).toInt() + cardMargin / 2
+                        // 左缘 = 应用区中线 + 半边距（8）：与地图 tile 右缘（中线-8）之间
+                        // 形成 16px 中缝。显式按中线算，勿引用 mapTileWidth（语义已变）
+                        leftMargin =
+                            ((VirtualLauncher.appAreaWidth / 2 + CARD_MARGIN_PX / 2) * scale).toInt()
                         topMargin = cardMargin
                         rightMargin = cardMargin
                         bottomMargin = cardMargin

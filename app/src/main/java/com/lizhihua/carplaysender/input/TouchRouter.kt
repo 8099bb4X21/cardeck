@@ -174,6 +174,7 @@ object TouchRouter {
         pressed = false
         pressedDisplay = -1
         cancelMapTileTap()
+        tapDragSlot = -1
         coordScaleX = 1f
         coordScaleY = 1f
     }
@@ -186,6 +187,10 @@ object TouchRouter {
     private const val TAP_CONFIRM_MS = 300L
     private val tapHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var tapArmSlot = -1
+
+    /** 已判为拖动的按住手势（slot）：作废到抬起为止——否则长滑动的 cancel→re-arm
+     *  会把抬起点当新起点（位移小、时长短），误判成 tap 直接触发全屏。 */
+    private var tapDragSlot = -1
     private var tapDownAt = 0L
     private var tapX = 0
     private var tapY = 0
@@ -207,7 +212,7 @@ object TouchRouter {
                 cancelMapTileTap() // 确认窗内再次按下 = 双击缩放，取消全屏触发
                 return
             }
-            if (tapArmSlot < 0 && inTile) {
+            if (tapArmSlot < 0 && inTile && tapDragSlot < 0) {
                 tapArmSlot = contact.slot
                 tapDownAt = now
                 tapX = tileX
@@ -219,24 +224,32 @@ object TouchRouter {
                         kotlin.math.abs(tileX - tapX) + kotlin.math.abs(contact.yPixels - tapY) > TAP_MAX_MOVE_PX
                 )
             ) {
-                cancelMapTileTap() // 拖动 / 拖出 tile / 双指
+                // 拖动 / 拖出 tile / 双指：整个手势作废到抬起（见 tapDragSlot 注释）
+                tapDragSlot = tapArmSlot
+                cancelMapTileTap()
             }
-        } else if (tapArmSlot >= 0 && contact.slot == tapArmSlot) {
-            val ok =
-                inTile &&
-                    now - tapDownAt <= TAP_MAX_MS &&
-                    kotlin.math.abs(tileX - tapX) + kotlin.math.abs(contact.yPixels - tapY) <= TAP_MAX_MOVE_PX
-            cancelMapTileTap()
-            if (ok) {
-                tapConfirm =
-                    Runnable {
-                        tapConfirm = null
-                        if (launcher.dashboardMode && !launcher.mapFullscreen) {
-                            logSink?.invoke("LAUNCHER: 地图卡片点按 → 全屏地图")
-                            launcher.setMapFullscreen(true)
+        } else {
+            if (tapDragSlot >= 0) {
+                if (contact.slot == tapDragSlot) tapDragSlot = -1
+                return
+            }
+            if (tapArmSlot >= 0 && contact.slot == tapArmSlot) {
+                val ok =
+                    inTile &&
+                        now - tapDownAt <= TAP_MAX_MS &&
+                        kotlin.math.abs(tileX - tapX) + kotlin.math.abs(contact.yPixels - tapY) <= TAP_MAX_MOVE_PX
+                cancelMapTileTap()
+                if (ok) {
+                    tapConfirm =
+                        Runnable {
+                            tapConfirm = null
+                            if (launcher.dashboardMode && !launcher.mapFullscreen) {
+                                logSink?.invoke("LAUNCHER: 地图卡片点按 → 全屏地图")
+                                launcher.setMapFullscreen(true)
+                            }
                         }
-                    }
-                tapHandler.postDelayed(tapConfirm!!, TAP_CONFIRM_MS)
+                    tapHandler.postDelayed(tapConfirm!!, TAP_CONFIRM_MS)
+                }
             }
         }
     }
