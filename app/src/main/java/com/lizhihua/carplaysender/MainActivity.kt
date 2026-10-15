@@ -96,6 +96,13 @@ class MainActivity : AppCompatActivity() {
     /**
      * 挂屏注册：日志续显（含划掉界面重进时已有会话的历史日志）+ SSID 回填。
      */
+    private val uiHintSinkRef: (String) -> Unit = { message ->
+        runOnUiThread { if (!isFinishing && !isDestroyed) snack(message, 6_000L) }
+    }
+
+    /** 当前打开的「加入热点」确认弹窗：取消连接时联动关闭（触发流程中止）。 */
+    private var wifiJoinDialog: androidx.appcompat.app.AlertDialog? = null
+
     private val logListener: (String) -> Unit = { text ->
         runOnUiThread {
             if (!isFinishing && !isDestroyed) renderConsole(text)
@@ -203,8 +210,13 @@ class MainActivity : AppCompatActivity() {
             .Builder(this)
             .setTitle("取消连接？")
             .setMessage("将停止当前连接尝试：蓝牙与 WiFi 链路都会断开，需重新点「启动连接」。")
-            .setPositiveButton("取消连接") { _, _ -> SessionController.cancelConnecting(this) }
-            .setNegativeButton("继续连接", null)
+            .setPositiveButton("取消连接") { _, _ ->
+                // 关闭仍在等待的「加入热点」确认弹窗（其 onChoice(null) 会与
+                // connectCancelled 一起让 autoJoin 流程立即中止）
+                wifiJoinDialog?.cancel()
+                wifiJoinDialog = null
+                SessionController.cancelConnecting(this)
+            }.setNegativeButton("继续连接", null)
             .show()
     }
 
@@ -383,6 +395,39 @@ class MainActivity : AppCompatActivity() {
         // 挂屏注册：日志续显 + SSID 回填
         SessionController.ensure(this)
         SessionController.logListener = logListener
+        // 连接流程的重要提示（WiFi 未开启/热点加入限制等）以 Snackbar 长显
+        SessionController.uiHintSink = uiHintSinkRef
+        // 加入热点确认弹窗：继续自动加入 / 打开 WLAN 设置手动连。
+        // 取消连接时 cancel() 联动关闭（触发 onChoice(null) → 流程检查取消标志中止）
+        SessionController.dialogSink = { spec, onChoice ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    onChoice(null)
+                    return@runOnUiThread
+                }
+                var answered = false
+                val dialog =
+                    androidx.appcompat.app.AlertDialog
+                        .Builder(this)
+                        .setTitle(spec.title)
+                        .setMessage(spec.message)
+                        .setPositiveButton(spec.positive) { _, _ ->
+                            answered = true
+                            onChoice(true)
+                        }.setNegativeButton(spec.negative) { _, _ ->
+                            answered = true
+                            runCatching {
+                                startActivity(
+                                    android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS),
+                                )
+                            }
+                            onChoice(false)
+                        }.setOnCancelListener { if (!answered) onChoice(null) }
+                        .create()
+                wifiJoinDialog = dialog
+                dialog.show()
+            }
+        }
         SessionController.ssidSink = ssidSink
         renderConsole(SessionController.logText())
 
@@ -898,7 +943,10 @@ class MainActivity : AppCompatActivity() {
     private var snackRunnable: Runnable? = null
 
     /** 自绘 M3 Snackbar（底部反色胶囊，替代 Toast）。 */
-    private fun snack(message: String) {
+    private fun snack(
+        message: String,
+        durationMs: Long = 2_400L,
+    ) {
         snackbar.text = message
         snackbar.visibility = View.VISIBLE
         snackbar.translationY = snackbar.height + 60f
@@ -916,7 +964,7 @@ class MainActivity : AppCompatActivity() {
                     .setDuration(260L)
                     .withEndAction { snackbar.visibility = View.GONE }
                     .start()
-            }.also { mainHandler.postDelayed(it, 2_400L) }
+            }.also { mainHandler.postDelayed(it, durationMs) }
     }
 
     /**
@@ -1169,6 +1217,8 @@ class MainActivity : AppCompatActivity() {
         // 只解绑"挂屏"，不动会话——连接由前台服务保活、对象归 SessionController 持有；
         // 显式断开请用「断开连接」按钮（任意实例都能断到真管线）。
         if (SessionController.logListener === logListener) SessionController.logListener = null
+        if (SessionController.uiHintSink === uiHintSinkRef) SessionController.uiHintSink = null
+        SessionController.dialogSink = null
         if (SessionController.ssidSink === ssidSink) SessionController.ssidSink = null
     }
 }

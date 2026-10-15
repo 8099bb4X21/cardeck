@@ -55,6 +55,10 @@ class AirPlayClient(
      * 且此后同连接上的 pair-setup 被 403；Apple 客户端与 catplay 均直接进配对。
      * 配对请求头按 catplay PairingHelperTx 逐字对齐（X-Apple-HKP / X-Apple-PD）。
      */
+    /** 取消标志（会话退役时置位）：配对重试循环立即退出，不再跑满等待窗口。 */
+    @Volatile
+    var cancelled: Boolean = false
+
     fun runPairing(): PairVerifyClient.ControlKeys? {
         val identity = loadOrCreateIdentity()
         log("AIRPLAY: 控制器身份 pairingId=${identity.pairingId}")
@@ -63,7 +67,7 @@ class AirPlayClient(
         // 默认 120s 内每 2s 试一次——用户在车机上点一下的等待不会被提前放弃。
         val deadline = System.currentTimeMillis() + PAIRING_WINDOW_MILLIS
         var attempt = 0
-        while (System.currentTimeMillis() < deadline) {
+        while (System.currentTimeMillis() < deadline && !cancelled) {
             attempt++
             close()
             if (!ensureConnected(2_000)) {

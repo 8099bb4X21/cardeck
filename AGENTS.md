@@ -80,12 +80,14 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
 - **会话生命周期钩子**：强制横屏覆盖（AppOrientationCompat）attach 时 applyAll、
   retireSession/onEnded 时 resetAll——新加系统级写入（settings/cmd）照此模式收口。
 - **Shell 命令**：参数用 `shellQuote`（单引号转义）；WiFi 连接走
-  `cmd wifi connect-network`，查当前 SSID 用 `cmd wifi status`（勿用「任意 WiFi 即
-  成功」的盲绑判定——手机连着别的 WiFi 时会误判）。**无互联网热点的自动切回**：
-  shell 连接的配置没有「用户选择」标记，系统 watchdog 会自动切回有网的原 WiFi 导致
-  断连（手动连接不受影响）——切热点前对原网 `cmd wifi add-network <ssid> <type> -d`
-  临时禁自动加入、会话结束去掉 `-d` 恢复；密码省略时只更新标记保留凭据（实测），
-  autojoin disabled 不影响用户手动连接（无锁死风险）。
+  `cmd wifi connect-network`，查开关/当前 SSID 用一次 `cmd wifi status`
+  （勿用「任意 WiFi 即成功」的盲绑判定——手机连着别的 WiFi 时会误判）。
+  **无互联网热点的自动切回（已知限制，放弃侵入式抑制）**：shell 连接的配置没有
+  「用户选择」标记，系统 watchdog 会自动切回有网的原 WiFi 导致断连（手动连接不受
+  影响）。曾实现「会话期间 add-network -d 禁用原网/全部其它网络的自动加入」——放弃：
+  多已保存网络环境禁不完整、移动场景误伤、侵入用户配置。现行方案：connect-network
+  自动加入（best effort）+ 阶段提示告知「若被切回请到 WLAN 手动连接热点」+ WiFi 未
+  开启时等待提示（30s）+ 加入超时的手动兜底指引。
 - **媒体卡片**：元数据切歌是分阶段的（歌名先到、封面/时长滞后），空结果需短退避重试
   而非固化缓存；播放位置用「锚点 + 速度」外推，UI 每秒自刷新。
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
