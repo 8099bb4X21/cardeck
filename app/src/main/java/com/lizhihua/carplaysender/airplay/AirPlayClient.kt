@@ -291,8 +291,8 @@ class AirPlayClient(
                 val head =
                     "POST /command RTSP/1.0\r\n" +
                         "Content-Type: application/x-apple-binary-plist\r\n" +
-                        "Content-Length: \${body.size}\r\n" +
-                        "CSeq: \$eventCseq\r\n\r\n"
+                        "Content-Length: ${body.size}\r\n" +
+                        "CSeq: $eventCseq\r\n\r\n"
                 val bytes = cipher.encrypt(head.toByteArray(Charsets.US_ASCII) + body)
                 socket.getOutputStream().apply {
                     write(bytes)
@@ -301,7 +301,7 @@ class AirPlayClient(
             }
             true
         } catch (error: IOException) {
-            log("EVENT: 命令发送失败 - \${error.message}")
+            log("EVENT: 命令发送失败 - ${error.message}")
             false
         }
     }

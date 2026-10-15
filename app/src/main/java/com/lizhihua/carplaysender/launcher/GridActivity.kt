@@ -79,6 +79,11 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
+    /** 地图布局变化（全屏/分屏切换改变音乐卡壁纸切片区域）。
+     *  具名字段（勿内联匿名 lambda）：onDestroy 才能对称移除，否则桌面重建累积泄漏。 */
+    private val mapLayoutListener: (Boolean) -> Unit =
+        { _ -> runOnUiThread { refreshDashWallpaper() } }
+
     /**
      * 应用卡片视觉：暗幕 alpha 与壁纸模糊半径（RenderEffect，半径随网格屏
      * 密度放大 1.5 倍以与 dock 视觉一致）。
@@ -348,10 +353,7 @@ class GridActivity : AppCompatActivity() {
             com.lizhihua.carplaysender.ui.WallpaperStore
                 .addCanvasReadyListener(canvasReadyListener)
             VirtualLauncher.addDashboardListener(dashboardListener)
-            VirtualLauncher.addMapLayoutListener { runOnUiThread { refreshDashWallpaper() } }
-            applyDashboardMode(VirtualLauncher.dashboardMode)
-            VirtualLauncher.addDashboardListener(dashboardListener)
-            VirtualLauncher.addMapLayoutListener { runOnUiThread { refreshDashWallpaper() } }
+            VirtualLauncher.addMapLayoutListener(mapLayoutListener)
             applyDashboardMode(VirtualLauncher.dashboardMode)
         }
 
@@ -664,6 +666,7 @@ class GridActivity : AppCompatActivity() {
         com.lizhihua.carplaysender.ui.WallpaperStore
             .removeListener(wallpaperListener)
         VirtualLauncher.removeDashboardListener(dashboardListener)
+        VirtualLauncher.removeMapLayoutListener(mapLayoutListener)
         com.lizhihua.carplaysender.media.MediaSessionsState
             .removeListener(mediaStateListener)
         DockPrefs.removeListener(dockPrefsListener)
