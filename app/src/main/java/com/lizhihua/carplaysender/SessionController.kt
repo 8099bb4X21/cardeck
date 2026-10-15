@@ -140,6 +140,10 @@ object SessionController {
     @Volatile
     var lastWifiPsk: String? = null
 
+    /** 会话期间被禁自动加入的原 WiFi（切热点前记录；会话结束恢复 autojoin）。 */
+    @Volatile
+    private var suppressedAutoJoinSsid: String? = null
+
     /** 挂屏 UI 钩子：SSID 变化时通知当前 Activity 回填输入框（可空）。 */
     @Volatile
     var ssidSink: ((String) -> Unit)? = null
@@ -263,6 +267,15 @@ object SessionController {
                 if (restored > 0) appendLog("ORIENTATION: 已复原 $restored 个应用的显示设置")
             }
         }
+        // 会话期间被禁自动加入的原 WiFi 恢复（autojoin disabled 是临时抑制）
+        suppressedAutoJoinSsid?.let { ssid ->
+            suppressedAutoJoinSsid = null
+            Thread {
+                if (setNetworkAutoJoin(ssid, enabled = true)) {
+                    appendLog("WIFI: \"$ssid\" 自动加入已恢复")
+                }
+            }.start()
+        }
     }
 
     /** 会话已建立且投影就绪、但音频尚未启动时，动态补启（投影授权晚于连接的场景）。 */
@@ -331,6 +344,14 @@ object SessionController {
                 return@run
             }
             if (connectCancelled) return@run
+            // 切换前禁用原网络的自动加入：热点无互联网，系统 watchdog 会把默认
+            // 网络自动切回有网的原 WiFi（手动连接不受影响——用户选择优先），
+            // shell 连接的配置没有该「用户选择」标记，必须显式抑制
+            if (current != null && current != wifi.ssid &&
+                setNetworkAutoJoin(current, enabled = false)
+            ) {
+                suppressedAutoJoinSsid = current
+            }
             phaseHint = "正在自动加入车机热点 ${wifi.ssid}…"
             appendLog(
                 ">>> 手机当前 WiFi: ${current ?: "未连接"}（非车机热点）——" +
@@ -391,6 +412,49 @@ object SessionController {
             phaseHint = "已连上热点但绑定失败——请重新连接"
             appendLog(">>> WiFi SSID 已匹配但网络绑定超时——请重新连接")
         }
+    }
+
+    /**
+     * 设置已保存 WiFi 配置的自动加入开关（`cmd wifi add-network <ssid> <type> [-d]`）：
+     *  - 密码参数省略时只更新标记、保留已有凭据（荣耀实测）；
+     *  - autojoin disabled 仅影响系统自动选择，用户手动连接不受影响（无锁死风险）。
+     * 安全类型从 list-networks 解析（如 wpa2-psk→wpa2），SSID 可能含空格按尾列取。
+     */
+    private fun setNetworkAutoJoin(
+        ssid: String,
+        enabled: Boolean,
+    ): Boolean {
+        val dump =
+            com.lizhihua.carplaysender.shizuku.Shell
+                .exec("cmd wifi list-networks", 8_000L)
+                .output
+        val type =
+            dump
+                .lineSequence()
+                .lastOrNull { it.contains(ssid) }
+                ?.trim()
+                ?.split(Regex("\\s+"))
+                ?.lastOrNull()
+                ?.let { raw ->
+                    when {
+                        raw.startsWith("wpa3") -> "wpa3"
+                        raw.startsWith("wpa2") -> "wpa2"
+                        raw.startsWith("owe") -> "owe"
+                        raw.startsWith("wep") -> "wep"
+                        else -> "open"
+                    }
+                } ?: "wpa2"
+        val flag = if (enabled) "" else " -d"
+        val result =
+            com.lizhihua.carplaysender.shizuku.Shell
+                .exec("cmd wifi add-network ${shellQuote(ssid)} $type$flag", 8_000L)
+        if (!result.ok) {
+            appendLog(
+                "WIFI: 设置 \"$ssid\" 自动加入(${if (enabled) "开" else "关"})失败——" +
+                    "${result.output.take(60).ifEmpty { "exit=${result.exitCode}" }}",
+            )
+        }
+        return result.ok
     }
 
     /** 当前连接的 WiFi SSID（`cmd wifi status`；null = 未连接或命令不可用）。 */
