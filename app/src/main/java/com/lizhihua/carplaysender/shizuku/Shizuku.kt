@@ -212,7 +212,8 @@ object CarInputClient {
                         ComponentName("com.lizhihua.carplaysender", CarInputServiceImpl::class.java.name),
                     ).processNameSuffix("car_input")
                     .debuggable(true)
-                    .version(14) // 14：shell 包 Context 创建受信屏（修 packageName/uid 匹配校验）
+                    // 版本号取 APK lastUpdateTime（见 serviceVersion 注释）
+                    .version(serviceVersion())
                     .also { userServiceArgs = it }
             // 重绑前先解绑旧连接（清掉可能残留的 binder 状态）
             if (hasBoundOnce) {
@@ -229,6 +230,24 @@ object CarInputClient {
 
     @Volatile
     private var hasBoundOnce = false
+
+    /**
+     * UserService 版本 = APK lastUpdateTime（秒）。Shizuku 按「组件+进程名+版本」复用
+     * 常驻服务进程：硬编码版本号时重装 APK 不会换进程——复用的旧进程跑的还是旧 dex，
+     * 新代码静默不生效（2026-10-15 实测：受信屏加 SUPPORTS_IME 后 flags 仍是旧值
+     * 0x448 的根因；且 force-stop 杀不掉这些 shell 进程，会越积越多）。
+     * lastUpdateTime 重装必变 → 必起新进程；APK 不变时恒定 → 正常复用常驻进程。
+     */
+    private fun serviceVersion(): Int =
+        try {
+            val pm = appContext?.packageManager ?: return 15
+
+            @Suppress("DEPRECATION")
+            val info = pm.getPackageInfo(appContext!!.packageName, 0)
+            (info.lastUpdateTime / 1000L).toInt()
+        } catch (_: Throwable) {
+            15 // 兜底：与历史手写版本号序列衔接，保证不低于 14
+        }
 
     private const val TAG = "CarInputClient"
 }
