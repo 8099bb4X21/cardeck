@@ -79,6 +79,13 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   输出画面的输入（dock + 活动应用屏 + tile 可见时的 map）。
 - **会话生命周期钩子**：强制横屏覆盖（AppOrientationCompat）attach 时 applyAll、
   retireSession/onEnded 时 resetAll——新加系统级写入（settings/cmd）照此模式收口。
+- **取消连接必须全程可中断**：`sessionStarting` 互斥标志的复位依赖配对流程线程
+  走到 finally——该线程可能阻塞在不可中断的等待（无超时 connect、mDNS 等待、
+  BT 保活读循环），任何一处卡住都会让取消「无效」（英雄卡永久「正在连接」）。
+  防御三件套（2026-10-15 实战）：retireSession 主动 detach 关 BT 会话 socket、
+  AirPlayClient.cancelled 标志让配对重试循环提前退出、cancelConnecting 强制
+  `sessionStarting.set(false)`（用户显式取消即强制解锁）。**新增任何长等待点时
+  必须响应 connectCancelled**，且取消路径要实测「发起后立即取消」场景。
 - **Shell 命令**：参数用 `shellQuote`（单引号转义）；WiFi 连接走
   `cmd wifi connect-network`，查开关/当前 SSID 用一次 `cmd wifi status`
   （勿用「任意 WiFi 即成功」的盲绑判定——手机连着别的 WiFi 时会误判）。
