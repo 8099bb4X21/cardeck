@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
+import com.lizhihua.carplaysender.launcher.VirtualLauncher
 
 /**
  * 进程级安全网：任一线程的未捕获异常只记录并让该线程结束，
@@ -35,7 +36,7 @@ class SenderApp : Application() {
                     context: Context,
                     intent: Intent,
                 ) {
-                    com.lizhihua.carplaysender.launcher.VirtualLauncher
+                    VirtualLauncher
                         .invalidateAppsCache()
                     Log.i(TAG, "应用清单缓存已失效（包变化）")
                 }

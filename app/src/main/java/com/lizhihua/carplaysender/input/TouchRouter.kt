@@ -2,6 +2,8 @@ package com.lizhihua.carplaysender.input
 
 import android.content.Context
 import com.lizhihua.carplaysender.input.TouchReports.Contact
+import com.lizhihua.carplaysender.launcher.VirtualLauncher
+import com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
 import com.lizhihua.carplaysender.render.CARD_MARGIN_PX
 import com.lizhihua.carplaysender.shizuku.CarInputClient
 
@@ -75,7 +77,7 @@ object TouchRouter {
         val px = (contact.xPixels * coordScaleX).toInt().coerceAtLeast(0)
         val py = (contact.yPixels * coordScaleY).toInt().coerceAtLeast(0)
 
-        val launcher = com.lizhihua.carplaysender.launcher.VirtualLauncher
+        val launcher = VirtualLauncher
         val dockW = launcher.dockWidthPx
         if (dockW <= 0 || launcher.appDisplayId < 0 || launcher.dockDisplayId < 0) return
         var svc = CarInputClient.service
@@ -165,7 +167,7 @@ object TouchRouter {
         if (!throttleInited) {
             throttleInited = true
             moveThrottleMs =
-                com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
+                DisplayPrefs
                     .moveThrottleMs(context)
                     .toLong()
         }
@@ -262,7 +264,7 @@ object TouchRouter {
     private var tapConfirm: Runnable? = null
 
     private fun updateMapTileTap(
-        launcher: com.lizhihua.carplaysender.launcher.VirtualLauncher,
+        launcher: VirtualLauncher,
         contact: Contact,
         inTile: Boolean,
         tileX: Int,

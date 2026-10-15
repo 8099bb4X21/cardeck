@@ -2,6 +2,7 @@ package com.lizhihua.carplaysender.capture
 
 import android.content.Context
 import android.view.Surface
+import com.lizhihua.carplaysender.launcher.VirtualLauncher
 import com.lizhihua.carplaysender.shizuku.CarInputClient
 import com.lizhihua.carplaysender.shizuku.ShizukuGate
 
@@ -53,7 +54,7 @@ class HiddenDisplaySource(
         CarInputClient.ensure(context)
         // 双屏启动器：GL 合成器（dock 屏 + 应用屏）→ 编码 Surface
         val ok =
-            com.lizhihua.carplaysender.launcher.VirtualLauncher.attach(
+            VirtualLauncher.attach(
                 context,
                 surface,
                 width,
@@ -62,12 +63,12 @@ class HiddenDisplaySource(
                 log,
             )
         displayId =
-            if (ok) com.lizhihua.carplaysender.launcher.VirtualLauncher.appDisplayId else -1
+            if (ok) VirtualLauncher.appDisplayId else -1
         return ok
     }
 
     override fun detach() {
-        com.lizhihua.carplaysender.launcher.VirtualLauncher
+        VirtualLauncher
             .detach()
         displayId = -1
     }

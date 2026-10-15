@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import com.lizhihua.carplaysender.util.Bg
+import com.lizhihua.carplaysender.util.DeviceIdentity
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -82,7 +83,7 @@ class CarPlayCtrlAdvertiser(
             val socket = ServerSocket(0)
             serverSocket = socket
             val mac =
-                com.lizhihua.carplaysender.util.DeviceIdentity
+                DeviceIdentity
                     .bluetoothMac(context)
             val info =
                 NsdServiceInfo().apply {

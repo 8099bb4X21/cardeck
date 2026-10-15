@@ -5,9 +5,16 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
+import com.lizhihua.carplaysender.PhoneSettingsActivity
 import com.lizhihua.carplaysender.R
+import com.lizhihua.carplaysender.launcher.settings.DefaultMapPanelFragment
+import com.lizhihua.carplaysender.launcher.settings.DesktopPanelFragment
+import com.lizhihua.carplaysender.launcher.settings.DisplayPanelFragment
+import com.lizhihua.carplaysender.launcher.settings.DockPanelFragment
+import com.lizhihua.carplaysender.launcher.settings.OrientationPanelFragment
 import com.lizhihua.carplaysender.launcher.settings.SettingsMenus
 import com.lizhihua.carplaysender.launcher.settings.SettingsToastHost
+import com.lizhihua.carplaysender.launcher.settings.SupersamplePanelFragment
 
 /**
  * 车机设置（双栏宿主：左菜单 / 右内容 Fragment 容器）。
@@ -22,12 +29,12 @@ class SettingsActivity :
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (com.lizhihua.carplaysender.launcher.VirtualLauncher.dockAtBottom) {
+        if (VirtualLauncher.dockAtBottom) {
             // 竖屏窄屏：双栏挤压——转发手机侧二级菜单（列表 → 内容页）
             startActivity(
                 android.content.Intent(
                     this,
-                    com.lizhihua.carplaysender.PhoneSettingsActivity::class.java,
+                    PhoneSettingsActivity::class.java,
                 ),
             )
             finish()
@@ -78,12 +85,12 @@ class SettingsActivity :
         val restored = supportFragmentManager.findFragmentById(R.id.settingsContainer)
         val index =
             when (restored) {
-                is com.lizhihua.carplaysender.launcher.settings.DesktopPanelFragment -> SettingsMenus.DESKTOP
-                is com.lizhihua.carplaysender.launcher.settings.SupersamplePanelFragment -> SettingsMenus.SUPERSAMPLE
-                is com.lizhihua.carplaysender.launcher.settings.OrientationPanelFragment -> SettingsMenus.ORIENTATION
-                is com.lizhihua.carplaysender.launcher.settings.DockPanelFragment -> SettingsMenus.DOCK
-                is com.lizhihua.carplaysender.launcher.settings.DefaultMapPanelFragment -> SettingsMenus.DEFAULT_MAP
-                is com.lizhihua.carplaysender.launcher.settings.DisplayPanelFragment -> SettingsMenus.DISPLAY
+                is DesktopPanelFragment -> SettingsMenus.DESKTOP
+                is SupersamplePanelFragment -> SettingsMenus.SUPERSAMPLE
+                is OrientationPanelFragment -> SettingsMenus.ORIENTATION
+                is DockPanelFragment -> SettingsMenus.DOCK
+                is DefaultMapPanelFragment -> SettingsMenus.DEFAULT_MAP
+                is DisplayPanelFragment -> SettingsMenus.DISPLAY
                 else -> 0
             }
         showMenu(index)

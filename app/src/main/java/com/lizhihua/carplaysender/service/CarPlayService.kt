@@ -9,6 +9,8 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.lizhihua.carplaysender.MainActivity
+import com.lizhihua.carplaysender.util.DebugFileLog
 
 /**
  * 前台保活服务：连接建立期间以 connectedDevice 类型常驻，
@@ -135,7 +137,7 @@ class CarPlayService : Service() {
     /** 投影生命周期等关键事件：logcat + 文件双写（HKS 环境下文件是唯一可读通道）。 */
     private fun fileLog(message: String) {
         android.util.Log.i("CarPlayService", message)
-        com.lizhihua.carplaysender.util.DebugFileLog
+        DebugFileLog
             .append(this, message)
     }
 
@@ -179,7 +181,7 @@ class CarPlayService : Service() {
             android.app.PendingIntent.getActivity(
                 this,
                 0,
-                Intent(this, com.lizhihua.carplaysender.MainActivity::class.java).apply {
+                Intent(this, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 },
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,

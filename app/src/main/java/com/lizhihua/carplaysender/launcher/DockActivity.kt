@@ -15,6 +15,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import com.lizhihua.carplaysender.R
+import com.lizhihua.carplaysender.ui.WallpaperStore
 import com.lizhihua.carplaysender.util.Bg
 
 /**
@@ -112,7 +113,7 @@ class DockActivity : AppCompatActivity() {
         clockView?.post { fitClockText(clockView!!) }
         setupWallpaper()
         // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
-        com.lizhihua.carplaysender.ui.WallpaperStore
+        WallpaperStore
             .addListener(wallpaperListener)
         refreshWallpaperIfChanged()
         // dock 外观（暗幕/模糊）：应用当前值 + 监听设置页调整
@@ -126,7 +127,7 @@ class DockActivity : AppCompatActivity() {
         VirtualLauncher.removeRunningAppsListener(refreshListener)
         pollHandler.removeCallbacksAndMessages(null)
         clockHandler.removeCallbacks(clockTicker)
-        com.lizhihua.carplaysender.ui.WallpaperStore
+        WallpaperStore
             .removeListener(wallpaperListener)
         DockPrefs.removeListener(dockPrefsListener)
         runCatching { unregisterReceiver(batteryReceiver) }
@@ -195,14 +196,14 @@ class DockActivity : AppCompatActivity() {
     /** 壁纸版本变化时后台重解码并换图（监听器模式下与桌面同步更新）。 */
     private fun refreshWallpaperIfChanged() {
         val view = wallpaperView ?: return
-        val current = com.lizhihua.carplaysender.ui.WallpaperStore.version
+        val current = WallpaperStore.version
         if (current == wallpaperShownVersion) return
         wallpaperShownVersion = current
         val params = view.layoutParams as? FrameLayout.LayoutParams ?: return
         Bg.run("wallpaper-dock") {
             val bitmap =
                 runCatching {
-                    com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
+                    WallpaperStore.aspectFillCanvas(
                         this@DockActivity,
                         params.width,
                         params.height,
