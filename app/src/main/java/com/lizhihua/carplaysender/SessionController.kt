@@ -314,6 +314,15 @@ object SessionController {
      * 因此这里必须：绑车机 WiFi → 广播 ctrl；晚于 0x4300 则双方互等死锁（Audi 实测）。
      */
     fun onWifiCredentials(wifi: com.lizhihua.carplaysender.iap2.Iap2SenderSession.WifiConfiguration) {
+        // 会话推流中收到的 0x5703 是冗余凭据（DiPlay 控制器周期重连会重发一轮
+        // Phase 1，2026-10-15 实测「连上后自动断开」循环的推手之一）：此时再走绑定
+        // 流程会 release+重绑进程网络（扰动正在推流的 socket）、force 重注册 ctrl
+        // mDNS（DiPlay 视为手机重新上线、再拉一轮 RFCOMM）。只刷新密码缓存。
+        if (videoSender?.isRunning == true) {
+            lastWifiPsk = wifi.passphrase
+            appendLog("0x5703 冗余凭据（会话推流中）——保持现有 WiFi 绑定与 ctrl 广播不变")
+            return
+        }
         ssidSink?.invoke(wifi.ssid)
         lastWifiPsk = wifi.passphrase
         phaseHint = "拿到车机热点凭据，绑定 WiFi…"
@@ -760,6 +769,14 @@ object SessionController {
         source: String,
     ) {
         val context = appContext ?: return
+        // 冗余端点防护：接收端控制器（DiPlay 实测）在我们配对推流后才完成既有的
+        // RFCOMM 重连并重发 0x4301。此时重启配对会 retireSession 掉健康会话
+        // （编码器 stop 竞态 = 「连上后自动断开」循环的根因）。推流中的端点一律忽略；
+        // 真断连时推流自行终止（isRunning=false），下一个端点自然接续重连。
+        if (videoSender?.isRunning == true) {
+            appendLog(">>> [$source] 会话推流中——忽略冗余端点（接收端周期重连的重复 0x4301）")
+            return
+        }
         if (!sessionStarting.compareAndSet(false, true)) {
             appendLog(">>> [$source] 已有会话在处理中，忽略本次端点（等待上一轮结束）")
             return
