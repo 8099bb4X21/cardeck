@@ -18,7 +18,8 @@ adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk
 
 **安装流程（重要）**：会话进行中直接 `adb install` 时，系统安装确认弹窗会落到车机侧
 虚拟屏上（无人点得到，表现为 User rejected / 卡住）。**必须先 force-stop 再 install**；
-若仍被拒，等几秒重试（手机上的确认弹窗需手动点）。
+若仍被拒，先 `input keyevent KEYCODE_WAKEUP` 亮屏再装——**熄屏时确认弹窗无人应答会被
+系统自动拒绝**（2026-10-15 实测三次 INSTALL_FAILED_ABORTED，亮屏后即成）。
 
 **提交**：pre-commit 钩子（`.githooks/pre-commit`，经 `core.hooksPath` 启用；克隆后需
 执行一次 `git config core.hooksPath .githooks`）会自动格式化暂存的 kt/kts 并跑
@@ -95,6 +96,14 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   多已保存网络环境禁不完整、移动场景误伤、侵入用户配置。现行方案：connect-network
   自动加入（best effort）+ 阶段提示告知「若被切回请到 WLAN 手动连接热点」+ WiFi 未
   开启时等待提示（30s）+ 加入超时的手动兜底指引。
+- **推流中的冗余端点/凭据必须忽略**：接收端控制器（DiPlay 实测）在我们配对推流**之后**
+  才完成它本轮的 RFCOMM 连接并重发一整套 0x5703/0x4301；若照常当新会话处理，
+  `retireSession()` 会把健康会话拆掉（编码器 stop 竞态，日志表现为 `Pending dequeue
+  output buffer request cancelled`），接收端视为 session ended 再重连——形成「连上后
+  自动断开」循环（2026-10-15）。防护在 `SessionController.onCarPlayEndpoint` /
+  `onWifiCredentials`：`videoSender.isRunning` 时直接忽略/只刷新密码缓存；真断连时
+  推流自行终止，下一个端点自然接续。会话中的冗余 0x5703 还会连带触发 WiFi 重绑 +
+  ctrl mDNS force 重注册，都会扰动推流，一并拦下。
 - **媒体卡片**：元数据切歌是分阶段的（歌名先到、封面/时长滞后），空结果需短退避重试
   而非固化缓存；播放位置用「锚点 + 速度」外推，UI 每秒自刷新。
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
