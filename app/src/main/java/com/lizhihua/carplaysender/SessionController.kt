@@ -1,7 +1,27 @@
 package com.lizhihua.carplaysender
 
 import android.content.Context
+import com.lizhihua.carplaysender.airplay.AirPlayClient
+import com.lizhihua.carplaysender.audio.AudioSender
+import com.lizhihua.carplaysender.bt.BtSessionGate
+import com.lizhihua.carplaysender.bt.Iap2BluetoothClient
+import com.lizhihua.carplaysender.bt.Iap2BluetoothServer
+import com.lizhihua.carplaysender.capture.HiddenDisplaySource
+import com.lizhihua.carplaysender.iap2.Iap2MessageIds
+import com.lizhihua.carplaysender.iap2.Iap2SenderSession
+import com.lizhihua.carplaysender.input.TouchReports
+import com.lizhihua.carplaysender.input.TouchRouter
+import com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
+import com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
+import com.lizhihua.carplaysender.net.CarPlayCtrlAdvertiser
+import com.lizhihua.carplaysender.net.CarPlayServiceBrowser
+import com.lizhihua.carplaysender.net.WifiCarPlayConnector
+import com.lizhihua.carplaysender.service.CarPlayService
+import com.lizhihua.carplaysender.shizuku.Shell
+import com.lizhihua.carplaysender.shizuku.ShizukuGate
 import com.lizhihua.carplaysender.util.Bg
+import com.lizhihua.carplaysender.util.DebugFileLog
+import com.lizhihua.carplaysender.video.VideoSender
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -27,7 +47,7 @@ object SessionController {
     private val logBuilder = StringBuilder()
     private val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
-    /** 当前挂屏 Activity 的渲染回调（收到完整日志文本）；Activity onDestroy 时清空。 */
+    /** 当前挂屏 Activity 的渲染回调（收到**本条新增日志行**，含时间戳前缀）；Activity onDestroy 时清空。 */
     @Volatile
     var logListener: ((String) -> Unit)? = null
 
@@ -38,30 +58,39 @@ object SessionController {
     @Volatile
     private var appContext: Context? = null
 
+    /** WiFi 等待用户操作的窗口（打开 WLAN 开关 / 手动加入热点的轮询上限）。 */
+    private const val WLAN_WAIT_TIMEOUT_MS = 120_000L
+
+    /** 加入确认弹窗的应答等待上限（无人应答按中止处理）。 */
+    private const val JOIN_DIALOG_TIMEOUT_S = 90L
+
+    /** 端点交接后等 ctrl 探测完成的固定等待（实测 +1.0~+1.3s）。 */
+    private const val CTRL_PROBE_SETTLE_MS = 1_600L
+
     /** Activity onCreate 时调用：登记 applicationContext 并创建会话对象（幂等）。 */
     fun ensure(context: Context) {
         appContext = context.applicationContext
         ensureSessionObjects(context.applicationContext)
     }
 
-    /** 追加一行日志：logcat + 文件 + 进程级缓冲 + 挂屏渲染。任意线程可调。 */
+    /** 追加一行日志：logcat + 文件 + 进程级缓冲 + 挂屏渲染（增量行直送）。任意线程可调。 */
     fun appendLog(message: String) {
         android.util.Log.i("CarPlaySender", message)
         appContext?.let {
-            com.lizhihua.carplaysender.util.DebugFileLog
+            DebugFileLog
                 .append(it, message)
         }
         if (!logEnabled) return
-        synchronized(logLock) {
-            logBuilder
-                .append('[')
-                .append(timestamp.format(Date()))
-                .append("] ")
-                .append(message)
-                .append('\n')
-            if (logBuilder.length > 40_000) logBuilder.delete(0, logBuilder.length - 20_000)
-        }
-        logListener?.invoke(logText())
+        val line =
+            synchronized(logLock) {
+                val stamped = '[' + timestamp.format(Date()) + "] " + message + '\n'
+                logBuilder.append(stamped)
+                if (logBuilder.length > 40_000) logBuilder.delete(0, logBuilder.length - 20_000)
+                stamped
+            }
+        // 增量行直送 UI：此前每行 toString 整个缓冲再 setText 全文，
+        // 高频日志（触摸/帧）下是 UI 线程与 GC 的双重放大器
+        logListener?.invoke(line)
     }
 
     fun logText(): String = synchronized(logLock) { logBuilder.toString() }
@@ -73,13 +102,16 @@ object SessionController {
 
     // ---- 会话对象（进程级所有权；Activity 重建不影响）----
 
-    private var wifiConnector: com.lizhihua.carplaysender.net.WifiCarPlayConnector? = null
-    private var bluetoothServer: com.lizhihua.carplaysender.bt.Iap2BluetoothServer? = null
-    private var bluetoothClient: com.lizhihua.carplaysender.bt.Iap2BluetoothClient? = null
-    private var ctrlAdvertiser: com.lizhihua.carplaysender.net.CarPlayCtrlAdvertiser? = null
+    private var wifiConnector: WifiCarPlayConnector? = null
+
+    /** DCL 双检锁的可发布字段（无 volatile 的双检锁是坏发布——虽然当前仅主线程调用，别留隐患）。 */
+    @Volatile
+    private var bluetoothServer: Iap2BluetoothServer? = null
+    private var bluetoothClient: Iap2BluetoothClient? = null
+    private var ctrlAdvertiser: CarPlayCtrlAdvertiser? = null
 
     @Volatile
-    var videoSender: com.lizhihua.carplaysender.video.VideoSender? = null
+    var videoSender: VideoSender? = null
 
     // ---- 「显示」运行时生效值（会话建立时快照；英雄卡展示运行时值而非偏好值）----
 
@@ -92,13 +124,13 @@ object SessionController {
     var activeTargetFps: Int = 30
 
     @Volatile
-    var audioSender: com.lizhihua.carplaysender.audio.AudioSender? = null
+    var audioSender: AudioSender? = null
 
     @Volatile
-    var currentClient: com.lizhihua.carplaysender.airplay.AirPlayClient? = null
+    var currentClient: AirPlayClient? = null
 
     @Volatile
-    var currentHiddenSource: com.lizhihua.carplaysender.capture.HiddenDisplaySource? = null
+    var currentHiddenSource: HiddenDisplaySource? = null
 
     /** 当前会话的共享密钥与接收端地址：投影授权晚于连接时，动态补启音频用。 */
     @Volatile
@@ -171,28 +203,24 @@ object SessionController {
         if (bluetoothServer != null) return
         synchronized(this) {
             if (bluetoothServer != null) return
-            wifiConnector =
-                com.lizhihua.carplaysender.net
-                    .WifiCarPlayConnector(context) { line -> appendLog(line) }
-            val wifiCredentialHook: (com.lizhihua.carplaysender.iap2.Iap2SenderSession.WifiConfiguration) -> Unit =
+            wifiConnector = WifiCarPlayConnector(context) { line -> appendLog(line) }
+            val wifiCredentialHook: (Iap2SenderSession.WifiConfiguration) -> Unit =
                 { wifi -> onWifiCredentials(wifi) }
             bluetoothServer =
-                com.lizhihua.carplaysender.bt.Iap2BluetoothServer(
+                Iap2BluetoothServer(
                     context,
                     log = { line -> appendLog(line) },
                     onEndpoint = { endpoint -> onCarPlayEndpoint(endpoint, "车机回连") },
                     onWifiCredentials = wifiCredentialHook,
                 )
             bluetoothClient =
-                com.lizhihua.carplaysender.bt.Iap2BluetoothClient(
+                Iap2BluetoothClient(
                     context,
                     log = { line -> appendLog(line) },
                     onEndpoint = { endpoint -> onCarPlayEndpoint(endpoint, "主动连车机") },
                     onWifiCredentials = wifiCredentialHook,
                 )
-            ctrlAdvertiser =
-                com.lizhihua.carplaysender.net
-                    .CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
+            ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
         }
     }
 
@@ -215,25 +243,25 @@ object SessionController {
         connectCancelled = false
         phaseHint = "蓝牙就绪，等待车机回连…"
         when (
-            com.lizhihua.carplaysender.shizuku.ShizukuGate
+            ShizukuGate
                 .state(context)
         ) {
-            com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY ->
+            ShizukuGate.State.READY ->
                 appendLog("SHIZUKU: 就绪（触摸注入可用）")
 
-            com.lizhihua.carplaysender.shizuku.ShizukuGate.State.UNAUTHORIZED -> {
+            ShizukuGate.State.UNAUTHORIZED -> {
                 appendLog("SHIZUKU: 未授权本应用——已发起授权请求，请在弹窗点允许后重连")
-                com.lizhihua.carplaysender.shizuku.ShizukuGate
+                ShizukuGate
                     .requestPermission()
             }
 
-            com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_RUNNING ->
+            ShizukuGate.State.NOT_RUNNING ->
                 appendLog("SHIZUKU: 服务未运行——打开 Shizuku App 点「启动」")
 
-            com.lizhihua.carplaysender.shizuku.ShizukuGate.State.NOT_INSTALLED ->
+            ShizukuGate.State.NOT_INSTALLED ->
                 appendLog("SHIZUKU: 未安装（隐形屏模式需要）")
         }
-        com.lizhihua.carplaysender.service.CarPlayService
+        CarPlayService
             .start(context)
         // 真车路径：手机主动连车机（SDP …caff 配件服务）
         // 测试台路径：监听手机侧 iPhone UUID，等 DiPlay/xcertplay 回连
@@ -243,10 +271,10 @@ object SessionController {
 
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
     fun disconnect(context: Context) {
-        val hadProjection = com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null
+        val hadProjection = CarPlayService.mediaProjection != null
         retireSession()
         phaseHint = null
-        com.lizhihua.carplaysender.service.CarPlayService
+        CarPlayService
             .stop(context)
         bluetoothServer?.stop()
         bluetoothClient?.stop()
@@ -271,7 +299,7 @@ object SessionController {
         currentAudioHost = null
         currentHiddenSource?.release()
         currentHiddenSource = null
-        com.lizhihua.carplaysender.input.TouchRouter
+        TouchRouter
             .reset()
         currentClient?.cancelled = true
         currentClient?.close()
@@ -281,12 +309,12 @@ object SessionController {
         // 英雄卡持续转圈（「取消不了」观感的根因）
         detachActiveBtSessions()
         // 解除会话静默：出站探测恢复（下次会话建立时会再次置位）
-        com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = false
+        BtSessionGate.sessionActive = false
         // 「强制应用横屏」覆盖随会话结束统一复原（应用回到手机侧正常竖屏形态）
         appContext?.let { ctx ->
             runCatching {
                 val restored =
-                    com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
+                    AppOrientationCompat
                         .resetAll(ctx)
                 if (restored > 0) appendLog("ORIENTATION: 已复原 $restored 个应用的显示设置")
             }
@@ -313,7 +341,7 @@ object SessionController {
      * 主动发 `GET /ctrl-int/1/connect` 邀请，邀请被接受才发 0x4301。
      * 因此这里必须：绑车机 WiFi → 广播 ctrl；晚于 0x4300 则双方互等死锁（Audi 实测）。
      */
-    fun onWifiCredentials(wifi: com.lizhihua.carplaysender.iap2.Iap2SenderSession.WifiConfiguration) {
+    fun onWifiCredentials(wifi: Iap2SenderSession.WifiConfiguration) {
         // 会话推流中收到的 0x5703 是冗余凭据（DiPlay 控制器周期重连会重发一轮
         // Phase 1，2026-10-15 实测「连上后自动断开」循环的推手之一）：此时再走绑定
         // 流程会 release+重绑进程网络（扰动正在推流的 socket）、force 重注册 ctrl
@@ -345,13 +373,13 @@ object SessionController {
      *     用户取消后不得继续跑（否则 phaseHint 被覆盖、ctrl 广播被重新拉起，表现为「取消不了」）。
      * Shizuku 未就绪/连接失败时回退「系统 WLAN 手动加入」指引（密码可经「去连接」复制）。
      */
-    private fun autoJoinCarWifi(wifi: com.lizhihua.carplaysender.iap2.Iap2SenderSession.WifiConfiguration) {
+    private fun autoJoinCarWifi(wifi: Iap2SenderSession.WifiConfiguration) {
         val ctx = appContext
         val shizukuReady =
             ctx != null &&
-                com.lizhihua.carplaysender.shizuku.ShizukuGate
+                ShizukuGate
                     .state(ctx) ==
-                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
+                ShizukuGate.State.READY
         if (!shizukuReady) {
             phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${wifi.ssid}"
             appendLog(
@@ -395,7 +423,7 @@ object SessionController {
                     }
                 }
                 var waited = 0
-                while (shellWifiDisabled() && waited < 120_000 && !connectCancelled) {
+                while (shellWifiDisabled() && waited < WLAN_WAIT_TIMEOUT_MS && !connectCancelled) {
                     if (waited == 0) {
                         phaseHint = "等待打开 WLAN（最长 120 秒，取消连接可中止）"
                         appendLog("WIFI: 等待用户打开 WLAN（最长 120 秒，取消连接可中止）")
@@ -442,7 +470,8 @@ object SessionController {
                 openWlanSettings()
                 phaseHint = "请在 WLAN 设置中连接 ${wifi.ssid}…"
                 appendLog("WIFI: 用户选择手动连接——等待 WLAN 连上 \"${wifi.ssid}\"（最长 120 秒）")
-                repeat(24) {
+                val manualDeadline = android.os.SystemClock.uptimeMillis() + WLAN_WAIT_TIMEOUT_MS
+                while (android.os.SystemClock.uptimeMillis() < manualDeadline) {
                     if (connectCancelled) return@run
                     Thread.sleep(5_000)
                     if (shellWifiStatus().second == wifi.ssid) {
@@ -464,7 +493,7 @@ object SessionController {
             val security =
                 if (wifi.passphrase.isEmpty()) "open" else "wpa2 ${shellQuote(wifi.passphrase)}"
             val result =
-                com.lizhihua.carplaysender.shizuku.Shell
+                Shell
                     .exec("cmd wifi connect-network ${shellQuote(wifi.ssid)} $security", 10_000L)
             if (!result.ok) {
                 phaseHint = "自动加入热点失败——请到 WLAN 设置加入 ${wifi.ssid}"
@@ -506,7 +535,7 @@ object SessionController {
     }
 
     /** 绑定当前 WiFi（应为车机热点）并重注册 ctrl 广播；绑定超时给出指引。 */
-    private fun bindCarWifiAndRegister(wifi: com.lizhihua.carplaysender.iap2.Iap2SenderSession.WifiConfiguration) {
+    private fun bindCarWifiAndRegister(wifi: Iap2SenderSession.WifiConfiguration) {
         var bound = false
         val latch = java.util.concurrent.CountDownLatch(1)
         wifiConnector?.bindCurrentWifi { ok ->
@@ -535,7 +564,7 @@ object SessionController {
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             val sink = dialogSink
             if (sink == null) {
-                choice = true // 无 UI 宿主（理论不可达）：默认继续自动加入
+                // 无 UI 宿主（Activity 销毁窗口）：宁可中止也不默认替用户决定加入
                 latch.countDown()
                 return@post
             }
@@ -544,7 +573,7 @@ object SessionController {
                 latch.countDown()
             }
         }
-        latch.await(90, java.util.concurrent.TimeUnit.SECONDS)
+        latch.await(JOIN_DIALOG_TIMEOUT_S, java.util.concurrent.TimeUnit.SECONDS)
         return choice
     }
 
@@ -585,7 +614,7 @@ object SessionController {
      */
     private fun shellWifiStatus(): Pair<Boolean, String?> {
         val result =
-            com.lizhihua.carplaysender.shizuku.Shell
+            Shell
                 .exec("cmd wifi status", 5_000L)
         if (!result.ok) return true to null
         val enabled = !result.output.contains("Wifi is disabled")
@@ -614,7 +643,7 @@ object SessionController {
      */
     fun startAudioChannel(
         context: Context,
-        client: com.lizhihua.carplaysender.airplay.AirPlayClient,
+        client: AirPlayClient,
         sharedSecret: ByteArray,
         host: String?,
     ) {
@@ -626,7 +655,7 @@ object SessionController {
             appendLog("AUDIO: 无接收端 IPv4 地址，跳过音频通道")
             return
         }
-        val projection = com.lizhihua.carplaysender.service.CarPlayService.mediaProjection
+        val projection = CarPlayService.mediaProjection
         if (projection == null) {
             appendLog(
                 "AUDIO: 缺少投屏权限（播放捕获依赖 MediaProjection）——音频通道未启动。" +
@@ -637,7 +666,7 @@ object SessionController {
         try {
             val audio = client.runAudioStream(sharedSecret) ?: return
             val sender =
-                com.lizhihua.carplaysender.audio.AudioSender(
+                AudioSender(
                     host = host,
                     dataPort = audio.dataPort,
                     streamKey = audio.streamKey,
@@ -661,9 +690,9 @@ object SessionController {
      */
     private fun resolveEndpointHost(
         context: Context,
-        endpoint: com.lizhihua.carplaysender.iap2.Iap2SenderSession.CarPlayEndpoint,
+        endpoint: Iap2SenderSession.CarPlayEndpoint,
         source: String,
-    ): com.lizhihua.carplaysender.iap2.Iap2SenderSession.CarPlayEndpoint {
+    ): Iap2SenderSession.CarPlayEndpoint {
         var effective = endpoint
         val needHost = !effective.ipAddresses.any { it.contains('.') && !it.contains(':') }
         val needPort = effective.airPlayPort <= 0
@@ -680,7 +709,7 @@ object SessionController {
             java.util.concurrent.atomic
                 .AtomicReference<android.net.nsd.NsdServiceInfo?>(null)
         val browser =
-            com.lizhihua.carplaysender.net.CarPlayServiceBrowser(
+            CarPlayServiceBrowser(
                 context,
                 log = { line -> appendLog(line) },
             ) { info ->
@@ -765,7 +794,7 @@ object SessionController {
 
     /** BT 会话交接点：拿到 0x5703/0x4301 后两条路径流程一致——绑 WiFi → AirPlay 配对 → SETUP → 推流。 */
     private fun onCarPlayEndpoint(
-        endpoint: com.lizhihua.carplaysender.iap2.Iap2SenderSession.CarPlayEndpoint,
+        endpoint: Iap2SenderSession.CarPlayEndpoint,
         source: String,
     ) {
         val context = appContext ?: return
@@ -809,7 +838,7 @@ object SessionController {
                         sessionStarting.set(false)
                         return@run
                     }
-                    Thread.sleep(1_600) // 等 ctrl 探测（实测 +1.0~+1.3s）
+                    Thread.sleep(CTRL_PROBE_SETTLE_MS) // 等 ctrl 探测（实测 +1.0~+1.3s）
                     if (connectCancelled) {
                         appendLog("AIRPLAY: 用户已取消——中止配对")
                         sessionStarting.set(false)
@@ -817,7 +846,7 @@ object SessionController {
                     }
 
                     fun newClient() =
-                        com.lizhihua.carplaysender.airplay.AirPlayClient(
+                        AirPlayClient(
                             effectiveEndpoint,
                             log = { line -> appendLog(line) },
                             context = context.applicationContext,
@@ -825,7 +854,7 @@ object SessionController {
                     retireSession()
                     // 会话静默降噪（2026-10-10）：从交接点起暂停其它接收端的出站连接探测
                     // （典型：连着 DiPlay 测试台时不再噪音式探测 Audi）。会话结束/断开时解除。
-                    com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = true
+                    BtSessionGate.sessionActive = true
                     // 第一阶段：保持 BT 在位直接配对 + SETUP（协议上正确的形态）
                     phaseHint = "AirPlay 配对中…"
                     var client = newClient()
@@ -874,7 +903,7 @@ object SessionController {
                                         val report = command["hidReport"] as? ByteArray
                                         val contacts =
                                             if (uuid != null && report != null) {
-                                                com.lizhihua.carplaysender.input.TouchReports
+                                                TouchReports
                                                     .parseByUuid(uuid, report)
                                             } else {
                                                 null
@@ -890,7 +919,7 @@ object SessionController {
                                             }
                                             touchLogCount++
                                             contacts.forEach {
-                                                com.lizhihua.carplaysender.input.TouchRouter.onContact(
+                                                TouchRouter.onContact(
                                                     context.applicationContext,
                                                     it,
                                                 )
@@ -949,7 +978,7 @@ object SessionController {
                                         val hex = frame.body.joinToString(" ") { "%02x".format(it) }
                                         appendLog(
                                             "TUNNEL: rx 0x${frame.messageId.toString(16)} " +
-                                                "(${com.lizhihua.carplaysender.iap2.Iap2MessageIds.nameOf(
+                                                "(${Iap2MessageIds.nameOf(
                                                     frame.messageId,
                                                 )}) ${frame.body.size}B" +
                                                 if (frame.body.isNotEmpty()) " hex=${hex.take(120)}" else "",
@@ -967,7 +996,7 @@ object SessionController {
                                     val scalePct =
                                         appContext
                                             ?.let {
-                                                com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
+                                                DisplayPrefs
                                                     .scalePercent(it)
                                             } ?: 100
                                     val scale = scalePct / 100f
@@ -980,14 +1009,14 @@ object SessionController {
                                     val fps =
                                         appContext
                                             ?.let {
-                                                com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
+                                                DisplayPrefs
                                                     .fps(it)
                                             } ?: 30
                                     activeScalePercent = scalePct
                                     activeTargetFps = fps
                                     // 车机触摸在通告视图坐标系（如 1160×540），流已按比例
                                     // 缩放（如 1450×674）——注入前需映射，否则点击漂移
-                                    com.lizhihua.carplaysender.input.TouchRouter
+                                    TouchRouter
                                         .setCoordinateScale(
                                             setup.displayWidth,
                                             setup.displayHeight,
@@ -999,7 +1028,7 @@ object SessionController {
                                             "${streamW}x$streamH（$scalePct%）@${fps}fps",
                                     )
                                     videoSender =
-                                        com.lizhihua.carplaysender.video.VideoSender(
+                                        VideoSender(
                                             host = host,
                                             dataPort = screen.dataPort,
                                             streamKey = screen.streamKey,
@@ -1010,11 +1039,11 @@ object SessionController {
                                             onEnded = {
                                                 // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
                                                 appendLog(">>> CarPlay 会话结束（推流终止）——恢复蓝牙探测")
-                                                com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = false
+                                                BtSessionGate.sessionActive = false
                                                 // 车机掉线类结束（无用户断开操作）：同样复原横屏覆盖
                                                 appContext?.let { ctx ->
                                                     runCatching {
-                                                        com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
+                                                        AppOrientationCompat
                                                             .resetAll(ctx)
                                                     }
                                                 }
@@ -1024,7 +1053,7 @@ object SessionController {
                                     videoSender?.start { surface ->
                                         // 唯一模式：隐形屏（双屏启动器：dock + 应用屏）
                                         val source =
-                                            com.lizhihua.carplaysender.capture.HiddenDisplaySource(
+                                            HiddenDisplaySource(
                                                 context.applicationContext,
                                                 log = { line -> appendLog(line) },
                                             )
@@ -1053,7 +1082,7 @@ object SessionController {
                     // 否则 BT-C 会永久停在门闸外、连真车路径失效。
                     // 推流活跃时保持关闭，由 VideoSender.onEnded（推流终止）负责解除。
                     if (videoSender?.isRunning != true) {
-                        com.lizhihua.carplaysender.bt.BtSessionGate.sessionActive = false
+                        BtSessionGate.sessionActive = false
                     }
                 }
             }

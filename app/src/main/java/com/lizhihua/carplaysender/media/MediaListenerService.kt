@@ -5,6 +5,7 @@ import android.media.MediaMetadata
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.service.notification.NotificationListenerService
+import com.lizhihua.carplaysender.launcher.VirtualLauncher
 
 /**
  * 通知监听服务：借通知使用权枚举系统活跃媒体会话，向应用提供「正在播放」状态
@@ -251,14 +252,16 @@ object MediaSessionsState {
                 old?.playing != value?.playing ||
                 old?.art !== value?.art
         if (contentChanged) {
-            com.lizhihua.carplaysender.launcher.VirtualLauncher.logSink?.invoke(
+            VirtualLauncher.logSink?.invoke(
                 "MEDIA: " + (
                     value?.let { "${it.title ?: "?"} - ${it.artist ?: "?"} playing=${it.playing}" }
                         ?: "无活跃会话"
                 ),
             )
         }
-        if (old == value) return
+        // 内容未变（仅位置锚点随轮询更新）不通知：进度走秒由 UI 侧 mediaTick 每秒自刷新
+        // ——此前 anchoredAtMs 恒变导致每秒全量通知监听者，与 mediaTick 形成双路重复渲染
+        if (!contentChanged) return
         listeners.forEach { runCatching { it() } }
     }
 

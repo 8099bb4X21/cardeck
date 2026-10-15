@@ -22,7 +22,18 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
+import com.lizhihua.carplaysender.input.TouchRouter
+import com.lizhihua.carplaysender.launcher.VirtualLauncher
+import com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
+import com.lizhihua.carplaysender.media.MediaListenerService
+import com.lizhihua.carplaysender.service.CarPlayService
+import com.lizhihua.carplaysender.shizuku.CarInputClient
+import com.lizhihua.carplaysender.shizuku.Shell
+import com.lizhihua.carplaysender.shizuku.ShizukuGate
+import com.lizhihua.carplaysender.ui.ScreenDimmer
 import com.lizhihua.carplaysender.ui.SignalWavesView
+import com.lizhihua.carplaysender.ui.WallpaperStore
+import com.lizhihua.carplaysender.util.Bg
 import java.util.Locale
 
 /**
@@ -103,9 +114,9 @@ class MainActivity : AppCompatActivity() {
     /** 当前打开的「加入热点」确认弹窗：取消连接时联动关闭（触发流程中止）。 */
     private var wifiJoinDialog: androidx.appcompat.app.AlertDialog? = null
 
-    private val logListener: (String) -> Unit = { text ->
+    private val logListener: (String) -> Unit = { line ->
         runOnUiThread {
-            if (!isFinishing && !isDestroyed) renderConsole(text)
+            if (!isFinishing && !isDestroyed) appendConsole(line)
         }
     }
 
@@ -134,7 +145,7 @@ class MainActivity : AppCompatActivity() {
                 return@registerForActivityResult
             }
             val ok =
-                com.lizhihua.carplaysender.ui.WallpaperStore
+                WallpaperStore
                     .setFromUri(this, uri)
             log(
                 "WALLPAPER: ${if (ok) "壁纸已更新（会话进行中约 1 秒内上车；下次连接自动生效）" else "保存失败"}",
@@ -155,19 +166,19 @@ class MainActivity : AppCompatActivity() {
                 return@registerForActivityResult
             }
             // Android 14+ 顺序：先把结果交给服务，由服务升级 FGS 类型后调 getMediaProjection
-            com.lizhihua.carplaysender.service.CarPlayService.pendingProjectionResult =
+            CarPlayService.pendingProjectionResult =
                 result.resultCode to data
-            com.lizhihua.carplaysender.service.CarPlayService
+            CarPlayService
                 .start(this)
             log("MODE: ✓ 投屏权限已授予（重启手机后需重新授权）")
             // 会话已在进行中授权（授权晚于连接）：等投影就绪后动态补启音频通道
-            com.lizhihua.carplaysender.util.Bg.run("audio-late-start") {
+            Bg.run("audio-late-start") {
                 val deadline = SystemClock.uptimeMillis() + 5_000L
                 while (SystemClock.uptimeMillis() < deadline) {
-                    if (com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null) break
+                    if (CarPlayService.mediaProjection != null) break
                     Thread.sleep(200)
                 }
-                if (com.lizhihua.carplaysender.service.CarPlayService.mediaProjection == null) {
+                if (CarPlayService.mediaProjection == null) {
                     log("MODE: 投影 5 秒未就绪（服务异常？），音频通道本次未启动")
                     return@run
                 }
@@ -283,7 +294,7 @@ class MainActivity : AppCompatActivity() {
             startConnectionNow()
             return
         }
-        if (com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null) {
+        if (CarPlayService.mediaProjection != null) {
             log("MODE: 已选择开启声音（投屏权限已就绪）")
             startConnectionNow()
             return
@@ -379,12 +390,12 @@ class MainActivity : AppCompatActivity() {
         run {
             val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
             if (prefs.contains("screen_off_timeout_backup") &&
-                com.lizhihua.carplaysender.launcher.VirtualLauncher.appDisplayId < 0
+                VirtualLauncher.appDisplayId < 0
             ) {
                 val backup = prefs.getInt("screen_off_timeout_backup", 60_000)
                 prefs.edit().remove("screen_off_timeout_backup").apply()
-                com.lizhihua.carplaysender.util.Bg.run("screen-timeout-restore") {
-                    com.lizhihua.carplaysender.shizuku.Shell.exec(
+                Bg.run("screen-timeout-restore") {
+                    Shell.exec(
                         "settings put system screen_off_timeout $backup",
                     )
                 }
@@ -443,26 +454,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         // ---- 常亮+暗幕 ----
-        com.lizhihua.carplaysender.ui.ScreenDimmer.enabled =
+        ScreenDimmer.enabled =
             preferences.getBoolean("alwaysOn", true)
-        switchAlwaysOn.isChecked = com.lizhihua.carplaysender.ui.ScreenDimmer.enabled
+        switchAlwaysOn.isChecked = ScreenDimmer.enabled
         switchAlwaysOn.setOnCheckedChangeListener { _, checked ->
-            com.lizhihua.carplaysender.ui.ScreenDimmer.enabled = checked
+            ScreenDimmer.enabled = checked
             preferences.edit().putBoolean("alwaysOn", checked).apply()
             if (checked) {
                 if (!android.provider.Settings.canDrawOverlays(this)) {
                     promptOverlayPermission("已开启「常亮+暗幕」。")
                 } else {
-                    com.lizhihua.carplaysender.ui.ScreenDimmer
+                    ScreenDimmer
                         .attach(this)
                 }
             } else {
-                if (com.lizhihua.carplaysender.launcher.VirtualLauncher.appDisplayId >= 0) {
+                if (VirtualLauncher.appDisplayId >= 0) {
                     // 会话中：仅关闭常亮/暗幕（投屏探针等资源留待会话结束统一释放）
-                    com.lizhihua.carplaysender.ui.ScreenDimmer
+                    ScreenDimmer
                         .disableDim()
                 } else {
-                    com.lizhihua.carplaysender.ui.ScreenDimmer
+                    ScreenDimmer
                         .detach()
                 }
             }
@@ -518,13 +529,13 @@ class MainActivity : AppCompatActivity() {
 
         // ---- 车机显示 ----
         findViewById<LinearLayout>(R.id.rowDim).setOnClickListener {
-            if (!com.lizhihua.carplaysender.ui.ScreenDimmer
+            if (!ScreenDimmer
                     .isAttached()
             ) {
                 snack("暗幕未就绪（连接成功后自动启用）")
                 return@setOnClickListener
             }
-            com.lizhihua.carplaysender.ui.ScreenDimmer
+            ScreenDimmer
                 .enterDimNow()
             log("DIMMER: 手动假息屏（点击屏幕恢复）")
         }
@@ -538,7 +549,7 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<TextView>(R.id.btnWallpaperReset).setOnClickListener {
             val ok =
-                com.lizhihua.carplaysender.ui.WallpaperStore
+                WallpaperStore
                     .resetToDefault(this)
             log("WALLPAPER: ${if (ok) "已恢复内置默认（CarPlay 官方深色壁纸）" else "恢复失败"}")
             snack(if (ok) "已恢复默认壁纸" else "恢复失败")
@@ -582,15 +593,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 通知使用权（媒体会话枚举，音乐卡数据源）：Shizuku 在场时静默授权
-        com.lizhihua.carplaysender.util.Bg.run("notif-listener-grant") {
-            if (com.lizhihua.carplaysender.shizuku.ShizukuGate
+        Bg.run("notif-listener-grant") {
+            if (ShizukuGate
                     .state(this) ==
-                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
+                ShizukuGate.State.READY
             ) {
                 val result =
-                    com.lizhihua.carplaysender.shizuku.Shell.exec(
+                    Shell.exec(
                         "cmd notification allow_listener " +
-                            com.lizhihua.carplaysender.media.MediaListenerService
+                            MediaListenerService
                                 .componentName(this)
                                 .flattenToString(),
                         timeoutMs = 4000,
@@ -611,19 +622,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 启动即检查：常亮开 + 无悬浮窗权限 → 主动请求
-        if (com.lizhihua.carplaysender.ui.ScreenDimmer.enabled) {
+        if (ScreenDimmer.enabled) {
             if (!android.provider.Settings.canDrawOverlays(this)) {
                 promptOverlayPermission("「常亮+暗幕」已开启。")
             } else {
                 // 立即就绪：假息屏/自动暗幕不再依赖连接建立
-                com.lizhihua.carplaysender.ui.ScreenDimmer
+                ScreenDimmer
                     .attach(this)
             }
         }
 
-        com.lizhihua.carplaysender.input.TouchRouter.logSink = { line -> log(line) }
-        com.lizhihua.carplaysender.launcher.VirtualLauncher.logSink = { line -> log(line) }
-        com.lizhihua.carplaysender.shizuku.CarInputClient.logSink = { line -> log(line) }
+        TouchRouter.logSink = { line -> log(line) }
+        VirtualLauncher.logSink = { line -> log(line) }
+        CarInputClient.logSink = { line -> log(line) }
 
         log("CarPlay Sender Phase 0 就绪")
         log("真车：与车机蓝牙配对 + 手机加入车机热点 -> 点「启动连接」（自动主动连入车机）")
@@ -745,45 +756,38 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         "与车机蓝牙完成配对后，点击下方按钮发起无线连接"
                     }
-                ctaButton.setBackgroundResource(R.drawable.bg_cta_fill)
-                ctaLabel.setTextColor(getColor(R.color.m3_on_primary))
-                ctaIcon.imageTintList =
-                    android.content.res.ColorStateList.valueOf(
-                        getColor(R.color.m3_on_primary),
-                    )
-                ctaIcon.setImageResource(R.drawable.ic_play)
-                ctaLabel.text = "启动连接"
-                ctaButton.isEnabled = true
+                styleCta(R.drawable.bg_cta_fill, R.color.m3_on_primary, R.drawable.ic_play, "启动连接")
                 audioTag.visibility = View.GONE
             }
             HeroState.CONNECTING -> {
                 heroSubline.text = SessionController.phaseHint ?: DEFAULT_CONNECTING_HINT
-                ctaButton.setBackgroundResource(R.drawable.bg_cta_fill)
-                ctaLabel.setTextColor(getColor(R.color.m3_on_primary))
-                ctaIcon.imageTintList =
-                    android.content.res.ColorStateList.valueOf(
-                        getColor(R.color.m3_on_primary),
-                    )
-                ctaIcon.setImageResource(R.drawable.ic_close)
-                ctaLabel.text = "取消连接"
-                ctaButton.isEnabled = true
+                styleCta(R.drawable.bg_cta_fill, R.color.m3_on_primary, R.drawable.ic_close, "取消连接")
                 audioTag.visibility = View.GONE
             }
             HeroState.CONNECTED -> {
-                ctaButton.setBackgroundResource(R.drawable.bg_cta_outline_err)
-                ctaLabel.setTextColor(getColor(R.color.m3_error))
-                ctaIcon.imageTintList =
-                    android.content.res.ColorStateList.valueOf(
-                        getColor(R.color.m3_error),
-                    )
-                ctaIcon.setImageResource(R.drawable.ic_power)
-                ctaLabel.text = "断开连接"
-                ctaButton.isEnabled = true
+                styleCta(R.drawable.bg_cta_outline_err, R.color.m3_error, R.drawable.ic_power, "断开连接")
                 audioTag.visibility = View.VISIBLE
             }
         }
 
         ctaIcon.rotation = 0f
+    }
+
+    /** 英雄卡主操作按钮统一样式（三个状态仅风格/图标/文案不同）。 */
+    private fun styleCta(
+        bgRes: Int,
+        colorRes: Int,
+        iconRes: Int,
+        label: String,
+    ) {
+        ctaButton.setBackgroundResource(bgRes)
+        ctaLabel.setTextColor(getColor(colorRes))
+        ctaIcon.imageTintList =
+            android.content.res.ColorStateList
+                .valueOf(getColor(colorRes))
+        ctaIcon.setImageResource(iconRes)
+        ctaLabel.text = label
+        ctaButton.isEnabled = true
     }
 
     private fun updateConnectedSubline() {
@@ -839,7 +843,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (bondedCount > 0) ready++
-        if (com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null) ready++
+        if (CarPlayService.mediaProjection != null) ready++
 
         btBadge.visibility = if (bondedCount >= 0) View.VISIBLE else View.GONE
         if (bondedCount >= 0) {
@@ -854,7 +858,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val projectionReady =
-            com.lizhihua.carplaysender.service.CarPlayService.mediaProjection != null
+            CarPlayService.mediaProjection != null
         if (projectionReady) {
             btnAudio.text = "已授权"
             btnAudio.setTextColor(getColor(R.color.m3_ok))
@@ -880,9 +884,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateShizukuChip() {
         val ready =
-            com.lizhihua.carplaysender.shizuku.ShizukuGate
+            ShizukuGate
                 .state(this) ==
-                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
+                ShizukuGate.State.READY
         shizukuChip.text = if (ready) "车机服务在线" else "Shizuku 未就绪"
         shizukuChip.compoundDrawables.getOrNull(0)?.let {
             DrawableCompat.setTint(
@@ -906,6 +910,16 @@ class MainActivity : AppCompatActivity() {
         // 写入进程级缓冲（logcat + 文件 + 挂屏渲染均由 SessionController 统一处理）
         SessionController.appendLog(message)
     }
+
+    /** Shell 查询/执行（仅后台线程调用；两个诊断面板共用，勿再各写局部函数）。 */
+    private fun shExec(
+        cmd: String,
+        timeoutMs: Long = 4_000L,
+    ): Shell.Result =
+        Shell
+            .exec(cmd, timeoutMs)
+
+    private fun sh(cmd: String): String = shExec(cmd).output
 
     private fun updateLogBottomButton() {
         findViewById<ImageView>(R.id.btnLogBottom)?.visibility =
@@ -935,6 +949,22 @@ class MainActivity : AppCompatActivity() {
         val follow = consoleAtBottom()
         logText.text =
             if (SessionController.logEnabled) text else "日志采集已关闭（打开「监听日志」开关恢复）"
+        logText.post {
+            if (follow) scrollConsoleToBottom() else updateLogBottomButton()
+        }
+    }
+
+    /**
+     * 增量追加一行日志（SessionController 逐行直送；此前每行全量 toString + setText
+     * 整段文本，高频日志下 UI/GC 双重放大）。超限时从进程缓冲全量对账一次完成裁剪。
+     */
+    private fun appendConsole(line: String) {
+        val follow = consoleAtBottom()
+        if (logText.text.length > 44_000) {
+            renderConsole(SessionController.logText())
+            return
+        }
+        logText.append(line)
         logText.post {
             if (follow) scrollConsoleToBottom() else updateLogBottomButton()
         }
@@ -986,10 +1016,10 @@ class MainActivity : AppCompatActivity() {
             tickHero()
         }
         shellStateText.text = "读取中…"
-        com.lizhihua.carplaysender.util.Bg.run("shell-state") {
-            if (com.lizhihua.carplaysender.shizuku.ShizukuGate
+        Bg.run("shell-state") {
+            if (ShizukuGate
                     .state(this) !=
-                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
+                ShizukuGate.State.READY
             ) {
                 runOnUiThread {
                     startupCheckRunning = false
@@ -999,10 +1029,6 @@ class MainActivity : AppCompatActivity() {
                 return@run
             }
 
-            fun sh(cmd: String) =
-                com.lizhihua.carplaysender.shizuku.Shell
-                    .exec(cmd, 4_000L)
-                    .output
             val letterbox =
                 Regex("Aspect ratio:\\s*([0-9.]+)")
                     .find(sh("cmd window get-letterbox-style"))
@@ -1037,7 +1063,7 @@ class MainActivity : AppCompatActivity() {
                     // 也没执行——一并清理，避免应用在手机侧残留横屏状态
                     runCatching {
                         val reset =
-                            com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
+                            AppOrientationCompat
                                 .resetAll(applicationContext)
                         if (reset > 0) log("ORIENTATION: 残留会话的横屏覆盖已复原 $reset 个")
                     }
@@ -1069,7 +1095,7 @@ class MainActivity : AppCompatActivity() {
     /** 当前会话持有的虚拟屏（不参与残留清理）。 */
     private fun currentSessionDisplayIds(): Set<Int> =
         buildSet {
-            val launcher = com.lizhihua.carplaysender.launcher.VirtualLauncher
+            val launcher = VirtualLauncher
             listOf(
                 launcher.dockDisplayId,
                 launcher.appDisplayId,
@@ -1092,7 +1118,7 @@ class MainActivity : AppCompatActivity() {
                 pendingResidualDisplays = null
                 updateResidualChip()
                 if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
-                com.lizhihua.carplaysender.util.Bg.run("residual-cleanup") {
+                Bg.run("residual-cleanup") {
                     val released = releaseDisplays(residual.map { it.first })
                     log("SHELL: 残留虚拟屏清理完成（释放 $released/${residual.size}）")
                     runOnUiThread {
@@ -1116,14 +1142,14 @@ class MainActivity : AppCompatActivity() {
     /** 释放指定虚拟屏（CarInputClient 懒绑定 + 3 秒短等）。后台线程调用，返回成功数。 */
     private fun releaseDisplays(ids: List<Int>): Int {
         if (ids.isEmpty()) return 0
-        var svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
+        var svc = CarInputClient.service
         if (svc == null) {
-            com.lizhihua.carplaysender.shizuku.CarInputClient
+            CarInputClient
                 .ensure(this)
             val deadline = SystemClock.uptimeMillis() + 3_000L
             while (svc == null && SystemClock.uptimeMillis() < deadline) {
                 Thread.sleep(150)
-                svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
+                svc = CarInputClient.service
             }
         }
         val bound = svc ?: return 0
@@ -1133,17 +1159,17 @@ class MainActivity : AppCompatActivity() {
     /** 一键把 shell 全局状态复位为系统默认值（含残留虚拟屏释放，保留当前会话屏）。 */
     private fun resetShellState() {
         shellStateText.text = "复位中…"
-        com.lizhihua.carplaysender.util.Bg.run("shell-reset") {
-            if (com.lizhihua.carplaysender.shizuku.ShizukuGate
+        Bg.run("shell-reset") {
+            if (ShizukuGate
                     .state(this) !=
-                com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
+                ShizukuGate.State.READY
             ) {
                 runOnUiThread { shellStateText.text = "Shizuku 未就绪——shell 复位需要 Shizuku" }
                 return@run
             }
 
             fun sh(cmd: String) =
-                com.lizhihua.carplaysender.shizuku.Shell
+                Shell
                     .exec(cmd, 5_000L)
             val steps =
                 listOf(

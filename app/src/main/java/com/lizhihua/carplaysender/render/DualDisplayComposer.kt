@@ -10,6 +10,7 @@ import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.util.Log
 import android.view.Surface
+import com.lizhihua.carplaysender.launcher.VirtualLauncher
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -176,7 +177,7 @@ class DualDisplayComposer(
 
     private fun launcherDashHint(): Boolean =
         try {
-            com.lizhihua.carplaysender.launcher.VirtualLauncher.dashboardMode
+            VirtualLauncher.dashboardMode
         } catch (_: Throwable) {
             false
         }
@@ -441,7 +442,7 @@ class DualDisplayComposer(
                         val nowMs = android.os.SystemClock.uptimeMillis()
                         if (nowMs - lastPortraitTileDiag > 5_000) {
                             lastPortraitTileDiag = nowMs
-                            com.lizhihua.carplaysender.launcher.VirtualLauncher.logSink?.invoke(
+                            VirtualLauncher.logSink?.invoke(
                                 "COMPOSER: 竖屏 tile 绘制 tileH=$tileH slide=$slide frames=${map!!.frameCount}",
                             )
                         }
@@ -459,7 +460,7 @@ class DualDisplayComposer(
                     val nowMs = android.os.SystemClock.uptimeMillis()
                     if (nowMs - lastPortraitTileDiag > 5_000) {
                         lastPortraitTileDiag = nowMs
-                        com.lizhihua.carplaysender.launcher.VirtualLauncher.logSink?.invoke(
+                        VirtualLauncher.logSink?.invoke(
                             "COMPOSER: 竖屏 tile 未画 layout=$layoutP " +
                                 "mapInput=${map != null} hasContent=${map?.hasContent} " +
                                 "frames=${map?.frameCount} dash=${launcherDashHint()}",
@@ -620,6 +621,14 @@ class DualDisplayComposer(
             val shader = GLES20.glCreateShader(type)
             GLES20.glShaderSource(shader, source)
             GLES20.glCompileShader(shader)
+            // 编译失败必须留痕并抛出：静默继续 = 黑屏无从排查（EGL 有 checkEgl，GLSL 这层此前漏了）
+            val status = IntArray(1)
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0)
+            if (status[0] == 0) {
+                Log.e(TAG, "GLSL 编译失败（type=$type）：${GLES20.glGetShaderInfoLog(shader)}")
+                GLES20.glDeleteShader(shader)
+                throw IllegalStateException("GLSL compile type=$type")
+            }
             return shader
         }
 

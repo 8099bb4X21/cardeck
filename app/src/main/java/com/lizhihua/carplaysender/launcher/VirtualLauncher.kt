@@ -9,9 +9,14 @@ import android.hardware.display.VirtualDisplay
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
+import com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
+import com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
 import com.lizhihua.carplaysender.render.CARD_MARGIN_PX
 import com.lizhihua.carplaysender.render.DualDisplayComposer
+import com.lizhihua.carplaysender.shizuku.CarInputClient
 import com.lizhihua.carplaysender.shizuku.Shell
+import com.lizhihua.carplaysender.shizuku.ShizukuGate
+import com.lizhihua.carplaysender.ui.ScreenDimmer
 import com.lizhihua.carplaysender.util.Bg
 
 /**
@@ -350,18 +355,18 @@ object VirtualLauncher {
             }
 
         // 等待 Shizuku UserService 绑定（受信虚拟屏需要 shell 权限创建）
-        var svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
+        var svc = CarInputClient.service
         if (svc == null &&
-            com.lizhihua.carplaysender.shizuku.ShizukuGate
+            ShizukuGate
                 .state(context) ==
-            com.lizhihua.carplaysender.shizuku.ShizukuGate.State.READY
+            ShizukuGate.State.READY
         ) {
             val deadline = SystemClock.uptimeMillis() + 2_500L
             while (svc == null && SystemClock.uptimeMillis() < deadline) {
-                com.lizhihua.carplaysender.shizuku.CarInputClient
+                CarInputClient
                     .ensure(context)
                 Thread.sleep(150)
-                svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
+                svc = CarInputClient.service
             }
         }
         val useTrusted = svc != null
@@ -369,7 +374,7 @@ object VirtualLauncher {
 
         val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom)
         composer.targetFps =
-            com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
+            DisplayPrefs
                 .fps(context)
         this.composer = composer
         val displaysCreated = arrayOf(false)
@@ -477,7 +482,7 @@ object VirtualLauncher {
                 // （会话结束/断开时由 SessionController 统一复原，见 retireSession/onEnded）
                 runCatching {
                     val applied =
-                        com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
+                        AppOrientationCompat
                             .applyAll(context)
                     if (applied > 0) log("ORIENTATION: 已为 $applied 个应用启用强制横屏（会话期间生效）")
                 }
@@ -569,7 +574,7 @@ object VirtualLauncher {
             if (appHiDisplayId >= 0) composer.requestActiveApp(true)
             startShizukuHealer()
             // 暗幕组件就绪（常亮+暗幕功能；主界面开关控制启停）
-            com.lizhihua.carplaysender.ui.ScreenDimmer
+            ScreenDimmer
                 .attach(context)
             dockOk && gridOk
         } catch (error: IllegalStateException) {
@@ -584,10 +589,10 @@ object VirtualLauncher {
     private var displaysViaService = false
 
     fun detach() {
-        com.lizhihua.carplaysender.ui.ScreenDimmer
+        ScreenDimmer
             .detach()
         if (displaysViaService) {
-            val svc = com.lizhihua.carplaysender.shizuku.CarInputClient.service
+            val svc = CarInputClient.service
             if (svc != null) {
                 if (dockDisplayId >= 0) runCatching { svc.releaseDisplay(dockDisplayId) }
                 if (appDisplayId >= 0) runCatching { svc.releaseDisplay(appDisplayId) }
@@ -601,7 +606,7 @@ object VirtualLauncher {
         watchdogActive = false
         // 还原 letterbox 宽高比为系统默认（不把会话调参留在系统里）
         runCatching {
-            com.lizhihua.carplaysender.shizuku.Shell
+            Shell
                 .exec("cmd window reset-letterbox-style aspectRatio")
         }
         runCatching { composer?.stop() }
@@ -691,8 +696,6 @@ object VirtualLauncher {
         logSink?.invoke("LAUNCHER: 仪表盘模式（地图 tile + 音乐卡）")
     }
 
-    /** 回普通桌面：隐藏地图层并复位全屏标志，桌面恢复全宽图标网格（地图任务保留）。 */
-
     /**
      * 仪表盘模式唯一对账口：置 dashboardMode → 通知（dock 图标/GridActivity pager）
      * → 进入时补地图任务并切 SPLIT，退出时隐藏 tile。
@@ -723,6 +726,7 @@ object VirtualLauncher {
         composer?.setTileLayout(DualDisplayComposer.TileLayout.SPLIT)
     }
 
+    /** 回普通桌面：隐藏地图层并退出仪表盘，桌面恢复全宽图标网格（地图任务保留）。 */
     fun showDesktop() {
         syncDashboard(false)
         goGrid()
@@ -761,7 +765,7 @@ object VirtualLauncher {
         val h = if (fullscreen) appAreaHeight else mapTileHeight
         if (w <= 0 || h <= 0 || (w == mapDisplayW && h == mapDisplayH)) return
         val svc =
-            com.lizhihua.carplaysender.shizuku.CarInputClient.service
+            CarInputClient.service
                 ?: return
         runCatching {
             if (svc.resizeDisplay(id, w, h, MAP_DISPLAY_DPI)) {
@@ -819,19 +823,33 @@ object VirtualLauncher {
     private fun taskIdsOnDisplayPkg(
         pkg: String,
         displayId: Int,
-    ): List<String> {
+    ): List<String> = tasksOf(taskIdsByDisplayPkg(), pkg, displayId)
+
+    /**
+     * 一次 `dumpsys activity activities` 解析出「displayId → 包 → 任务 ID 列表」。
+     * 此前三个查询函数各自 dump 一遍（launchApp 一次启动最多跑 3 遍、每遍 4s 超时
+     * 的 shell 命令）——统一从这里取快照复用。
+     */
+    private fun taskIdsByDisplayPkg(): Map<Int, Map<String, List<String>>> {
         val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
         var current = -1
-        val ids = ArrayList<String>()
+        val out = HashMap<Int, HashMap<String, MutableList<String>>>()
         for (line in dump.lineSequence()) {
             displayRegex.find(line)?.let { current = it.groupValues[1].toInt() }
             val task = taskRegex.find(line) ?: continue
-            if (current == displayId && task.groupValues[2] == pkg) {
-                ids += task.groupValues[1]
-            }
+            out
+                .getOrPut(current) { HashMap() }
+                .getOrPut(task.groupValues[2]) { ArrayList() }
+                .add(task.groupValues[1])
         }
-        return ids
+        return out
     }
+
+    private fun tasksOf(
+        snapshot: Map<Int, Map<String, List<String>>>,
+        pkg: String,
+        displayId: Int,
+    ): List<String> = snapshot[displayId]?.get(pkg).orEmpty()
 
     /**
      * 确保默认地图在地图屏：am start 对既有任务=带回前台（状态保留，导航不断），
@@ -889,12 +907,14 @@ object VirtualLauncher {
                 appHiDisplayId >= 0 &&
                 SupersamplePrefs.shouldSupersample(ctx, component)
         val targetDisplay = if (wantHi) appHiDisplayId else appDisplayId
-        val onTarget = packagesOnDisplay(component.packageName, targetDisplay)
+        // 任务查询共用一次 dumpsys 快照（此前 onTarget + 清理两块屏最多连跑 3 遍 4s 超时命令）
+        val tasks = taskIdsByDisplayPkg()
+        val onTarget = tasksOf(tasks, component.packageName, targetDisplay).isNotEmpty()
         if (!onTarget) {
             // 偏好切换后清理另一块应用屏上的旧任务（不同屏双实例会各自维护状态，易混淆）
             val otherDisplay = if (targetDisplay == appHiDisplayId) appDisplayId else appHiDisplayId
-            if (otherDisplay >= 0 && packagesOnDisplay(component.packageName, otherDisplay)) {
-                taskIdsOnDisplay(component.packageName, otherDisplay).forEach { taskId ->
+            if (otherDisplay >= 0) {
+                tasksOf(tasks, component.packageName, otherDisplay).forEach { taskId ->
                     Shell.exec("am stack remove $taskId", timeoutMs = 4000)
                     Log.i(TAG, "清理旧屏任务 pkg=${component.packageName} task=$taskId display=$otherDisplay")
                 }
@@ -1057,11 +1077,11 @@ object VirtualLauncher {
                 while (watchdogActive && appDisplayId >= 0) {
                     try {
                         val ctx = appContextRef
-                        if (ctx != null && com.lizhihua.carplaysender.shizuku.CarInputClient.service == null) {
+                        if (ctx != null && CarInputClient.service == null) {
                             runCatching {
                                 Shell.exec("am unfreeze moe.shizuku.privileged.api", timeoutMs = 2500)
                             }
-                            com.lizhihua.carplaysender.shizuku.CarInputClient
+                            CarInputClient
                                 .ensure(ctx)
                         }
                     } catch (_: Exception) {
@@ -1076,39 +1096,6 @@ object VirtualLauncher {
                 isDaemon = true
                 start()
             }
-    }
-
-    /** 重新 dump 一次，判断包是否有任务在指定 display。 */
-    private fun packagesOnDisplay(
-        pkg: String,
-        displayId: Int,
-    ): Boolean {
-        val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
-        var current = -1
-        for (line in dump.lineSequence()) {
-            displayRegex.find(line)?.let { current = it.groupValues[1].toInt() }
-            val task = taskRegex.find(line) ?: continue
-            if (current == displayId && task.groupValues[2] == pkg) return true
-        }
-        return false
-    }
-
-    /** 列出包在指定 display 上的任务 ID（偏好切换后清理旧屏任务用）。 */
-    private fun taskIdsOnDisplay(
-        pkg: String,
-        displayId: Int,
-    ): List<String> {
-        val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4000).output
-        var current = -1
-        val ids = ArrayList<String>()
-        for (line in dump.lineSequence()) {
-            displayRegex.find(line)?.let { current = it.groupValues[1].toInt() }
-            val task = taskRegex.find(line) ?: continue
-            if (current == displayId && task.groupValues[2] == pkg) {
-                ids += task.groupValues[1]
-            }
-        }
-        return ids
     }
 
     data class AppEntry(

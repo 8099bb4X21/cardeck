@@ -261,7 +261,7 @@ class VideoSender(
     /** 按 00 00 00 01 / 00 00 01 起始码切分 AnnexB 码流为 NAL 列表。 */
     private fun splitAnnexB(bytes: ByteArray): List<ByteArray> {
         val units = ArrayList<ByteArray>()
-        var starts = ArrayList<Int>()
+        val starts = ArrayList<Int>()
         var index = 0
         while (index + 3 < bytes.size) {
             if (bytes[index] == 0.toByte() && bytes[index + 1] == 0.toByte()) {
