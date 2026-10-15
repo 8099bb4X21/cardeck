@@ -8,14 +8,16 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
 import com.lizhihua.carplaysender.R
+import com.lizhihua.carplaysender.SessionController
+import com.lizhihua.carplaysender.input.TouchRouter
 import com.lizhihua.carplaysender.launcher.AppIcons
 import com.lizhihua.carplaysender.launcher.DefaultMapPrefs
 import com.lizhihua.carplaysender.launcher.DesktopApps
+import com.lizhihua.carplaysender.launcher.DockPrefs
 import com.lizhihua.carplaysender.launcher.SupersamplePrefs
 import com.lizhihua.carplaysender.launcher.VirtualLauncher
+import com.lizhihua.carplaysender.launcher.settings.AppRowsAdapter.AppHolder
 
 /**
  * 车机设置内容面板（Fragment 化）：车机 SettingsActivity 双栏右栏、
@@ -34,18 +36,11 @@ class DesktopPanelFragment : SettingsPanelFragment() {
 
     override fun onViewCreated(view: View) {
         countText = view.findViewById(R.id.settingsCount)
-        val list = view.findViewById<RecyclerView>(R.id.appList)
-        list.layoutManager = LinearLayoutManager(requireContext())
         adapter = DesktopAdapter()
-        list.adapter = adapter
-        SettingsRows.setupIndexBar(this, view.findViewById(R.id.appListIndex), list) { adapter.rows }
-        val loading = view.findViewById<TextView>(R.id.listLoading)
-        loadApps {
-            loading.visibility = View.GONE
+        setupAppList(view, R.id.appList, R.id.appListIndex, adapter) {
             selected.clear()
             selected += DesktopApps.selected(requireContext(), apps)
             updateCount()
-            adapter.notifyDataSetChanged()
         }
     }
 
@@ -65,44 +60,18 @@ class DesktopPanelFragment : SettingsPanelFragment() {
         adapter.notifyDataSetChanged()
     }
 
-    private inner class DesktopAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-        val rows: List<SettingsRow> get() = SettingsRows.build(requireContext(), apps)
-
-        override fun getItemViewType(position: Int): Int = if (rows[position] is SettingsRow.Header) 0 else 1
-
-        override fun getItemId(position: Int): Long = rows[position].id
-
-        override fun getItemCount(): Int = rows.size
-
-        override fun onCreateViewHolder(
-            parent: ViewGroup,
-            viewType: Int,
-        ): RecyclerView.ViewHolder =
-            if (viewType == 0) {
-                SettingsRows.HeaderHolder(SettingsRows.inflateHeader(this@DesktopPanelFragment, parent))
-            } else {
-                PickerHolder(layoutInflater.inflate(R.layout.item_app_pick, parent, false))
-            }
-
-        override fun onBindViewHolder(
-            holder: RecyclerView.ViewHolder,
-            position: Int,
-        ) {
-            when (val row = rows[position]) {
-                is SettingsRow.Header -> (holder as SettingsRows.HeaderHolder).bind(row.title)
-                is SettingsRow.App -> (holder as PickerHolder).bind(row.entry)
-            }
-        }
+    private inner class DesktopAdapter : AppRowsAdapter(this@DesktopPanelFragment, R.layout.item_app_pick, { apps }) {
+        override fun onCreateAppHolder(row: View): AppHolder = PickerHolder(row)
     }
 
     private inner class PickerHolder(
         private val row: View,
-    ) : RecyclerView.ViewHolder(row) {
+    ) : AppHolder(row) {
         private val icon: ImageView = row.findViewById(R.id.pickIcon)
         private val name: TextView = row.findViewById(R.id.pickName)
         private val check: ImageView = row.findViewById(R.id.pickCheck)
 
-        fun bind(entry: VirtualLauncher.AppEntry) {
+        override fun bind(entry: VirtualLauncher.AppEntry) {
             val key = entry.component.flattenToString()
             val iconPx = (30 * resources.displayMetrics.density).toInt()
             icon.setImageBitmap(AppIcons.rounded(entry.icon, iconPx))
@@ -122,8 +91,6 @@ class DesktopPanelFragment : SettingsPanelFragment() {
 }
 
 class SupersamplePanelFragment : SettingsPanelFragment() {
-    private lateinit var adapter: SupersampleAdapter
-
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -131,58 +98,23 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
     ): View = inflater.inflate(R.layout.fragment_panel_supersample, container, false)
 
     override fun onViewCreated(view: View) {
-        val list = view.findViewById<RecyclerView>(R.id.ssList)
-        list.layoutManager = LinearLayoutManager(requireContext())
-        adapter = SupersampleAdapter()
-        list.adapter = adapter
-        SettingsRows.setupIndexBar(this, view.findViewById(R.id.ssListIndex), list) { adapter.rows }
-        val loading = view.findViewById<TextView>(R.id.listLoading)
-        loadApps {
-            loading.visibility = View.GONE
-            adapter.notifyDataSetChanged()
-        }
+        setupAppList(view, R.id.ssList, R.id.ssListIndex, SupersampleAdapter())
     }
 
-    private inner class SupersampleAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-        val rows: List<SettingsRow> get() = SettingsRows.build(requireContext(), apps)
-
-        override fun getItemViewType(position: Int): Int = if (rows[position] is SettingsRow.Header) 0 else 1
-
-        override fun getItemId(position: Int): Long = rows[position].id
-
-        override fun getItemCount(): Int = rows.size
-
-        override fun onCreateViewHolder(
-            parent: ViewGroup,
-            viewType: Int,
-        ): RecyclerView.ViewHolder =
-            if (viewType == 0) {
-                SettingsRows.HeaderHolder(SettingsRows.inflateHeader(this@SupersamplePanelFragment, parent))
-            } else {
-                SsHolder(layoutInflater.inflate(R.layout.item_app_ss, parent, false))
-            }
-
-        override fun onBindViewHolder(
-            holder: RecyclerView.ViewHolder,
-            position: Int,
-        ) {
-            when (val row = rows[position]) {
-                is SettingsRow.Header -> (holder as SettingsRows.HeaderHolder).bind(row.title)
-                is SettingsRow.App -> (holder as SsHolder).bind(row.entry)
-            }
-        }
+    private inner class SupersampleAdapter : AppRowsAdapter(this@SupersamplePanelFragment, R.layout.item_app_ss, { apps }) {
+        override fun onCreateAppHolder(row: View): AppHolder = SsHolder(row)
     }
 
     private inner class SsHolder(
         private val row: View,
-    ) : RecyclerView.ViewHolder(row) {
+    ) : AppHolder(row) {
         private val icon: ImageView = row.findViewById(R.id.ssIcon)
         private val name: TextView = row.findViewById(R.id.ssName)
         private val segAuto: TextView = row.findViewById(R.id.ssAuto)
         private val segOn: TextView = row.findViewById(R.id.ssOn)
         private val segOff: TextView = row.findViewById(R.id.ssOff)
 
-        fun bind(entry: VirtualLauncher.AppEntry) {
+        override fun bind(entry: VirtualLauncher.AppEntry) {
             val iconPx = (28 * resources.displayMetrics.density).toInt()
             icon.setImageBitmap(AppIcons.rounded(entry.icon, iconPx))
             name.text = entry.label
@@ -218,8 +150,6 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
 }
 
 class OrientationPanelFragment : SettingsPanelFragment() {
-    private lateinit var adapter: OrientationAdapter
-
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -227,58 +157,24 @@ class OrientationPanelFragment : SettingsPanelFragment() {
     ): View = inflater.inflate(R.layout.fragment_panel_orientation, container, false)
 
     override fun onViewCreated(view: View) {
-        val list = view.findViewById<RecyclerView>(R.id.oriList)
-        list.layoutManager = LinearLayoutManager(requireContext())
-        adapter = OrientationAdapter()
-        list.adapter = adapter
-        SettingsRows.setupIndexBar(this, view.findViewById(R.id.oriListIndex), list) { adapter.rows }
-        val loading = view.findViewById<TextView>(R.id.listLoading)
-        loadApps {
-            loading.visibility = View.GONE
-            adapter.notifyDataSetChanged()
-        }
+        setupAppList(view, R.id.oriList, R.id.oriListIndex, OrientationAdapter())
     }
 
-    private inner class OrientationAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-        val rows: List<SettingsRow> get() = SettingsRows.build(requireContext(), apps)
-
-        override fun getItemViewType(position: Int): Int = if (rows[position] is SettingsRow.Header) 0 else 1
-
-        override fun getItemId(position: Int): Long = rows[position].id
-
-        override fun getItemCount(): Int = rows.size
-
-        override fun onCreateViewHolder(
-            parent: ViewGroup,
-            viewType: Int,
-        ): RecyclerView.ViewHolder =
-            if (viewType == 0) {
-                SettingsRows.HeaderHolder(SettingsRows.inflateHeader(this@OrientationPanelFragment, parent))
-            } else {
-                OriHolder(layoutInflater.inflate(R.layout.item_orientation_car, parent, false))
-            }
-
-        override fun onBindViewHolder(
-            holder: RecyclerView.ViewHolder,
-            position: Int,
-        ) {
-            when (val row = rows[position]) {
-                is SettingsRow.Header -> (holder as SettingsRows.HeaderHolder).bind(row.title)
-                is SettingsRow.App -> (holder as OriHolder).bind(row.entry)
-            }
-        }
+    private inner class OrientationAdapter :
+        AppRowsAdapter(this@OrientationPanelFragment, R.layout.item_orientation_car, { apps }) {
+        override fun onCreateAppHolder(row: View): AppHolder = OriHolder(row)
     }
 
     private inner class OriHolder(
         private val row: View,
-    ) : RecyclerView.ViewHolder(row) {
+    ) : AppHolder(row) {
         private val icon: ImageView = row.findViewById(R.id.oriIcon)
         private val name: TextView = row.findViewById(R.id.oriName)
         private val check: ImageView = row.findViewById(R.id.oriCheck)
         private lateinit var entry: VirtualLauncher.AppEntry
         private var shown = false
 
-        fun bind(entry: VirtualLauncher.AppEntry) {
+        override fun bind(entry: VirtualLauncher.AppEntry) {
             this.entry = entry
             val iconPx = (30 * resources.displayMetrics.density).toInt()
             icon.setImageBitmap(AppIcons.rounded(entry.icon, iconPx))
@@ -329,7 +225,7 @@ class DockPanelFragment : SettingsPanelFragment() {
         val blurValue = view.findViewById<TextView>(R.id.dockBlurValue)
 
         scrimSeek.progress =
-            com.lizhihua.carplaysender.launcher.DockPrefs
+            DockPrefs
                 .scrimOpacity(requireContext())
         scrimValue.text = "${scrimSeek.progress}%"
         scrimSeek.setOnSeekBarChangeListener(
@@ -341,7 +237,7 @@ class DockPanelFragment : SettingsPanelFragment() {
                 ) {
                     if (!fromUser) return
                     scrimValue.text = "$value%"
-                    com.lizhihua.carplaysender.launcher.DockPrefs
+                    DockPrefs
                         .setScrimOpacity(requireContext(), value)
                 }
 
@@ -352,7 +248,7 @@ class DockPanelFragment : SettingsPanelFragment() {
         )
 
         blurSeek.progress =
-            com.lizhihua.carplaysender.launcher.DockPrefs
+            DockPrefs
                 .blur(requireContext())
         blurValue.text = "${blurSeek.progress}%"
         blurSeek.setOnSeekBarChangeListener(
@@ -364,7 +260,7 @@ class DockPanelFragment : SettingsPanelFragment() {
                 ) {
                     if (!fromUser) return
                     blurValue.text = "$value%"
-                    com.lizhihua.carplaysender.launcher.DockPrefs
+                    DockPrefs
                         .setBlur(requireContext(), value)
                 }
 
@@ -479,12 +375,12 @@ class DisplayPanelFragment : SettingsPanelFragment() {
 
         fun refreshScaleNote() {
             val runningNow =
-                com.lizhihua.carplaysender.SessionController.videoSender
+                SessionController.videoSender
                     ?.isRunning == true
             scaleNote.text =
                 if (runningNow) {
                     "保存后下次连接起效；当前连接按 " +
-                        "${com.lizhihua.carplaysender.SessionController.activeScalePercent}% 运行"
+                        "${SessionController.activeScalePercent}% 运行"
                 } else {
                     "保存后下次连接起效"
                 }
@@ -535,13 +431,13 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         fun applyFps(fps: Int) {
             DisplayPrefs.setFps(ctx, fps)
             refreshFps(fps < 60)
-            com.lizhihua.carplaysender.launcher.VirtualLauncher
+            VirtualLauncher
                 .setStreamFps(fps)
             val live =
-                com.lizhihua.carplaysender.SessionController.videoSender
+                SessionController.videoSender
                     ?.isRunning == true
             hostToast("帧率已切换为 ${fps}fps${if (live) "（实时生效）" else ""}")
-            if (live) com.lizhihua.carplaysender.SessionController.activeTargetFps = fps
+            if (live) SessionController.activeTargetFps = fps
         }
         fps30.setOnClickListener { applyFps(30) }
         fps60.setOnClickListener { applyFps(60) }
@@ -555,7 +451,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         val savedThrottle = DisplayPrefs.moveThrottleMs(ctx)
         throttleSeek.progress = savedThrottle / 8
         throttleValue.text = throttleText(savedThrottle)
-        com.lizhihua.carplaysender.input.TouchRouter.moveThrottleMs = savedThrottle.toLong()
+        TouchRouter.moveThrottleMs = savedThrottle.toLong()
 
         throttleSeek.setOnSeekBarChangeListener(
             object : SeekBar.OnSeekBarChangeListener {
@@ -568,7 +464,7 @@ class DisplayPanelFragment : SettingsPanelFragment() {
                     val ms = progress * 8
                     throttleValue.text = throttleText(ms)
                     DisplayPrefs.setMoveThrottleMs(ctx, ms)
-                    com.lizhihua.carplaysender.input.TouchRouter.moveThrottleMs = ms.toLong()
+                    TouchRouter.moveThrottleMs = ms.toLong()
                 }
 
                 override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit

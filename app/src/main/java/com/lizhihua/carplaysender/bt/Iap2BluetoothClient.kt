@@ -208,23 +208,7 @@ class Iap2BluetoothClient(
         val channel = Iap2LinkChannel(stream, name = "iap2-bt-car") { line -> log(line) }
         activeChannel = channel
         try {
-            val mac =
-                com.lizhihua.carplaysender.util.DeviceIdentity
-                    .bluetoothMac(context)
-            val name =
-                com.lizhihua.carplaysender.util.DeviceIdentity
-                    .deviceName(context)
-            val session =
-                Iap2SenderSession(
-                    channel,
-                    { line -> log(line) },
-                    mac,
-                    name,
-                    onWifiCredentials,
-                )
-            val endpoint = session.run(SESSION_TIMEOUT_MILLIS)
-            onEndpoint(endpoint)
-            session.pumpIncomingForever()
+            channel.runSenderSession(context, SESSION_TIMEOUT_MILLIS, log, onEndpoint, onWifiCredentials)
         } catch (error: IOException) {
             log("BT-C: SESSION 失败 - ${error.message}")
         } finally {
@@ -275,9 +259,9 @@ object BtSessionGate {
     var inboundActive: Boolean = false
 
     /**
-     * CarPlay 会话已建立（任一路径成功拿到端点后置位，由 MainActivity 维护）：
+     * CarPlay 会话已建立（任一路径成功拿到端点后置位，由 SessionController 维护）：
      * 暂停一切出站连接尝试（静默降噪）——典型表现为连着 DiPlay 时不再探测 Audi。
-     * 会话结束/手动断开时由 MainActivity 清除。
+     * 会话结束/手动断开时由 SessionController 清除。
      */
     @Volatile
     var sessionActive: Boolean = false

@@ -1,6 +1,9 @@
 package com.lizhihua.carplaysender.airplay
 
 import android.content.Context
+import com.lizhihua.carplaysender.iap2.Iap2Csm
+import com.lizhihua.carplaysender.iap2.Iap2LinkEngine
+import com.lizhihua.carplaysender.iap2.Iap2MessageIds
 import com.lizhihua.carplaysender.iap2.Iap2SenderSession
 import java.io.IOException
 import java.net.InetSocketAddress
@@ -553,10 +556,10 @@ class AirPlayClient(
             private set
 
         /** 车机→手机 iAP2 消息回调（CSM 帧字节）。 */
-        var onIapMessage: ((com.lizhihua.carplaysender.iap2.Iap2Csm.Frame) -> Unit)? = null
+        var onIapMessage: ((Iap2Csm.Frame) -> Unit)? = null
 
         private val parser =
-            com.lizhihua.carplaysender.iap2.Iap2Csm
+            Iap2Csm
                 .Parser()
 
         private val writeLock = Any()
@@ -689,11 +692,12 @@ class AirPlayClient(
             messageCount++
             val frames = parser.offer(bytes)
             for (frame in frames) {
-                val hex = bytes.joinToString(" ") { "%02x".format(it) }
+                // hex 格式化有成本：只在真要打日志的分支里做（此前每条消息都先算一遍）
                 if (messageCount <= 20) {
+                    val hex = bytes.joinToString(" ") { "%02x".format(it) }
                     log(
                         "$logPrefix: iAP2 msg #$messageCount id=0x${frame.messageId.toString(16)} " +
-                            "(${com.lizhihua.carplaysender.iap2.Iap2MessageIds.nameOf(frame.messageId)}) body=${frame.body.size}B " +
+                            "(${Iap2MessageIds.nameOf(frame.messageId)}) body=${frame.body.size}B " +
                             "hex=${hex.take(160)}",
                     )
                 } else if (messageCount % 100 == 0) {
@@ -838,11 +842,9 @@ class AirPlayClient(
 
     inner class IapLinkOverEvent {
         private val lock = Any()
-        private val engine =
-            com.lizhihua.carplaysender.iap2
-                .Iap2LinkEngine()
+        private val engine = Iap2LinkEngine()
         private val parser =
-            com.lizhihua.carplaysender.iap2.Iap2Csm
+            Iap2Csm
                 .Parser()
         private var frameCount = 0
         private var eaCount = 0
@@ -899,11 +901,11 @@ class AirPlayClient(
                 if (bytes.size == 6 &&
                     bytes[0] == 0xFF.toByte() &&
                     bytes[1] == 0x55.toByte() &&
-                    engine.state == com.lizhihua.carplaysender.iap2.Iap2LinkEngine.State.NEGOTIATING
+                    engine.state == Iap2LinkEngine.State.NEGOTIATING
                 ) {
                     detectReplies++
                     log("IAPLINK: 回 DETECT #$detectReplies")
-                    sendLinkBytes(com.lizhihua.carplaysender.iap2.Iap2LinkEngine.MARKER)
+                    sendLinkBytes(Iap2LinkEngine.MARKER)
                 }
                 engine.feed(bytes, System.nanoTime() / 1_000_000L)
                 drainLocked()
@@ -948,10 +950,10 @@ class AirPlayClient(
             while (true) {
                 when (val event = engine.pollEvent()) {
                     null -> break
-                    is com.lizhihua.carplaysender.iap2.Iap2LinkEngine.Event.Control ->
+                    is Iap2LinkEngine.Event.Control ->
                         handleFrameLocked(event.bytes)
 
-                    is com.lizhihua.carplaysender.iap2.Iap2LinkEngine.Event.Dead -> {
+                    is Iap2LinkEngine.Event.Dead -> {
                         log("IAPLINK: 虚拟链路终止 - ${event.reason ?: "EOF"}")
                         return
                     }
@@ -972,10 +974,10 @@ class AirPlayClient(
          */
         private fun maybeStartTunnelCsmLocked() {
             if (tunnelCsmStarted || iapTunnel == null || !tunnelEchoDelivered) return
-            if (engine.state != com.lizhihua.carplaysender.iap2.Iap2LinkEngine.State.NORMAL) return
+            if (engine.state != Iap2LinkEngine.State.NORMAL) return
             tunnelCsmStarted = true
             sendCsmLocked(
-                com.lizhihua.carplaysender.iap2.Iap2MessageIds.START_IDENTIFICATION,
+                Iap2MessageIds.START_IDENTIFICATION,
             )
         }
 
@@ -985,12 +987,12 @@ class AirPlayClient(
             body: ByteArray = ByteArray(0),
         ) {
             val frame =
-                com.lizhihua.carplaysender.iap2.Iap2Csm
+                Iap2Csm
                     .encode(messageId, body)
             val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L)
             log(
                 "IAPLINK: 隧道 tx 0x${messageId.toString(16)} " +
-                    "(${com.lizhihua.carplaysender.iap2.Iap2MessageIds.nameOf(messageId)}) " +
+                    "(${Iap2MessageIds.nameOf(messageId)}) " +
                     "${frame.size}B ok=$ok",
             )
         }
@@ -1002,15 +1004,15 @@ class AirPlayClient(
          *   0xAA03 → 发 0xAA05（自报成功）
          * 完成后对方发出订阅并视为隧道就绪，5 分钟拆链不再发生。
          */
-        private fun maybeRespondTunnelCsmLocked(frame: com.lizhihua.carplaysender.iap2.Iap2Csm.Frame) {
+        private fun maybeRespondTunnelCsmLocked(frame: Iap2Csm.Frame) {
             if (iapTunnel == null) return
-            val ids = com.lizhihua.carplaysender.iap2.Iap2MessageIds
+            val ids = Iap2MessageIds
             when (frame.messageId) {
                 ids.IDENTIFICATION_INFORMATION -> {
                     if (tunnelIdentified) return
                     tunnelIdentified = true
                     val params =
-                        com.lizhihua.carplaysender.iap2.Iap2Csm
+                        Iap2Csm
                             .parseParams(frame.body)
                             .associateBy { it.id }
                     log(
@@ -1026,7 +1028,7 @@ class AirPlayClient(
                     val challenge = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
                     sendCsmLocked(
                         ids.MFI_REQUEST_CHALLENGE,
-                        com.lizhihua.carplaysender.iap2.Iap2Csm
+                        Iap2Csm
                             .param(0, challenge),
                     )
                 }
@@ -1046,7 +1048,7 @@ class AirPlayClient(
                 if (frameCount <= 30 || frameCount % 100 == 0) {
                     log(
                         "IAPLINK: rx 0x${frame.messageId.toString(16)} " +
-                            "(${com.lizhihua.carplaysender.iap2.Iap2MessageIds.nameOf(frame.messageId)}) " +
+                            "(${Iap2MessageIds.nameOf(frame.messageId)}) " +
                             "${frame.body.size}B hex=${hex.take(160)}",
                     )
                 }
@@ -1131,6 +1133,38 @@ class AirPlayClient(
 
         /** 隧道 APTransportPackage 头长（4B BE 总长 + 12B 保留 + 4B type="comm" + 12B 保留）。 */
         private const val TUNNEL_PACKAGE_HEADER_BYTES = 32
+
+        /** RTSP 报文头结束分隔符与头部字段正则（请求/应答两条重组路径共用，勿再内联）。 */
+        private val HEAD_SEPARATOR = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
+
+        private val CONTENT_LENGTH_REGEX = Regex("Content-Length:\\s*(\\d+)", RegexOption.IGNORE_CASE)
+
+        private val CSEQ_REGEX = Regex("CSeq:\\s*(\\d+)", RegexOption.IGNORE_CASE)
+
+        /** 解析 RTSP 报文头：首行 + Content-Length（两条重组路径共用）。 */
+        fun parseRtspHead(headText: String): Pair<String, Int> {
+            val contentLength =
+                CONTENT_LENGTH_REGEX
+                    .find(headText)
+                    ?.groupValues
+                    ?.get(1)
+                    ?.toIntOrNull() ?: 0
+            val firstLine = headText.lineSequence().firstOrNull() ?: ""
+            return firstLine to contentLength
+        }
+
+        fun indexOf(
+            source: ByteArray,
+            target: ByteArray,
+        ): Int {
+            outer@ for (index in 0..source.size - target.size) {
+                for (offset in target.indices) {
+                    if (source[index + offset] != target[offset]) continue@outer
+                }
+                return index
+            }
+            return -1
+        }
     }
 
     /**
@@ -1423,11 +1457,7 @@ class AirPlayClient(
                             val isRequest = tokens.size >= 2 && tokens[1].startsWith("/")
                             if (!isRequest) continue
                             // 车机请求：立即回 200（echo 请求 CSeq）；/command 走分发，其余节流留痕
-                            val cseq =
-                                Regex("CSeq:\\s*(\\d+)", RegexOption.IGNORE_CASE)
-                                    .find(message.head)
-                                    ?.groupValues
-                                    ?.get(1)
+                            val cseq = CSEQ_REGEX.find(message.head)?.groupValues?.get(1)
                             respondEventRequest(cseq)
                             if (!firstLine.contains("/command")) {
                                 unknownEventRequests++
@@ -1480,20 +1510,13 @@ class AirPlayClient(
             if (bytes.isEmpty()) return emptyList()
             buffer += bytes
             val messages = ArrayList<Message>()
-            val separator = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
             while (true) {
-                val index = indexOf(buffer, separator)
+                val index = indexOf(buffer, HEAD_SEPARATOR)
                 if (index < 0) break
                 val headText = String(buffer, 0, index, Charsets.ISO_8859_1)
-                val contentLength =
-                    Regex("Content-Length:\\s*(\\d+)", RegexOption.IGNORE_CASE)
-                        .find(headText)
-                        ?.groupValues
-                        ?.get(1)
-                        ?.toIntOrNull() ?: 0
-                val bodyStart = index + separator.size
+                val (firstLine, contentLength) = parseRtspHead(headText)
+                val bodyStart = index + HEAD_SEPARATOR.size
                 if (buffer.size - bodyStart < contentLength) break
-                val firstLine = headText.lineSequence().firstOrNull() ?: ""
                 messages +=
                     Message(
                         firstLine,
@@ -1503,19 +1526,6 @@ class AirPlayClient(
                 buffer = buffer.copyOfRange(bodyStart + contentLength, buffer.size)
             }
             return messages
-        }
-
-        private fun indexOf(
-            source: ByteArray,
-            target: ByteArray,
-        ): Int {
-            outer@ for (index in 0..source.size - target.size) {
-                for (offset in target.indices) {
-                    if (source[index + offset] != target[offset]) continue@outer
-                }
-                return index
-            }
-            return -1
         }
     }
 
@@ -1672,20 +1682,13 @@ class AirPlayClient(
 
     /** 完整 RTSP 报文（头 + Content-Length body）才返回；残留部分写入 leftover。 */
     private fun parseCompleteMessage(buffer: ByteArray): Pair<String, ByteArray>? {
-        val separator = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
-        val separatorIndex = indexOfSeparator(buffer, separator)
+        val separatorIndex = indexOf(buffer, HEAD_SEPARATOR)
         if (separatorIndex < 0) return null
         val headText = String(buffer, 0, separatorIndex, Charsets.ISO_8859_1)
         lastResponseHead = headText
-        val contentLength =
-            Regex("Content-Length:\\s*(\\d+)", RegexOption.IGNORE_CASE)
-                .find(headText)
-                ?.groupValues
-                ?.get(1)
-                ?.toIntOrNull() ?: 0
-        val bodyStart = separatorIndex + separator.size
+        val (statusLine, contentLength) = parseRtspHead(headText)
+        val bodyStart = separatorIndex + HEAD_SEPARATOR.size
         if (buffer.size - bodyStart < contentLength) return null
-        val statusLine = headText.lineSequence().firstOrNull() ?: "(空)"
         val responseBody = buffer.copyOfRange(bodyStart, bodyStart + contentLength)
         leftover =
             if (buffer.size > bodyStart + contentLength) {
@@ -1694,19 +1697,6 @@ class AirPlayClient(
                 ByteArray(0)
             }
         return statusLine to responseBody
-    }
-
-    private fun indexOfSeparator(
-        buffer: ByteArray,
-        separator: ByteArray,
-    ): Int {
-        outer@ for (index in 0..buffer.size - separator.size) {
-            for (offset in separator.indices) {
-                if (buffer[index + offset] != separator[offset]) continue@outer
-            }
-            return index
-        }
-        return -1
     }
 
     // ---- 身份持久化 ----

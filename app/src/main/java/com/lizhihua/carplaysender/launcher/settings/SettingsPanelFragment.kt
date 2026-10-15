@@ -2,7 +2,12 @@ package com.lizhihua.carplaysender.launcher.settings
 
 import android.os.Bundle
 import android.view.View
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.fragment.app.Fragment
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.lizhihua.carplaysender.R
 import com.lizhihua.carplaysender.launcher.VirtualLauncher
 import com.lizhihua.carplaysender.util.Bg
 
@@ -35,6 +40,26 @@ abstract class SettingsPanelFragment : Fragment() {
                 apps = scanned
                 onReady()
             }
+        }
+    }
+
+    /** 应用清单列表的通用装配：LayoutManager + 字母导航条 + 异步装载（含 loading 占位）。 */
+    protected fun setupAppList(
+        container: View,
+        listId: Int,
+        indexBarId: Int,
+        adapter: AppRowsAdapter,
+        onAppsReady: () -> Unit = {},
+    ) {
+        val list = container.findViewById<RecyclerView>(listId)
+        list.layoutManager = LinearLayoutManager(requireContext())
+        list.adapter = adapter
+        SettingsRows.setupIndexBar(this, container.findViewById<LinearLayout>(indexBarId), list) { adapter.rows }
+        val loading = container.findViewById<TextView>(R.id.listLoading)
+        loadApps {
+            loading.visibility = View.GONE
+            onAppsReady()
+            adapter.notifyDataSetChanged()
         }
     }
 

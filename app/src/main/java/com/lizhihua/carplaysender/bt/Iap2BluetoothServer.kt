@@ -120,26 +120,7 @@ class Iap2BluetoothServer(
         activeChannel = channel
         BtSessionGate.inboundActive = true
         try {
-            val mac =
-                com.lizhihua.carplaysender.util.DeviceIdentity
-                    .bluetoothMac(context)
-            val name =
-                com.lizhihua.carplaysender.util.DeviceIdentity
-                    .deviceName(context)
-            val session =
-                Iap2SenderSession(
-                    channel,
-                    { line -> log(line) },
-                    mac,
-                    name,
-                    onWifiCredentials,
-                )
-            val endpoint = session.run(SESSION_TIMEOUT_MILLIS)
-            onEndpoint(endpoint)
-            // Phase 2 过渡：保持控制通道存活记录配件消息；AirPlay 配对由
-            // onEndpoint 回调发起（必要时会调用 detachCurrentSession 复现
-            // 「BT 控制已结束」状态——实测接收端只在该状态下应答 RTSP）
-            session.pumpIncomingForever()
+            channel.runSenderSession(context, SESSION_TIMEOUT_MILLIS, log, onEndpoint, onWifiCredentials)
         } catch (error: IOException) {
             log("SESSION 失败: ${error.message}")
         } finally {

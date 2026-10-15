@@ -143,8 +143,57 @@ object SettingsRows {
         }
     }
 
-    fun inflateHeader(
-        fragment: androidx.fragment.app.Fragment,
+    fun inflateHeader(parent: ViewGroup): TextView =
+        android.view.LayoutInflater
+            .from(parent.context)
+            .inflate(R.layout.item_section_header, parent, false) as TextView
+}
+
+/**
+ * 应用清单列表的通用适配器骨架（桌面/超采样/横屏三面板共用）：两级分组头由骨架
+ * 统一渲染，应用行的布局与绑定由子类提供——替代此前三份近乎复制的适配器样板。
+ */
+abstract class AppRowsAdapter(
+    private val fragment: androidx.fragment.app.Fragment,
+    private val rowLayout: Int,
+    private val appsProvider: () -> List<VirtualLauncher.AppEntry>,
+) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+    /** 应用行 Holder（分组头之外的内容行）。 */
+    abstract class AppHolder(
+        row: android.view.View,
+    ) : RecyclerView.ViewHolder(row) {
+        abstract fun bind(entry: VirtualLauncher.AppEntry)
+    }
+
+    /** 创建应用行 Holder（[rowLayout] 已 inflate 好，无需再关心 viewType）。 */
+    protected abstract fun onCreateAppHolder(row: android.view.View): AppHolder
+
+    val rows: List<SettingsRow>
+        get() = SettingsRows.build(fragment.requireContext(), appsProvider())
+
+    final override fun getItemViewType(position: Int): Int = if (rows[position] is SettingsRow.Header) 0 else 1
+
+    final override fun getItemId(position: Int): Long = rows[position].id
+
+    final override fun getItemCount(): Int = rows.size
+
+    final override fun onCreateViewHolder(
         parent: ViewGroup,
-    ): TextView = fragment.layoutInflater.inflate(R.layout.item_section_header, parent, false) as TextView
+        viewType: Int,
+    ): RecyclerView.ViewHolder =
+        if (viewType == 0) {
+            SettingsRows.HeaderHolder(SettingsRows.inflateHeader(parent))
+        } else {
+            onCreateAppHolder(fragment.layoutInflater.inflate(rowLayout, parent, false))
+        }
+
+    final override fun onBindViewHolder(
+        holder: RecyclerView.ViewHolder,
+        position: Int,
+    ) {
+        when (val row = rows[position]) {
+            is SettingsRow.Header -> (holder as SettingsRows.HeaderHolder).bind(row.title)
+            is SettingsRow.App -> (holder as AppHolder).bind(row.entry)
+        }
+    }
 }

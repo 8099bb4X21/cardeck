@@ -11,12 +11,13 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import com.lizhihua.carplaysender.R
+import com.lizhihua.carplaysender.media.MediaSessionsState
 import com.lizhihua.carplaysender.render.CARD_MARGIN_PX
+import com.lizhihua.carplaysender.ui.WallpaperStore
 import com.lizhihua.carplaysender.util.Bg
 
 /**
@@ -128,7 +129,7 @@ class GridActivity : AppCompatActivity() {
         Bg.run("wallpaper-dash") {
             val bitmap =
                 runCatching {
-                    com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
+                    WallpaperStore.aspectFillCanvas(
                         this@GridActivity,
                         canvasWidth,
                         canvasHeight,
@@ -192,7 +193,7 @@ class GridActivity : AppCompatActivity() {
     /** 音乐卡渲染：封面/标题/歌手/进度/播放暂停按钮（播放中=暂停图标，暂停=播放图标）。 */
     private fun renderMediaCard() {
         val panel = dashboardView ?: return
-        val now = com.lizhihua.carplaysender.media.MediaSessionsState.nowPlaying
+        val now = MediaSessionsState.nowPlaying
         panel.findViewById<TextView>(R.id.dashMediaTitle).text =
             now?.title?.takeIf { it.isNotBlank() } ?: "未在播放"
         panel.findViewById<TextView>(R.id.dashMediaArtist).text =
@@ -342,16 +343,16 @@ class GridActivity : AppCompatActivity() {
                 }
             root.addView(wallpaperView, 0)
             // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
-            com.lizhihua.carplaysender.ui.WallpaperStore
+            WallpaperStore
                 .addListener(wallpaperListener)
             refreshWallpaperIfChanged()
 
             // 仪表盘面板已改为 ViewPager2 首页（PageAdapter 绑定时创建），
             // 此处仅注册全局监听：卡片视觉/媒体状态/壁纸切片/仪表盘模式。
             DockPrefs.addListener(dockPrefsListener)
-            com.lizhihua.carplaysender.media.MediaSessionsState
+            MediaSessionsState
                 .addListener(mediaStateListener)
-            com.lizhihua.carplaysender.ui.WallpaperStore
+            WallpaperStore
                 .addCanvasReadyListener(canvasReadyListener)
             VirtualLauncher.addDashboardListener(dashboardListener)
             VirtualLauncher.addMapLayoutListener(mapLayoutListener)
@@ -400,14 +401,14 @@ class GridActivity : AppCompatActivity() {
     /** 壁纸版本变化时后台重解码并换图（手机侧换壁纸后 ≤2s 桌面更新）。 */
     private fun refreshWallpaperIfChanged() {
         val view = wallpaperView ?: return
-        val current = com.lizhihua.carplaysender.ui.WallpaperStore.version
+        val current = WallpaperStore.version
         if (current == wallpaperShownVersion) return
         wallpaperShownVersion = current
         val params = view.layoutParams as? android.widget.FrameLayout.LayoutParams
         Bg.run("wallpaper-grid") {
             val bitmap =
                 runCatching {
-                    com.lizhihua.carplaysender.ui.WallpaperStore.aspectFillCanvas(
+                    WallpaperStore.aspectFillCanvas(
                         this@GridActivity,
                         params?.width ?: 0,
                         params?.height ?: 0,
@@ -553,7 +554,7 @@ class GridActivity : AppCompatActivity() {
             panel.findViewById<ImageView>(R.id.dashPlayPause).setOnClickListener {
                 // 按当前状态显式发播放/暂停；乐观翻转图标（状态回调可能滞后），
                 // 400ms 后请求监听服务重新同步真实状态
-                val state = com.lizhihua.carplaysender.media.MediaSessionsState.nowPlaying
+                val state = MediaSessionsState.nowPlaying
                 val playing = state?.playing == true
                 dispatchMediaKey(
                     if (playing) {
@@ -563,10 +564,10 @@ class GridActivity : AppCompatActivity() {
                     },
                 )
                 // 乐观更新保留封面等其它字段（copy）；400ms 后重同步真实状态
-                com.lizhihua.carplaysender.media.MediaSessionsState.publish(
+                MediaSessionsState.publish(
                     state
                         ?.copy(playing = !playing)
-                        ?: com.lizhihua.carplaysender.media.MediaSessionsState.NowPlaying(
+                        ?: MediaSessionsState.NowPlaying(
                             null,
                             null,
                             !playing,
@@ -574,7 +575,7 @@ class GridActivity : AppCompatActivity() {
                 )
                 panel.postDelayed(
                     {
-                        com.lizhihua.carplaysender.media.MediaSessionsState
+                        MediaSessionsState
                             .requestResync()
                     },
                     400,
@@ -612,7 +613,8 @@ class GridActivity : AppCompatActivity() {
                         icon.setImageBitmap(AppIcons.rounded(cell.entry.icon, iconSizePx))
                         label.text = cell.entry.label
                         view.setOnClickListener {
-                            Toast.makeText(this@GridActivity, "启动 ${cell.entry.label}", Toast.LENGTH_SHORT).show()
+                            // 不用系统 Toast：虚拟屏上显示位置不可控（SettingsToastHost 的由来）；
+                            // 应用拉起本身就是反馈
                             Bg.run("launch-app") { VirtualLauncher.launchApp(cell.entry.component) }
                         }
                     }
@@ -666,14 +668,14 @@ class GridActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         tickHandler.removeCallbacks(mediaTick)
-        com.lizhihua.carplaysender.ui.WallpaperStore
+        WallpaperStore
             .removeListener(wallpaperListener)
         VirtualLauncher.removeDashboardListener(dashboardListener)
         VirtualLauncher.removeMapLayoutListener(mapLayoutListener)
-        com.lizhihua.carplaysender.media.MediaSessionsState
+        MediaSessionsState
             .removeListener(mediaStateListener)
         DockPrefs.removeListener(dockPrefsListener)
-        com.lizhihua.carplaysender.ui.WallpaperStore
+        WallpaperStore
             .removeCanvasReadyListener(canvasReadyListener)
         super.onDestroy()
     }

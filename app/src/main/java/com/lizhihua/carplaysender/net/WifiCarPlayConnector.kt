@@ -5,7 +5,6 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.net.wifi.WifiNetworkSpecifier
 import com.lizhihua.carplaysender.util.Bg
 import java.util.concurrent.atomic.AtomicReference
 
@@ -70,44 +69,6 @@ class WifiCarPlayConnector(
         }
     }
 
-    fun request(ssid: String) {
-        release()
-        val specifier =
-            WifiNetworkSpecifier
-                .Builder()
-                .setSsid(ssid)
-                .build()
-        val request =
-            NetworkRequest
-                .Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .setNetworkSpecifier(specifier)
-                .build()
-        val newCallback =
-            object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    boundNetwork.set(network)
-                    val bound = connectivityManager.bindProcessToNetwork(network)
-                    log("WiFi: 网络可用 network=$network bindProcessToNetwork=$bound（请在弹窗输入热点密码）")
-                }
-
-                override fun onUnavailable() {
-                    log("WiFi: 请求失败（超时/用户拒绝/未找到该 SSID）")
-                }
-
-                override fun onLost(network: Network) {
-                    if (boundNetwork.compareAndSet(network, null)) {
-                        connectivityManager.bindProcessToNetwork(null)
-                        log("WiFi: 网络已断开")
-                    }
-                }
-            }
-        callback.set(newCallback)
-        log("WiFi: 请求加入 \"$ssid\"（若弹出系统面板请选择该热点并输入密码）")
-        connectivityManager.requestNetwork(request, newCallback)
-    }
-
     /**
      * 绑定到当前已连接的 WiFi 网络（用户经系统设置手动加入热点后调用）。
      * 热点无互联网时系统可能不把它设为默认网络，必须显式 bindProcessToNetwork，
@@ -123,25 +84,22 @@ class WifiCarPlayConnector(
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build()
-        var reported = false
+        // 网络回调线程与 Bg 看门狗线程并发读写——原子标志保证可见性与单次投递
+        val reported =
+            java.util.concurrent.atomic
+                .AtomicBoolean(false)
         val newCallback =
             object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     boundNetwork.set(network)
                     val bound = connectivityManager.bindProcessToNetwork(network)
                     log("WiFi: 已绑定当前WiFi网络 $network bindProcessToNetwork=$bound")
-                    if (!reported) {
-                        reported = true
-                        onResult(true)
-                    }
+                    if (reported.compareAndSet(false, true)) onResult(true)
                 }
 
                 override fun onUnavailable() {
                     log("WiFi: 没有可用的WiFi连接——请先在系统设置里加入接收端热点")
-                    if (!reported) {
-                        reported = true
-                        onResult(false)
-                    }
+                    if (reported.compareAndSet(false, true)) onResult(false)
                 }
             }
         callback.set(newCallback)
@@ -152,7 +110,7 @@ class WifiCarPlayConnector(
             } catch (_: InterruptedException) {
                 return@run
             }
-            if (!reported) {
+            if (!reported.get()) {
                 log("WiFi: 5 秒未绑定——手机当前不在任何WiFi上。请到 设置>WLAN 加入接收端热点（如 \"Redmi K40\"），加入后本轮挂起的绑定会自动完成")
             }
         }
