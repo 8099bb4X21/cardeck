@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import android.widget.GridLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -201,6 +202,17 @@ class GridActivity : AppCompatActivity() {
                     formatTime(now.durationMs)
             } else {
                 time.visibility = View.GONE
+            }
+        }
+        panel.findViewById<ProgressBar>(R.id.dashMediaProgress)?.let { bar ->
+            if (now != null && now.durationMs > 0) {
+                bar.visibility = View.VISIBLE
+                bar.progress =
+                    (now.displayPositionAt(android.os.SystemClock.elapsedRealtime()) * 1000 / now.durationMs)
+                        .toInt()
+                        .coerceIn(0, 1000)
+            } else {
+                bar.visibility = View.GONE
             }
         }
         panel.findViewById<ImageView>(R.id.dashCover)?.let { cover ->
