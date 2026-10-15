@@ -31,6 +31,21 @@ object TouchRouter {
     private var pressedDisplay = -1
     private var failStreak = 0
 
+    /**
+     * MOVE 注入节流：0 = 关闭；>0 时距上次注入不足该毫秒数的 move
+     * 直接合并丢弃（down/up 边界事件与跨屏切换永不节流，最终位置由 up 携带）。
+     * 症状：交互滞后但帧率正常（事件派发堆积）。设置「显示」面板可调，默认 24ms。
+     */
+    @Volatile
+    var moveThrottleMs: Long = 24L
+
+    @Volatile
+    private var throttleInited = false
+
+    private var lastInjectAt = 0L
+    private var throttledCount = 0
+    private var lastThrottleLogAt = 0L
+
     // 车机触摸坐标（通告视图坐标系，如 1160×540）→ 流坐标（缩放后 1450×674）的换算系数。
     // 分辨率缩放 ≠100% 时流比视图大，不换算会导致点击整体向右下漂移（dock 分流也错位）。
     @Volatile
@@ -143,6 +158,30 @@ object TouchRouter {
             diag("目标屏无效 dock=${launcher.dockDisplayId} app=${launcher.appDisplayId}")
             return
         }
+        // MOVE 节流：同屏的连续 move 间隔不足时合并丢弃（状态机不动，最新位置
+        // 由后续 move/up 携带）。down/up/跨屏切换不节流。
+        val nowMs = android.os.SystemClock.uptimeMillis()
+        if (!throttleInited) {
+            throttleInited = true
+            moveThrottleMs =
+                com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
+                    .moveThrottleMs(context)
+                    .toLong()
+        }
+        if (moveThrottleMs > 0 && contact.down && pressed &&
+            pressedDisplay == targetDisplay &&
+            nowMs - lastInjectAt < moveThrottleMs
+        ) {
+            throttledCount++
+            if (nowMs - lastThrottleLogAt > 5_000) {
+                logSink?.invoke(
+                    "TOUCH: move 节流 ${moveThrottleMs}ms 生效——累计合并 $throttledCount 次",
+                )
+                throttledCount = 0
+                lastThrottleLogAt = nowMs
+            }
+            return
+        }
         try {
             val ok: Boolean =
                 when {
@@ -166,6 +205,7 @@ object TouchRouter {
                         svc.pointerUp(pressedDisplay, localX, localY)
                     }
                 }
+            if (ok) lastInjectAt = nowMs
             if (!ok) {
                 diag(
                     "注入被拒 disp=$targetDisplay ($localX,$localY) " +

@@ -22,6 +22,17 @@ class SettingsActivity :
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (com.lizhihua.carplaysender.launcher.VirtualLauncher.dockAtBottom) {
+            // 竖屏窄屏：双栏挤压——转发手机侧二级菜单（列表 → 内容页）
+            startActivity(
+                android.content.Intent(
+                    this,
+                    com.lizhihua.carplaysender.PhoneSettingsActivity::class.java,
+                ),
+            )
+            finish()
+            return
+        }
         setContentView(R.layout.activity_settings)
         toastView = findViewById(R.id.settingsToast)
         findViewById<TextView>(R.id.btnBack).setOnClickListener { close() }
@@ -39,6 +50,7 @@ class SettingsActivity :
                 R.id.menuOrientation,
                 R.id.menuDock,
                 R.id.menuDefaultMap,
+                R.id.menuDisplay,
             )
         ids.forEach { id -> menus.add(findViewById<LinearLayout>(id)) }
         menus.forEachIndexed { index, menu ->
@@ -71,6 +83,7 @@ class SettingsActivity :
                 is com.lizhihua.carplaysender.launcher.settings.OrientationPanelFragment -> SettingsMenus.ORIENTATION
                 is com.lizhihua.carplaysender.launcher.settings.DockPanelFragment -> SettingsMenus.DOCK
                 is com.lizhihua.carplaysender.launcher.settings.DefaultMapPanelFragment -> SettingsMenus.DEFAULT_MAP
+                is com.lizhihua.carplaysender.launcher.settings.DisplayPanelFragment -> SettingsMenus.DISPLAY
                 else -> 0
             }
         showMenu(index)

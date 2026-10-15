@@ -21,9 +21,14 @@ object DisplayPrefs {
 
     const val FPS_DEFAULT = 30
 
+    /** 触摸 move 注入节流默认值（ms）：0=默认关闭，交互滞后时在「显示」面板调高试验。 */
+    const val MOVE_THROTTLE_DEFAULT = 0
+    const val MOVE_THROTTLE_MAX = 48
+
     private const val PREFS_NAME = "settings"
     private const val KEY_SCALE = "display_scale_percent"
     private const val KEY_FPS = "display_fps"
+    private const val KEY_MOVE_THROTTLE = "move_throttle_ms"
 
     /** 流分辨率缩放百分比（30–160，步进 5；默认 100）。 */
     fun scalePercent(context: Context): Int =
@@ -57,6 +62,24 @@ object DisplayPrefs {
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putInt(KEY_FPS, if (fps >= 60) 60 else 30)
+            .apply()
+    }
+
+    /** 触摸 move 注入节流（ms；0=关闭）。 */
+    fun moveThrottleMs(context: Context): Int =
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_MOVE_THROTTLE, MOVE_THROTTLE_DEFAULT)
+            .coerceIn(0, MOVE_THROTTLE_MAX)
+
+    fun setMoveThrottleMs(
+        context: Context,
+        ms: Int,
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_MOVE_THROTTLE, ms.coerceIn(0, MOVE_THROTTLE_MAX))
             .apply()
     }
 }

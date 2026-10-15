@@ -558,5 +558,40 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         }
         fps30.setOnClickListener { applyFps(30) }
         fps60.setOnClickListener { applyFps(60) }
+
+        // 触摸注入节流（0=关闭，步进 8ms）：缓解「交互滞后但帧率正常」的事件堆积
+        val throttleSeek = view.findViewById<SeekBar>(R.id.throttleSeek)
+        val throttleValue = view.findViewById<TextView>(R.id.throttleValue)
+
+        fun throttleText(ms: Int) = if (ms <= 0) "关闭" else "${ms}ms"
+
+        val savedThrottle = DisplayPrefs.moveThrottleMs(ctx)
+        throttleSeek.progress = savedThrottle / 8
+        throttleValue.text = throttleText(savedThrottle)
+        com.lizhihua.carplaysender.input.TouchRouter.moveThrottleMs = savedThrottle.toLong()
+
+        throttleSeek.setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(
+                    seekBar: SeekBar?,
+                    progress: Int,
+                    fromUser: Boolean,
+                ) {
+                    if (!fromUser) return
+                    val ms = progress * 8
+                    throttleValue.text = throttleText(ms)
+                    DisplayPrefs.setMoveThrottleMs(ctx, ms)
+                    com.lizhihua.carplaysender.input.TouchRouter.moveThrottleMs = ms.toLong()
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    hostToast(
+                        "触摸节流 " + throttleText(DisplayPrefs.moveThrottleMs(ctx)),
+                    )
+                }
+            },
+        )
     }
 }
