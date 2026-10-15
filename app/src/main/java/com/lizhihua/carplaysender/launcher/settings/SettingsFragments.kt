@@ -16,7 +16,6 @@ import com.lizhihua.carplaysender.launcher.DefaultMapPrefs
 import com.lizhihua.carplaysender.launcher.DesktopApps
 import com.lizhihua.carplaysender.launcher.SupersamplePrefs
 import com.lizhihua.carplaysender.launcher.VirtualLauncher
-import com.lizhihua.carplaysender.shizuku.Shell
 
 /**
  * 车机设置内容面板（Fragment 化）：车机 SettingsActivity 双栏右栏、
@@ -298,8 +297,11 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                     return@setOnClickListener
                 }
                 refresh(shown)
-                hostToast("「${entry.label}」横屏：${if (shown) "开" else "关"}")
-                askKillIfAlive(entry)
+                // am compat 写入即生效：系统当场杀掉目标应用，返回时按新方向重启
+                // （2026-10-15 实测：enable/disable 后 pid 立即消失）。旧的「查活 +
+                // 询问是否结束」流程问的是已被系统杀掉的应用，pidof 又与击杀竞态、
+                // 提示时对时错（「未在运行」误导），整体移除、如实告知即可。
+                hostToast("「${entry.label}」横屏：${if (shown) "开" else "关"}——应用将以新设置重启")
             }
         }
 
@@ -310,21 +312,6 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                 if (enabled) R.drawable.bg_checkbox_on else R.drawable.bg_checkbox_off,
             )
         }
-    }
-
-    private fun askKillIfAlive(entry: VirtualLauncher.AppEntry) {
-        val pkg = entry.component.packageName
-        val pid = Shell.exec("pidof $pkg", timeoutMs = 4000).output.trim()
-        if (pid.isEmpty()) return
-        androidx.appcompat.app.AlertDialog
-            .Builder(requireContext())
-            .setTitle("应用正在运行")
-            .setMessage("「${entry.label}」正在运行，显示设置的更改需要重启应用后才能生效。是否立即结束它？")
-            .setPositiveButton("结束应用") { _, _ ->
-                Shell.exec("am force-stop $pkg", timeoutMs = 4000)
-                hostToast("已结束「${entry.label}」，重新打开即按新设置显示")
-            }.setNegativeButton("稍后手动重启", null)
-            .show()
     }
 }
 
