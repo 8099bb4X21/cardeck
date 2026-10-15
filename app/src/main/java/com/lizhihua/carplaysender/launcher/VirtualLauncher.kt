@@ -9,6 +9,7 @@ import android.hardware.display.VirtualDisplay
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
+import com.lizhihua.carplaysender.render.CARD_MARGIN_PX
 import com.lizhihua.carplaysender.render.DualDisplayComposer
 import com.lizhihua.carplaysender.shizuku.Shell
 import com.lizhihua.carplaysender.util.Bg
@@ -66,8 +67,21 @@ object VirtualLauncher {
         runningAppsListeners.forEach { runCatching { it() } }
     }
 
-    /** 桌面图标缓存（DockActivity 显示运行中图标用）。 */
-    val iconCache = HashMap<ComponentName, Drawable>()
+    /**
+     * 桌面图标缓存（DockActivity 显示运行中图标用）。桌面扫描线程整表换新、dock 的
+     * 主线程并发读——volatile 引用替换，读方拿到的旧表也完整自洽（此前 clear+逐条
+     * 写入同一个 HashMap，跨屏读写无同步，并发下可能损坏）。
+     */
+    @Volatile
+    private var iconCacheRef: Map<ComponentName, Drawable> = emptyMap()
+
+    val iconCache: Map<ComponentName, Drawable>
+        get() = iconCacheRef
+
+    /** 桌面扫描完成后整表替换图标缓存。 */
+    fun replaceIconCache(fresh: Map<ComponentName, Drawable>) {
+        iconCacheRef = fresh
+    }
 
     @Volatile
     var dockDisplayId: Int = -1
@@ -288,15 +302,15 @@ object VirtualLauncher {
         val appPortraitDensity =
             (appWidth / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(160, 640)
         // 地图屏：按应用区全尺寸创建，分屏/全屏间动态 resize（见 resizeMapDisplay）。
-        // tile 尺寸 = SPLIT 绘制矩形，与 DualDisplayComposer.TILE_MARGIN(16) 保持一致：
+        // tile 尺寸 = SPLIT 绘制矩形，边距统一用契约值 CARD_MARGIN_PX（勿再裸写数字）：
         //  横屏：左半卡片（宽=应用区/2-24，即左右留 16、右缘收半边距 8；高=上下留 16）
         //  竖屏：上半卡片（地图上/音乐下，各占应用区高一半，四周留 16、中缝 16）
         if (dockAtBottom) {
-            mapTileWidth = appWidth - 32
-            mapTileHeight = (appHeightPx - 48) / 2
+            mapTileWidth = appWidth - CARD_MARGIN_PX * 2
+            mapTileHeight = (appHeightPx - CARD_MARGIN_PX * 3) / 2
         } else {
-            mapTileWidth = appWidth / 2 - 24
-            mapTileHeight = appHeightPx - 32
+            mapTileWidth = appWidth / 2 - CARD_MARGIN_PX * 3 / 2
+            mapTileHeight = appHeightPx - CARD_MARGIN_PX * 2
         }
         // 横屏应用屏的密度选择（2026-10-11 实测标定）：
         // 竖屏锁定应用（如头条）在横屏屏上被系统 letterbox 成窄条窗口，窗口逻辑宽度

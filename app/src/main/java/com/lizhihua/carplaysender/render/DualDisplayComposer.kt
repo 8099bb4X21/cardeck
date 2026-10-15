@@ -17,6 +17,14 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
+ * 仪表盘卡片边距（流像素）——地图 tile 与音乐卡共用的契约值，四方统一引用：
+ * 本类 SPLIT 绘制矩形、VirtualLauncher 建屏 tile 尺寸、GridActivity 音乐卡布局、
+ * TouchRouter tile 触摸命中域。此前 16 在四个文件各自定义/裸写、仅靠注释结盟，
+ * 改一处即静默错位（触摸命中域/卡片布局/绘制矩形三者不一致，坏味道审查 P1 收敛）。
+ */
+const val CARD_MARGIN_PX = 16
+
+/**
  * 双虚拟屏 GL 合成器：dock 屏 + 应用屏（原生 / 超采样两块，按活动切换）→ 拼接输出到编码器输入 Surface。
  *
  * 三路 SurfaceTexture 作为各虚拟屏的输出；GL 线程轮询新帧标志，有新帧即重绘合成画面。
@@ -46,8 +54,6 @@ class DualDisplayComposer(
         private const val TAG = "DualComposer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
 
-        /** 仪表盘卡片边距（流像素；与 GridActivity CARD_MARGIN_PX 保持一致）。 */
-        private const val TILE_MARGIN = 16f
         private const val TILE_CORNER_RADIUS = 24f
     }
 
@@ -430,7 +436,7 @@ class DualDisplayComposer(
                         drawInput(map!!, 0f, outWidth.toFloat(), dockH.toFloat(), outHeight.toFloat())
                     } else {
                         // 上半卡片：左右留 16、顶留 16；pager 水平滑动 → tile 向左滑出（跟手）
-                        val tileH = (outHeight - dockH) / 2f - TILE_MARGIN * 1.5f
+                        val tileH = (outHeight - dockH) / 2f - CARD_MARGIN_PX * 1.5f
                         val slide = tileSlideFraction * outWidth
                         val nowMs = android.os.SystemClock.uptimeMillis()
                         if (nowMs - lastPortraitTileDiag > 5_000) {
@@ -441,10 +447,10 @@ class DualDisplayComposer(
                         }
                         drawInputUV(
                             map!!,
-                            TILE_MARGIN - slide,
-                            outWidth - TILE_MARGIN - slide,
-                            outHeight - TILE_MARGIN - tileH,
-                            outHeight - TILE_MARGIN,
+                            CARD_MARGIN_PX - slide,
+                            outWidth - CARD_MARGIN_PX - slide,
+                            outHeight - CARD_MARGIN_PX - tileH,
+                            (outHeight - CARD_MARGIN_PX).toFloat(),
                             cornerRadius = TILE_CORNER_RADIUS,
                         )
                     }
@@ -475,18 +481,18 @@ class DualDisplayComposer(
                         drawInput(map!!, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
                     } else {
                         // 卡片形态：四周留边 + 圆角（与音乐卡一致）。
-                        // 中缝=TILE_MARGIN（16）：tile 右缘与音乐卡左缘各收半边距（8），
+                        // 中缝=CARD_MARGIN_PX（16）：tile 右缘与音乐卡左缘各收半边距（8），
                         // 否则两边各 16px 叠加出 32px 的中缝、比外侧 16px 边距宽一倍不协调。
                         // tileSlideFraction：随 pager 滑动把 tile 平移出/入左侧（视觉跟手）。
                         val half = (outWidth - dockW) / 2f
-                        val tileW = half - TILE_MARGIN - TILE_MARGIN / 2f
+                        val tileW = half - CARD_MARGIN_PX - CARD_MARGIN_PX / 2f
                         val slide = tileSlideFraction * (outWidth - dockW)
                         drawInputUV(
                             map!!,
-                            dockW + TILE_MARGIN - slide,
-                            dockW + TILE_MARGIN + tileW - slide,
-                            TILE_MARGIN,
-                            outHeight - TILE_MARGIN,
+                            dockW + CARD_MARGIN_PX - slide,
+                            dockW + CARD_MARGIN_PX + tileW - slide,
+                            CARD_MARGIN_PX.toFloat(),
+                            (outHeight - CARD_MARGIN_PX).toFloat(),
                             cornerRadius = TILE_CORNER_RADIUS,
                         )
                     }

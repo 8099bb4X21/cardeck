@@ -2,6 +2,7 @@ package com.lizhihua.carplaysender.input
 
 import android.content.Context
 import com.lizhihua.carplaysender.input.TouchReports.Contact
+import com.lizhihua.carplaysender.render.CARD_MARGIN_PX
 import com.lizhihua.carplaysender.shizuku.CarInputClient
 
 /**
@@ -106,7 +107,7 @@ object TouchRouter {
             val appH = launcher.appHeightPx
             inDock = py >= appH
             // 地图 tile（应用区上半；全屏=应用区全部）。触摸/流坐标顶部起算：
-            // tile 矩形 py ∈ [16, 16+mapTileHeight]，屏内 y = py-16（顶边距扣除）
+            // tile 矩形 py ∈ [CARD_MARGIN_PX, +mapTileHeight]，屏内 y = py-边距（顶边距扣除）
             if (!inDock &&
                 launcher.mapDisplayId >= 0 &&
                 (launcher.mapFullscreen || launcher.dashboardMode) &&
@@ -114,13 +115,13 @@ object TouchRouter {
                 px < launcher.appAreaWidth &&
                 (
                     launcher.mapFullscreen ||
-                        (py >= 16 && py < 16 + launcher.mapTileHeight)
+                        (py >= CARD_MARGIN_PX && py < CARD_MARGIN_PX + launcher.mapTileHeight)
                 )
             ) {
                 inDock = false
                 targetDisplay = launcher.mapDisplayId
                 localX = px
-                localY = if (launcher.mapFullscreen) py else py - 16
+                localY = if (launcher.mapFullscreen) py else py - CARD_MARGIN_PX
                 routedToMap = true
             }
             if (!routedToMap) {
@@ -230,7 +231,7 @@ object TouchRouter {
             launcher,
             contact,
             tileHit,
-            if (launcher.dockAtBottom) px - 16 else px - dockW,
+            if (launcher.dockAtBottom) px - CARD_MARGIN_PX else px - dockW,
         )
     }
 

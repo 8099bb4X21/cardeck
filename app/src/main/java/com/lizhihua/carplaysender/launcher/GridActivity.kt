@@ -16,6 +16,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import com.lizhihua.carplaysender.R
+import com.lizhihua.carplaysender.render.CARD_MARGIN_PX
 import com.lizhihua.carplaysender.util.Bg
 
 /**
@@ -443,9 +444,11 @@ class GridActivity : AppCompatActivity() {
         val apps =
             appsCache ?: run {
                 val scanned = VirtualLauncher.launchableApps(this)
-                // iconCache 供 dock 运行中图标使用（每次重扫时同步刷新）
-                synchronized(VirtualLauncher.runningApps) { VirtualLauncher.iconCache.clear() }
-                scanned.forEach { VirtualLauncher.iconCache[it.component] = it.icon }
+                // iconCache 供 dock 运行中图标使用：整表换新——dock 在另一块屏的主线程
+                // 并发读，clear+逐条写入共享 HashMap 无同步会损坏（坏味道审查 P1）
+                VirtualLauncher.replaceIconCache(
+                    scanned.associate { it.component to it.icon },
+                )
                 appsCache = scanned
                 // 纳入进程级共享缓存：桌面扫过之后，车机设置首次打开即秒开
                 VirtualLauncher.adoptAppsCache(scanned)
@@ -680,6 +683,5 @@ class GridActivity : AppCompatActivity() {
     private companion object {
         const val COLUMNS = 4 // CarPlay 规格：强制 4 列
         const val ROWS = 3
-        const val CARD_MARGIN_PX = 16 // 仪表盘卡片边距（流像素）
     }
 }
