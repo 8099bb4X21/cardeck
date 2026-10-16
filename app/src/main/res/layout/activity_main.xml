@@ -408,6 +408,23 @@
                             android:textSize="12sp" />
                     </LinearLayout>
 
+                    <!-- 目标车机：配对了多台时指定唯一目标（只向它发请求/只接受它连入） -->
+                    <TextView
+                        android:id="@+id/btnPickTarget"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="8dp"
+                        android:background="@drawable/bg_tbtn"
+                        android:gravity="center"
+                        android:paddingStart="12dp"
+                        android:paddingTop="9dp"
+                        android:paddingEnd="12dp"
+                        android:paddingBottom="9dp"
+                        android:text="选择设备"
+                        android:textColor="@color/m3_primary"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
                     <TextView
                         android:id="@+id/btBadge"
                         android:layout_width="wrap_content"

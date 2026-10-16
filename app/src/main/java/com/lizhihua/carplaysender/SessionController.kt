@@ -6,6 +6,7 @@ import com.lizhihua.carplaysender.audio.AudioSender
 import com.lizhihua.carplaysender.bt.BtSessionGate
 import com.lizhihua.carplaysender.bt.Iap2BluetoothClient
 import com.lizhihua.carplaysender.bt.Iap2BluetoothServer
+import com.lizhihua.carplaysender.bt.TargetDevicePrefs
 import com.lizhihua.carplaysender.capture.HiddenDisplaySource
 import com.lizhihua.carplaysender.iap2.Iap2MessageIds
 import com.lizhihua.carplaysender.iap2.Iap2SenderSession
@@ -206,12 +207,17 @@ object SessionController {
             wifiConnector = WifiCarPlayConnector(context) { line -> appendLog(line) }
             val wifiCredentialHook: (Iap2SenderSession.WifiConfiguration) -> Unit =
                 { wifi -> onWifiCredentials(wifi) }
+            // 目标车机动态读取：选择后下一轮连接尝试/下一次连入即生效，无需重启链路
+            val targetProvider: () -> TargetDevicePrefs.Target? = {
+                appContext?.let { TargetDevicePrefs.get(it) }
+            }
             bluetoothServer =
                 Iap2BluetoothServer(
                     context,
                     log = { line -> appendLog(line) },
                     onEndpoint = { endpoint -> onCarPlayEndpoint(endpoint, "车机回连") },
                     onWifiCredentials = wifiCredentialHook,
+                    targetProvider = targetProvider,
                 )
             bluetoothClient =
                 Iap2BluetoothClient(
@@ -219,6 +225,7 @@ object SessionController {
                     log = { line -> appendLog(line) },
                     onEndpoint = { endpoint -> onCarPlayEndpoint(endpoint, "主动连车机") },
                     onWifiCredentials = wifiCredentialHook,
+                    targetProvider = targetProvider,
                 )
             ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
         }

@@ -22,6 +22,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
+import com.lizhihua.carplaysender.bt.TargetDevicePrefs
 import com.lizhihua.carplaysender.input.TouchRouter
 import com.lizhihua.carplaysender.launcher.VirtualLauncher
 import com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
@@ -69,6 +70,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var ssidInput: EditText
     private lateinit var btDesc: TextView
     private lateinit var btBadge: TextView
+    private lateinit var btnPickTarget: TextView
     private lateinit var audioDesc: TextView
     private lateinit var btnAudio: TextView
     private lateinit var switchAlwaysOn: androidx.appcompat.widget.SwitchCompat
@@ -356,6 +358,7 @@ class MainActivity : AppCompatActivity() {
         ssidInput = findViewById(R.id.ssidInput)
         btDesc = findViewById(R.id.btDesc)
         btBadge = findViewById(R.id.btBadge)
+        btnPickTarget = findViewById(R.id.btnPickTarget)
         audioDesc = findViewById(R.id.audioDesc)
         btnAudio = findViewById(R.id.btnAudio)
         switchAlwaysOn = findViewById(R.id.switchAlwaysOn)
@@ -515,6 +518,9 @@ class MainActivity : AppCompatActivity() {
                 log("WiFi: 无法打开WLAN设置，请手动前往 设置 > WLAN")
             }
         }
+
+        // 目标车机选择：配对了多台车机时指定唯一目标（只向它发请求/只接受它连入）
+        btnPickTarget.setOnClickListener { showTargetPicker() }
 
         // 车机侧声音授权（原「申请投屏权限」）：RECORD_AUDIO + MediaProjection 一起请求
         btnAudio.setOnClickListener {
@@ -847,15 +853,43 @@ class MainActivity : AppCompatActivity() {
 
         btBadge.visibility = if (bondedCount >= 0) View.VISIBLE else View.GONE
         if (bondedCount >= 0) {
+            val target = TargetDevicePrefs.get(this)
             if (bondedCount > 0) {
                 btBadge.background.mutate().setTint(getColor(R.color.m3_ok_dot))
                 btBadge.text = "就绪"
-                btDesc.text = "已与 $bondedCount 台设备配对 · 连接自动回连"
+                btDesc.text =
+                    if (target != null) {
+                        "目标「${target.name}」· 只向该设备发请求"
+                    } else if (bondedCount > 1) {
+                        "已配对 $bondedCount 台设备 · 未指定目标将逐个尝试"
+                    } else {
+                        "已与 $bondedCount 台设备配对 · 连接自动回连"
+                    }
             } else {
                 btBadge.background.mutate().setTint(getColor(R.color.m3_amber))
                 btBadge.text = "未配对"
                 btDesc.text = "尚未配对——请先与车机蓝牙配对"
             }
+            // 目标设备已不在已配对列表（如系统里删了配对）时提示重选
+            if (target != null && bondedCount > 0) {
+                val stillBonded =
+                    try {
+                        (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
+                            .adapter
+                            ?.bondedDevices
+                            ?.any { TargetDevicePrefs.matches(target, it.address) } == true
+                    } catch (_: SecurityException) {
+                        true
+                    }
+                if (!stillBonded) {
+                    btBadge.background.mutate().setTint(getColor(R.color.m3_amber))
+                    btBadge.text = "需重选"
+                    btDesc.text = "目标「${target.name}」已不在配对列表——请重新选择设备"
+                }
+            }
+            btnPickTarget.visibility = if (bondedCount > 0) View.VISIBLE else View.GONE
+        } else {
+            btnPickTarget.visibility = View.GONE
         }
         val projectionReady =
             CarPlayService.mediaProjection != null
@@ -869,6 +903,87 @@ class MainActivity : AppCompatActivity() {
             audioDesc.text = "需要「投屏」权限，可选 · 关闭时车机无声音"
         }
         readyCount.text = "$ready/3"
+    }
+
+    /**
+     * 目标车机选择对话框（2026-10-16）：列出**已配对**设备（车机必须先系统级蓝牙配对，
+     * 这是无线 CarPlay 的前置；此处不做蓝牙扫描发现新设备——未配对设备无法建 iAP2 会话）。
+     * 首项「自动（不指定）」按传统行为逐个尝试/来者不拒；选中后出站只连目标、
+     * 入站拒绝非目标（防误连家里另一台车机）。
+     * 选择立即生效（链路动态读取目标，无需重连）；正在进行的连接会因目标变更
+     * 在下一轮尝试/下一次连入时切换。
+     */
+    private fun showTargetPicker() {
+        val bonded =
+            try {
+                (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
+                    .adapter
+                    ?.bondedDevices
+                    ?.toList()
+                    .orEmpty()
+            } catch (_: SecurityException) {
+                emptyList()
+            }
+        if (bonded.isEmpty()) {
+            snack("没有已配对的设备——请先到系统蓝牙设置与车机配对")
+            return
+        }
+        val current = TargetDevicePrefs.get(this)
+        val labels =
+            buildList {
+                add("自动（不指定 · 逐个尝试）")
+                bonded.forEach { device ->
+                    val name =
+                        try {
+                            device.name ?: device.address
+                        } catch (_: SecurityException) {
+                            device.address
+                        }
+                    add("$name\n${device.address}")
+                }
+            }.toTypedArray()
+        // 当前选中项高亮（0=自动；若目标已不在列表则落在自动）
+        val checked =
+            if (current == null) {
+                0
+            } else {
+                bonded
+                    .indexOfFirst { TargetDevicePrefs.matches(current, it.address) }
+                    .let { if (it >= 0) it + 1 else 0 }
+            }
+        androidx.appcompat.app.AlertDialog
+            .Builder(this)
+            .setTitle("选择目标车机")
+            .setSingleChoiceItems(labels, checked) { dialog, which ->
+                dialog.dismiss()
+                if (which == 0) {
+                    TargetDevicePrefs.set(this, null)
+                    log("TARGET: 已取消目标指定——出站逐个尝试已配对设备，入站接受任一设备")
+                    snack("已切换为自动（不指定目标）")
+                } else {
+                    val device = bonded[which - 1]
+                    val name =
+                        try {
+                            device.name ?: device.address
+                        } catch (_: SecurityException) {
+                            device.address
+                        }
+                    val previous = TargetDevicePrefs.get(this)
+                    TargetDevicePrefs.set(this, TargetDevicePrefs.Target(device.address, name))
+                    log(
+                        "TARGET: 目标车机已设为「$name」(${device.address})" +
+                            "——出站只连该设备、入站拒绝其它设备" +
+                            if (previous != null && previous.address != device.address) {
+                                "（原目标「${previous.name}」）"
+                            } else {
+                                ""
+                            },
+                    )
+                    snack("目标已设为「$name」——只向该设备发请求")
+                }
+                updateReadyRow()
+            }.setNegativeButton("取消", null)
+            .show()
     }
 
     /** 设备营销名（ro.product.marketname），取不到时退回 Build.MODEL。 */

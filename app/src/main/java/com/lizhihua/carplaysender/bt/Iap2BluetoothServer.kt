@@ -29,6 +29,8 @@ class Iap2BluetoothServer(
     private val onEndpoint: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
     /** 0x5703 一到即触发（绑 WiFi + 广播 _carplay-ctrl），真车 0x4301 的前置条件。 */
     private val onWifiCredentials: (Iap2SenderSession.WifiConfiguration) -> Unit = {},
+    /** 目标车机（动态读取：拒绝非目标设备的连入；null=来者不拒）。 */
+    private val targetProvider: () -> TargetDevicePrefs.Target? = { null },
 ) {
     companion object {
         /**
@@ -103,6 +105,23 @@ class Iap2BluetoothServer(
                 } catch (_: SecurityException) {
                     null
                 } ?: "unknown"
+            // 指定了目标车机时拒绝其它设备的连入（用户配对了多台车机：非目标车机
+            // 的控制器也会周期回连，放行会抢占/误建会话）。地址比对，大小写不敏感。
+            val target = targetProvider()
+            val peerAddress =
+                try {
+                    socket.remoteDevice?.address
+                } catch (_: SecurityException) {
+                    null
+                }
+            if (target != null && !TargetDevicePrefs.matches(target, peerAddress)) {
+                log(
+                    "BT: 忽略非目标设备连入 name=$peerName addr=${peerAddress ?: "?"}" +
+                        "（当前目标：「${target.name}」）",
+                )
+                runCatching { socket.close() }
+                continue
+            }
             log("BT: 接收端已连入 name=$peerName，开始 iAP2 发送端会话")
             Thread({ runSession(socket) }, "iap2-bt-session").apply {
                 isDaemon = true

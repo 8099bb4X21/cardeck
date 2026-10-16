@@ -32,6 +32,8 @@ class Iap2BluetoothClient(
     private val onEndpoint: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
     /** 0x5703 一到即触发（绑 WiFi + 广播 _carplay-ctrl），真车 0x4301 的前置条件。 */
     private val onWifiCredentials: (Iap2SenderSession.WifiConfiguration) -> Unit = {},
+    /** 目标车机（动态读取：选择后无需重启链路，下一轮尝试即生效）。 */
+    private val targetProvider: () -> TargetDevicePrefs.Target? = { null },
 ) {
     companion object {
         /**
@@ -64,6 +66,9 @@ class Iap2BluetoothClient(
     @Volatile
     private var running = false
 
+    /** 目标设备不在已配对列表的提示节流（避免每 3 秒刷屏）。 */
+    private var lastTargetMissingLogAt = 0L
+
     val isRunning: Boolean get() = running
 
     fun hasPermission(): Boolean =
@@ -88,7 +93,15 @@ class Iap2BluetoothClient(
         }
         running = true
         val myGeneration = generation.incrementAndGet()
-        log("BT-C: 启动——将主动连入车机的无线 iAP2 服务（…caff）")
+        val target = targetProvider()
+        log(
+            "BT-C: 启动——将主动连入车机的无线 iAP2 服务（…caff）" +
+                if (target != null) {
+                    "，目标：「${target.name}」${target.address}（只连该设备）"
+                } else {
+                    "（未指定目标：依次尝试全部候选设备，可在「连接准备」中指定）"
+                },
+        )
         Thread({ connectLoop(myGeneration) }, "iap2-bt-client").apply {
             isDaemon = true
             thread = this
@@ -163,6 +176,7 @@ class Iap2BluetoothClient(
     /**
      * 候选设备：优先 SDP 缓存里带配件端 UUID 的已配对设备；
      * 缓存缺失时退化为全部已配对设备（connect 时的 SDP 查询会自行过滤）。
+     * 指定了目标车机时**只返回该设备**（用户配对了多台车机时避免误连）。
      */
     @SuppressLint("MissingPermission")
     private fun candidateDevices(adapter: android.bluetooth.BluetoothAdapter): List<BluetoothDevice> {
@@ -172,6 +186,23 @@ class Iap2BluetoothClient(
             } catch (_: SecurityException) {
                 emptyList()
             }
+        targetProvider()?.let { target ->
+            // 目标策略：地址命中即唯一候选——不再按 SDP 缓存过滤（缓存可能缺失，
+            // 而用户显式指定就该尝试）；目标不在已配对列表时给一次提示并空转等待。
+            val hit = bonded.filter { TargetDevicePrefs.matches(target, it.address) }
+            if (hit.isEmpty()) {
+                val now = android.os.SystemClock.uptimeMillis()
+                if (now - lastTargetMissingLogAt > FAILURE_LOG_THROTTLE_MILLIS) {
+                    lastTargetMissingLogAt = now
+                    log(
+                        "BT-C: 目标设备「${target.name}」(${target.address}) 不在已配对列表" +
+                            "——请到系统蓝牙设置完成配对，或在「连接准备」改选目标",
+                    )
+                }
+                return emptyList()
+            }
+            return hit
+        }
         val withService =
             bonded.filter { device ->
                 device.uuids?.any { it.uuid == ACCESSORY_IAP2_UUID } == true
