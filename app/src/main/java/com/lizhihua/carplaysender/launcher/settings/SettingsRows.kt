@@ -30,8 +30,11 @@ sealed class SettingsRow {
 
 /**
  * 行构建与字母导航条（管理桌面 / 应用超采样 / 应用横屏共用）：
- * 两级分组——先按桌面勾选（「在桌面的应用」→「不在桌面的应用」），
- * 组内按拼音首字母分节（A/B/…/#，数字应用归 #）。字母导航条在两大组内各自跳转。
+ * 两级分组——先按桌面勾选（「在桌面的应用」→「不在桌面的应用」）。
+ * 仅「不在桌面」组内按拼音首字母分节（A/B/…/#，数字应用归 #），字母导航条
+ * 也只对应后者——**在桌面组不分节**：其数量通常少，若分节，其字母会出现在
+ * 导航条首位（排在 #/A 之前），而后面分节里不再出现该字母，导航条看起来
+ * 「排序错误」（2026-10-16 用户反馈：高德在桌面 → G 排在导航条第一个）。
  */
 object SettingsRows {
     fun build(
@@ -44,7 +47,8 @@ object SettingsRows {
         val rows = ArrayList<SettingsRow>(apps.size * 2)
         if (onDesktop.isNotEmpty()) {
             rows += SettingsRow.Header("在桌面的应用（${onDesktop.size}）", "on")
-            rows += letterRows(onDesktop)
+            // 扁平直出（清单本身按拼音有序，过滤后仍有序），不分字母节、不进导航条
+            rows += onDesktop.map { SettingsRow.App(it) }
         }
         if (offDesktop.isNotEmpty()) {
             rows += SettingsRow.Header("不在桌面的应用（${offDesktop.size}）", "off")
