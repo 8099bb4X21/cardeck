@@ -273,6 +273,11 @@ object SessionController {
     fun disconnect(context: Context) {
         val hadProjection = CarPlayService.mediaProjection != null
         retireSession()
+        // BT 控制会话只在这里（用户终态）退役，socket close 让保活读循环立刻退出：
+        // 否则它阻塞到对端超时（实测 ~24s）才结束，用户取消后英雄卡持续转圈。
+        // 配对中绝不能断——DiPlay 在隧道 iAP2 就绪前看到 RFCOMM 断开即判
+        // bring-up failed 并拆整轮无线栈（含推流中的 AirPlay 会话，2026-10-16 实测）。
+        detachActiveBtSessions()
         phaseHint = null
         CarPlayService
             .stop(context)
@@ -304,10 +309,11 @@ object SessionController {
         currentClient?.cancelled = true
         currentClient?.close()
         currentClient = null
-        // 主动断开当前 BT 控制会话（socket close）：否则保活读循环阻塞到对端
-        // 超时（实测 ~24s）才退出，期间 sessionStarting 未复位——用户取消后
-        // 英雄卡持续转圈（「取消不了」观感的根因）
-        detachActiveBtSessions()
+        // 注意：这里绝不能 detach BT 控制会话。本方法在每轮配对起步时也会执行，
+        // 而 DiPlay 在 WiFi 隧道就绪前看到 RFCOMM 断开即判 bring-up failed、
+        // closeWirelessStack 拆掉整轮无线栈（Bonjour/热点/AirPlay 服务），把已建立
+        // 甚至正在推流的 AirPlay 会话一起拆掉——「连上约 3 秒即断」循环的根因
+        // （2026-10-16 实测）。BT 退役只在用户终态做，见 disconnect()。
         // 解除会话静默：出站探测恢复（下次会话建立时会再次置位）
         BtSessionGate.sessionActive = false
         // 「强制应用横屏」覆盖随会话结束统一复原（应用回到手机侧正常竖屏形态）

@@ -83,10 +83,21 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
 - **取消连接必须全程可中断**：`sessionStarting` 互斥标志的复位依赖配对流程线程
   走到 finally——该线程可能阻塞在不可中断的等待（无超时 connect、mDNS 等待、
   BT 保活读循环），任何一处卡住都会让取消「无效」（英雄卡永久「正在连接」）。
-  防御三件套（2026-10-15 实战）：retireSession 主动 detach 关 BT 会话 socket、
-  AirPlayClient.cancelled 标志让配对重试循环提前退出、cancelConnecting 强制
-  `sessionStarting.set(false)`（用户显式取消即强制解锁）。**新增任何长等待点时
-  必须响应 connectCancelled**，且取消路径要实测「发起后立即取消」场景。
+  防御三件套（2026-10-15 实战）：disconnect/取消时主动 detach 关 BT 会话 socket
+  （**只在用户终态做，见下条**）、AirPlayClient.cancelled 标志让配对重试循环提前退出、
+  cancelConnecting 强制 `sessionStarting.set(false)`（用户显式取消即强制解锁）。
+  **新增任何长等待点时必须响应 connectCancelled**，且取消路径要实测「发起后立即取消」场景。
+- **配对/推流期间绝不能断 BT 控制会话**（2026-10-16 定谳，「连上约 3 秒即断」循环根因）：
+  DiPlay 在 WiFi 隧道 iAP2 就绪前（AirPlay 通道从未下发 `disableBluetooth`，
+  `handoffRequested=false`）看到 RFCOMM 断开即判 `wireless bring-up failed` →
+  `closeWirelessStack` 拆掉整轮无线栈（Bonjour/热点/AirPlay 服务），**把已建立甚至
+  正在推流的 AirPlay 会话一起拆掉**（日志：DiPlay 侧 `RFCOMM reader FAILED` →
+  `bring-up failed`；手机侧约 +0.4s 后 `TUNNEL/EVENT 读取结束 - Connection reset`、
+  `推流中止`）。持续关一次就重建栈 30~40s，形成连上→断→重建→再连循环。
+  曾经错在 `retireSession()` 里 detach（每轮配对起步都会执行一次）；现在只在
+  `disconnect()`（用户断开/取消的终态）detach。**改会话退役逻辑时先确认没有新增
+  中途关 RFCOMM 的路径**；`SessionController.kt:876` 的「第二阶段 hack」（配对失败
+  后故意断 BT 重试）对 DiPlay 必然触发一次整栈重建，属已知代价。
 - **Shell 命令**：参数用 `shellQuote`（单引号转义）；WiFi 连接走
   `cmd wifi connect-network`，查开关/当前 SSID 用一次 `cmd wifi status`
   （勿用「任意 WiFi 即成功」的盲绑判定——手机连着别的 WiFi 时会误判）。
