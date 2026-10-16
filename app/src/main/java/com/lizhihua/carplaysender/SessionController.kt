@@ -1067,7 +1067,15 @@ object SessionController {
                                                 }
                                             },
                                         )
-                                    val density = (420 * scale).toInt().coerceIn(120, 840)
+                                    // dock 屏密度随画布短边等比（设计基准 1160×540@420dpi，
+                                    // 见 design/launcher-proto.html：dock 48dp=126px）：高分辨率
+                                    // 车机（测试台 2320×1080=2×）下 dock 文字/图标与奥迪同比例
+                                    // 放大——此前固定 420dpi，dock 相对画布减半显小（2026-10-17）。
+                                    // 上限 4×（4K 级画布）。
+                                    val density =
+                                        (420f * minOf(streamW, streamH) / 540f)
+                                            .toInt()
+                                            .coerceIn(120, 1680)
                                     videoSender?.start { surface ->
                                         // 唯一模式：隐形屏（双屏启动器：dock + 应用屏）
                                         val source =

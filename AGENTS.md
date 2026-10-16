@@ -65,6 +65,18 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
 - **三套坐标系**：车机触摸 = 通告视图坐标系（如 1160×540）；流/虚拟屏 = 缩放后尺寸
   （如 1450×674）。`TouchRouter.setCoordinateScale` 在会话建立时换算，改动触摸路由
   时不要破坏这层映射。地图屏坐标 = 显示内容本身（动态 resize 后）。
+- **dock 尺寸必须随画布分辨率等比**（2026-10-17 修复「高分辨率下车机 dock 文字/图标
+  显小」）：dock 的所有尺寸源自设计稿 `design/launcher-proto.html`（基准画布
+  1160×540@420dpi，dock 48dp=126px、时钟 22px）。**dock 屏密度由 SessionController
+  按画布短边等比下发**（`420 × min(流W,流H)/540`，上限 1680）——奥迪基准下系数恰为
+  1.0、行为与旧版完全一致；测试台 2320×1080（2×）下密度 840，dock 条 252px、文字/
+  图标同步 ×2，占画布短边恒定 23.3%。此前密度固定 `420×缩放%`，高分辨率车机上 dock
+  相对画布减半显小（应用屏密度是自适应算的，所以只有 dock 显小）。配套约定：
+  ① dock 布局（`activity_dock_sidebar/bar.xml`）**全部用 dp**（= 设计 px ÷ 2.625），
+  禁止 px 写死；② 字号在 `DockActivity` 按「设计 px × designScale」以 PX 设置
+  （designScale = densityDpi/420；不用 sp——dock 是像素级设计画布，不跟手机字体缩放）；
+  ③ 模糊半径等物理像素量同样乘 designScale；④ `fitClockText` 的行程/步进也按
+  designScale 缩放。改 dock 视觉时先确认这三处都随密度走。
 - **流尺寸必须为偶数**（H.264 4:2:0）：奇数高度会让编码器首帧输入时进错误态且
   曾被静默吞掉。缩放计算后统一在 SessionController 对齐（VideoSender 内另有兜底）。
 - **虚拟屏 resize 必须同步消费端**：`VirtualDisplay.resize` 后要

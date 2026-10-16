@@ -34,6 +34,15 @@ class DockActivity : AppCompatActivity() {
     private var batteryFill: View? = null
     private var barForm = false
 
+    /**
+     * 设计基准密度（420dpi）的当前倍率。dock 屏密度由 SessionController 按画布短边等比
+     * 下发（奥迪 1160×540→420 不变；测试台 2320×1080→840，dock 与文字/图标整体 ×2）。
+     * 布局 XML 用 dp 自动随密度缩放；字号/模糊半径等按「设计 px × 本倍率」在代码里设，
+     * 保证高分辨率车机下 dock 内容与画布同比例（2026-10-17 修复「高分辨率下显得小」）。
+     */
+    private val designScale: Float
+        get() = resources.displayMetrics.densityDpi / 420f
+
     private val refreshListener: () -> Unit = { runOnUiThread { refresh() } }
 
     private val pollHandler = Handler(Looper.getMainLooper())
@@ -108,8 +117,10 @@ class DockActivity : AppCompatActivity() {
         VirtualLauncher.addRunningAppsListener(refreshListener)
         pollHandler.postDelayed(pollRunnable, 3_000)
         clockHandler.post(clockTicker)
-        // dock 虚拟屏与视频流 1:1 合成：字号按物理像素收紧（荣耀 ROM 上 XML autoSize
-        // 对窄 dock 不生效，必须布局完成后按实测宽度手工缩字号；起点 22px 对照原型）
+        // 字号按「设计 px × designScale」设置（不进 XML：荣耀 ROM 上 autoSize 对窄 dock
+        // 不生效，仍需布局完成后按实测宽度手工缩钟表——见 fitClockText；13/22 为原型值）
+        clockView?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 22f * designScale)
+        batteryText?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 13f * designScale)
         clockView?.post { fitClockText(clockView!!) }
         setupWallpaper()
         // 注册变更通知 + 立即对账一次（兜底注册前发生的更换——事件不补发）
@@ -168,7 +179,8 @@ class DockActivity : AppCompatActivity() {
 
     /**
      * 应用 dock 外观偏好：暗幕强度（scrim View 的黑 alpha）+ 背景高斯模糊
-     * （RenderEffect，API 31+；半径按 dock 物理像素，最大 40px）。
+     * （RenderEffect，API 31+；半径按 dock 物理像素，最大 40px——乘 designScale
+     * 保证高分辨率车机上模糊观感与奥迪基准一致）。
      */
     private fun applyDockPrefs() {
         val scrim = findViewById<View>(R.id.dockScrim) ?: return
@@ -182,7 +194,7 @@ class DockActivity : AppCompatActivity() {
         if (percent <= 0) {
             wallpaper.setRenderEffect(null)
         } else {
-            val radius = percent / 100f * 40f
+            val radius = percent / 100f * 40f * designScale
             wallpaper.setRenderEffect(
                 android.graphics.RenderEffect.createBlurEffect(
                     radius,
@@ -221,15 +233,16 @@ class DockActivity : AppCompatActivity() {
         }
     }
 
-    /** 逐级缩小字号直至文本宽度放得下（px 单位；行程 22→12px，对照设计原型）。 */
+    /** 逐级缩小字号直至文本宽度放得下（设计 px × designScale；行程 22→12，对照设计原型）。 */
     private fun fitClockText(view: TextView) {
         val available = view.width - view.paddingLeft - view.paddingRight
         if (available <= 0) return
-        var size = 22f
+        val scale = designScale
+        var size = 22f * scale
         view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, size)
         val paint = view.paint
-        while (size > 12f && paint.measureText(view.text.toString()) > available) {
-            size -= 0.5f
+        while (size > 12f * scale && paint.measureText(view.text.toString()) > available) {
+            size -= 0.5f * scale
             view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, size)
         }
     }

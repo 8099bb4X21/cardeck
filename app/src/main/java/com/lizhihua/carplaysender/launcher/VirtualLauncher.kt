@@ -33,7 +33,12 @@ import com.lizhihua.carplaysender.util.Bg
 object VirtualLauncher {
     private const val TAG = "VirtualLauncher"
 
-    /** dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。CarPlay 化后含时钟/电量。 */
+    /**
+     * dock 宽度（dp；应用屏可用宽度 = 总宽 - 本值换算的像素）。CarPlay 化后含时钟/电量。
+     * 密度基准 420dpi（↔ 奥迪设计画布 1160×540），由 SessionController 按画布短边
+     * 等比下发——高分辨率车机下 dock 条与文字/图标同步放大，占画布短边恒定 23.3%
+     * （= 设计 126/540；2026-10-17 修复「高分辨率下 dock 显小」）。
+     */
     const val DOCK_WIDTH_DP = 48
 
     /**
@@ -282,6 +287,7 @@ object VirtualLauncher {
     ): Boolean {
         detach()
         val density = densityDpi / 160f
+        // dock 条物理宽度 = 48dp × 密度（密度随画布短边等比，见 DOCK_WIDTH_DP 注释）
         val thicknessPx = (DOCK_WIDTH_DP * density).toInt().coerceAtLeast(80)
         // 车机方向决定 dock 位置：横屏 → 左侧竖条；竖屏 → 底部横条（2026-10-11 用户要求）
         dockAtBottom = totalHeight > totalWidth
@@ -302,7 +308,7 @@ object VirtualLauncher {
         appAreaWidth = appWidth
         appAreaHeight = appHeightPx
         // 竖屏应用屏密度：窗口逻辑宽度目标 ≈ 手机竖屏宽度（LETTERBOX_TARGET_DP）。
-        // 错用 dock 的 densityDpi（420×缩放）会把窗口压到 ~206dp——文字观感大一倍
+        // 错用 dock 的 densityDpi（随画布分辨率等比、非手机密度）会把窗口压到 ~206dp——文字观感大一倍
         // （2026-10-14 竖屏实测：应用与桌面字号明显偏大的根因）。
         val appPortraitDensity =
             (appWidth / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(160, 640)
