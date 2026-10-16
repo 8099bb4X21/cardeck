@@ -580,7 +580,12 @@ class MainActivity : AppCompatActivity() {
             preferences.edit().putBoolean("logEnabled", checked).apply()
             renderConsole(SessionController.logText())
         }
-        findViewById<ImageView>(R.id.btnClearLog).setOnClickListener { SessionController.clearLog() }
+        findViewById<ImageView>(R.id.btnClearLog).setOnClickListener {
+            // 清除缓冲后必须显式重渲染：日志回调是增量追加语义，clearLog 的通知
+            // 无法清 UI（见 SessionController.clearLog 注释，「点了没反应」根因）
+            SessionController.clearLog()
+            renderConsole(SessionController.logText())
+        }
         findViewById<ImageView>(R.id.btnCopyLog).setOnClickListener {
             val text = SessionController.logText()
             if (text.isEmpty()) {

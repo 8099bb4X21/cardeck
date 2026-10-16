@@ -96,9 +96,14 @@ object SessionController {
 
     fun logText(): String = synchronized(logLock) { logBuilder.toString() }
 
+    /**
+     * 清空进程级日志缓冲（UI 刷新是调用方的事：显式 `renderConsole(logText())`）。
+     * 历史上这里靠 `logListener?.invoke("")` 通知 UI——那是「每行全量 setText」时代的
+     * 语义；改为增量 appendConsole 后空串等于追加空行，UI 原地不动（「清除按钮点了
+     * 没反应」根因，2026-10-16）。不要恢复该调用：空串与真实日志行无法区分。
+     */
     fun clearLog() {
         synchronized(logLock) { logBuilder.setLength(0) }
-        logListener?.invoke("")
     }
 
     // ---- 会话对象（进程级所有权；Activity 重建不影响）----
