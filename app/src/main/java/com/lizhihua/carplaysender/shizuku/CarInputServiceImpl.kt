@@ -2,6 +2,7 @@ package com.lizhihua.carplaysender.shizuku
 
 import android.content.Context
 import android.hardware.input.InputManager
+import android.os.IBinder
 import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
@@ -256,6 +257,75 @@ class CarInputServiceImpl(
     // VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 << 30（@hide/@SystemApi，编译期不可引用，写原始值）
     private val virtualDisplays = HashMap<Int, android.hardware.display.VirtualDisplay>()
 
+    // ---- IME 展示策略 ----
+
+    /**
+     * 受信虚拟屏的 IME 策略默认是 FALLBACK——键盘被系统路由到手机默认屏，车机侧永远
+     * 看不到（2026-10-17 定谳，车机「设置」搜索框点击无键盘根因）。创建受信屏后显式
+     * 设 LOCAL 让键盘画进本屏、随合成流推给车机。
+     *
+     * 枚举值反射自 SystemApi 常量而非硬编码 0：厂商 ROM 有魔改枚举值的风险（2026-10-17
+     * 排查时按此防御；本机实测与 AOSP 一致 = 0）。读不到时回落 0 并记日志。
+     */
+    private val imePolicyLocal: Int by lazy {
+        val value =
+            try {
+                Class
+                    .forName("android.view.WindowManager")
+                    .getField("DISPLAY_IME_POLICY_LOCAL")
+                    .getInt(null)
+            } catch (t: Throwable) {
+                fileLog("DISPLAY_IME_POLICY_LOCAL 反射失败，回退 AOSP 值 0：$t")
+                0
+            }
+        fileLog("DISPLAY_IME_POLICY_LOCAL=$value")
+        value
+    }
+
+    /**
+     * IWindowManager 代理（按方法名反射，不依赖 AIDL 事务号）。
+     * 该 ROM 上走 ServiceManager+Stub.asInterface；WindowManagerGlobal.getWindowManagerService
+     * 路径会致进程被杀（2026-10-17 实测），勿用。
+     */
+    private val windowManagerProxy: Any? by lazy {
+        try {
+            val binder =
+                Class
+                    .forName("android.os.ServiceManager")
+                    .getMethod("getService", String::class.java)
+                    .invoke(null, "window")
+            Class
+                .forName("android.view.IWindowManager\$Stub")
+                .getMethod("asInterface", IBinder::class.java)
+                .invoke(null, binder)
+        } catch (t: Throwable) {
+            fileLog("IWindowManager 反射失败（IME 策略将不生效）：$t")
+            null
+        }
+    }
+
+    /**
+     * 把受信虚拟屏的 IME 策略设为 LOCAL（键盘画进本屏）。
+     * 失败不影响主链路：最坏情况与改动前一致——键盘留在手机主屏、车机侧不可见。
+     */
+    private fun applyImePolicyLocal(displayId: Int) {
+        val proxy = windowManagerProxy ?: return
+        try {
+            proxy.javaClass
+                .getMethod("setDisplayImePolicy", Integer.TYPE, Integer.TYPE)
+                .invoke(proxy, displayId, imePolicyLocal)
+            val readBack =
+                runCatching {
+                    proxy.javaClass
+                        .getMethod("getDisplayImePolicy", Integer.TYPE)
+                        .invoke(proxy, displayId)
+                }.getOrNull()
+            fileLog("setDisplayImePolicy($displayId, LOCAL=$imePolicyLocal) ok, 读回=$readBack")
+        } catch (t: Throwable) {
+            fileLog("setDisplayImePolicy($displayId, LOCAL=$imePolicyLocal) 失败：$t")
+        }
+    }
+
     /** 文件日志：shell 进程 logcat 被 HKS 加密，写 /data/local/tmp 供 adb 读取。 */
     private fun fileLog(message: String) {
         try {
@@ -297,8 +367,18 @@ class CarInputServiceImpl(
             // VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6（@hide）：
             // 不声明时应用看到 "-touch" 配置（无触摸设备）→ 部分应用（如头条）
             // 切 TV/桌面式大头部布局（2026-10-11 实测：搜索区占满半屏的根因）。
+            //
+            // VIRTUAL_DISPLAY_FLAG_PUBLIC（公开 API = 1）必须随受信屏一起声明（2026-10-17 定谳）：
+            // 不声明时 DisplayDeviceInfo 带 FLAG_PRIVATE（owner=shell 2000），而 WMS.addWindow
+            // 的访问闸 displayContent.hasAccess(session.mUid) → Display.hasAccess 对私有屏只放行
+            // owner/system/root/UID-present——第三方输入法（uid 10xxx）的键盘窗口会被
+            // ADD_INVALID_DISPLAY(-9) 拒绝，永远加不进该屏（车机侧「设置」点搜索框无键盘的
+            // 最终根因：策略已 LOCAL、令牌已迁屏，IME 服务也 showWindow 了，但窗口加不进）。
+            // 公开化只放宽窗口访问；ROM 的「公开屏默认自动镜像」仅在未声明
+            // OWN_CONTENT_ONLY 时生效，我们已声明，不受影响。dock 屏不受信、无输入场景，
+            // 维持私有（也避免无关窗口挂上去）。
             val flags =
-                (if (trusted) FLAG_TRUSTED else 0) or
+                (if (trusted) FLAG_TRUSTED or android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC else 0) or
                     FLAG_SUPPORTS_TOUCH or
                     android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
             fileLog("flags=0x${flags.toString(16)}")
@@ -310,6 +390,9 @@ class CarInputServiceImpl(
                 return -1
             }
             synchronized(virtualDisplays) { virtualDisplays[id] = vd }
+            // 只有受信屏能设 IME 策略（WMS 对非受信屏抛 SecurityException），且正需要它：
+            // dock 屏只承载自有 DockActivity，无输入场景
+            if (trusted) applyImePolicyLocal(id)
             Log.i(TAG, "createDisplay $name id=$id size=${width}x$height@$dpi flags=0x${flags.toString(16)}")
             id
         } catch (t: Throwable) {

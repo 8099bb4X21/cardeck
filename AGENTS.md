@@ -70,6 +70,37 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
 - **虚拟屏 resize 必须同步消费端**：`VirtualDisplay.resize` 后要
   `SurfaceTexture.setDefaultBufferSize(新尺寸)`，否则投影把新内容画进旧 buffer 左上角
   （内容偏居左、宽度只剩比例值）。
+- **虚拟屏上的应用弹不出键盘：两条独立原因，都必须修**（2026-10-17 定谳，车机侧
+  「设置」搜索框点击无键盘根因；已实现并经真机端到端验证——车机屏弹键盘、点击按键
+  文本进入搜索框）：
+  **① 私有屏拒绝第三方 IME 窗口**：`createVirtualDisplay` 不声明
+  `VIRTUAL_DISPLAY_FLAG_PUBLIC` 时屏带 `FLAG_PRIVATE`（owner=shell uid 2000），而
+  `WMS.addWindow` 的访问闸 `displayContent.hasAccess(session.mUid)` → `Display.hasAccess`
+  对私有屏只放行 owner/system/root/UID-present——**输入法（uid 10xxx）的键盘窗口被
+  `ADD_INVALID_DISPLAY(-9)` 拒绝**，`SoftInputWindow.show()` 捕获后进入
+  `REJECTED_AT_LEAST_ONCE` **永不重试**（表现为 IME 服务侧 `mViewsCreated/mWindowVisible=
+  true` 但 WM 里没有 InputMethod 窗口、`mImeWindow` 恒 null）。修复：受信屏 flags 加
+  `VIRTUAL_DISPLAY_FLAG_PUBLIC`（公开 API = 1；只放宽窗口访问，「公开屏默认自动镜像」
+  仅在不声明 OWN_CONTENT_ONLY 时生效，我们已声明，不受影响；dock 屏保持私有）。
+  **② IME 展示策略默认 FALLBACK**：`VIRTUAL_DISPLAY_FLAG_TRUSTED` 只保证受信，**虚拟屏的
+  IME 展示策略默认是 `DISPLAY_IME_POLICY_FALLBACK_DISPLAY`**（`dumpsys window displays`
+  里该屏 SettingsEntry `mShouldShowIme=null` 即此默认值）——IMMS 的
+  `computeImeDisplayIdForTarget` 对非 LOCAL 策略一律返回默认屏，键盘请求被路由到
+  **手机主屏**。修复：创建受信屏后 shell 反射调 `IWindowManager.setDisplayImePolicy(id,
+  LOCAL)`——**LOCAL 值必须运行时反射读 `android.view.WindowManager.DISPLAY_IME_POLICY_LOCAL`
+  而非硬编码**（本机 ROM 有魔改枚举值的风险，用户 2026-10-17 提示；AOSP = 0，读不到回落 0
+  并记日志）。IWindowManager 代理走 `ServiceManager.getService("window")` +
+  `IWindowManager$Stub.asInterface` 反射（`WindowManagerGlobal.getWindowManagerService`
+  在本 ROM 上会致进程被杀，勿用）；需 `INTERNAL_SYSTEM_WINDOW`，本机
+  `com.android.shell` 已授予，`wm`/`cmd window` 均无对应命令。策略按 display 实例
+  （uniqueId 含代次）记录、虚拟屏每次会话重建，故必须随 createDisplay 重设（幂等）；
+  只对受信屏可设（否则 WMS 抛 SecurityException）。
+  两条都要修才通：只设策略 → 令牌迁到虚拟屏但窗口被 private 闸拒绝（实测
+  `imeDisplayId=299` 而 `mImeWindow=null`、show 卡在
+  `PHASE_SERVER_SET_REMOTE_TARGET_IME_VISIBILITY(49)`）；只放开 PUBLIC 不设策略 → 键盘
+  仍落手机屏。**诊断工具**：反射读 `WindowManager` 全部 IME_POLICY 字段 + 逐屏读策略
+  （`/data/local/tmp/const.jar ImeConst <ids...>`）；`dumpsys` 看 `mViewsCreated` 与
+  `mImeWindow` 是否同真。改动文件：`CarInputServiceImpl.createDisplay`。
 - **GL 绘制坐标约定**：DualDisplayComposer 顶点/裁剪的 y 全程是 **GL 坐标（底部
   原点，向上增长）**，触摸/流坐标是顶部原点——两套方向相反，混用即出 bug。圆角
   裁剪矩形（uClipRect）必须与顶点同坐标系直传；曾因翻转成屏幕坐标 + 全高 tile
