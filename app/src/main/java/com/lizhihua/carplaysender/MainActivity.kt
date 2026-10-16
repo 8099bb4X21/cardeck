@@ -861,7 +861,7 @@ class MainActivity : AppCompatActivity() {
                     if (target != null) {
                         "目标「${target.name}」· 只向该设备发请求"
                     } else if (bondedCount > 1) {
-                        "已配对 $bondedCount 台设备 · 未指定目标将逐个尝试"
+                        "已配对 $bondedCount 台 · 未指定目标将逐个尝试"
                     } else {
                         "已与 $bondedCount 台设备配对 · 连接自动回连"
                     }
