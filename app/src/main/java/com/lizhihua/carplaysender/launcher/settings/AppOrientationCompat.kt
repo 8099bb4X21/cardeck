@@ -64,6 +64,56 @@ object AppOrientationCompat {
         return count
     }
 
+    /**
+     * 系统侧当前真正开着覆盖的「覆盖键」集合（事实源；键可能是包名，也可能是
+     * 历史脏数据里的 `包/组件` 串）。
+     *
+     * 偏好文件读不到「系统实际状态」：**卸载会删掉偏好，系统侧 am compat 覆盖却会留下**
+     * （2026-10-16 实测：设备上有飞书/大众点评/荣耀云音乐三个残留）。查询只能走
+     * `dumpsys platform_compat`（该 ROM 无 `cmd platform_compat`），实测全量 30ms/36KB，
+     * 过滤到关心的两个 ChangeId 后约 3KB——**面板打开时查一次**，行绑定只做内存查表，
+     * 绝不可每行一次（40+ 应用 × ~100ms = 卡顿）。
+     *
+     * **必须同时解析 packageOverrides 与 rawOverrides**：已卸载应用的覆盖只存在于
+     * rawOverrides——packageOverrides 是平台按「已安装包」解析后的映射，包不存在时条目
+     * 消失（2026-10-16 实测：给未安装包写的覆盖只在 rawOverrides 可见）。「其它系统
+     * 残留」汇总正是为卸载残留设计的，漏读会让横幅永远空着。
+     *
+     * 两个 ChangeId 取或：只开其一的半残状态同样视为「已开启」（清理时会一并写两个）。
+     */
+    fun systemEnabled(): Set<String> {
+        val out =
+            Shell
+                .exec(
+                    "dumpsys platform_compat | grep -E 'ChangeId\\(${CHANGE_UNDEFINED_TO_NOSENSOR};|ChangeId\\(${CHANGE_ANY_ORIENTATION};'",
+                    timeoutMs = 6_000L,
+                ).output
+        if (out.isBlank()) return emptySet()
+        return out
+            .lineSequence()
+            .flatMap { line ->
+                // packageOverrides={com.a=true, ...}；rawOverrides 里还可能有 包/组件 键
+                Regex("(?:packageOverrides|rawOverrides)=\\{([^}]*)\\}")
+                    .findAll(line)
+                    .flatMap { m ->
+                        // 键容许多数可打印字符（含 / 的组件键）；只取 =true
+                        Regex("([^=,{}\\s]+)=true").findAll(m.groupValues[1]).map { it.groupValues[1] }
+                    }
+            }.toSet()
+    }
+
+    /**
+     * 清除单个「覆盖键」的系统侧覆盖（两个 ChangeId 都写 disable）。
+     * 仅动系统覆盖、**不动偏好**——用于清理「偏好已不在（卸载残留）但覆盖还开着」的条目；
+     * 名单内的应用请用 [setEnabled]（会同步偏好，避免 UI 与系统状态脱节）。
+     * 注意：am compat disable 会立即杀掉目标应用进程（新设置需重启应用生效）。
+     */
+    fun clearSystemOnly(key: String): Boolean {
+        val ok1 = Shell.exec("am compat disable $CHANGE_UNDEFINED_TO_NOSENSOR $key", timeoutMs = 4000).ok
+        val ok2 = Shell.exec("am compat disable $CHANGE_ANY_ORIENTATION $key", timeoutMs = 4000).ok
+        return ok1 && ok2
+    }
+
     private fun enabledPkgs(context: Context): List<String> =
         prefs(context)
             .all

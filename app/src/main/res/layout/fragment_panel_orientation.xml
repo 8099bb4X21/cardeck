@@ -17,6 +17,22 @@
         android:textColor="#FF8E8E93"
         android:textSize="12sp" />
 
+    <!-- 面板外残留：系统侧开着覆盖、但应用已卸载（偏好随卸载消失）——列表里点不到，
+         只能在顶部汇总清理。默认隐藏，有此类残留时出现 -->
+    <TextView
+        android:id="@+id/oriOrphanBanner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="10dp"
+        android:background="#33FF6B6B"
+        android:paddingLeft="10dp"
+        android:paddingTop="8dp"
+        android:paddingRight="10dp"
+        android:paddingBottom="8dp"
+        android:textColor="#FFFF6B6B"
+        android:textSize="11.5sp"
+        android:visibility="gone" />
+
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"

@@ -18,6 +18,7 @@ import com.lizhihua.carplaysender.launcher.DockPrefs
 import com.lizhihua.carplaysender.launcher.SupersamplePrefs
 import com.lizhihua.carplaysender.launcher.VirtualLauncher
 import com.lizhihua.carplaysender.launcher.settings.AppRowsAdapter.AppHolder
+import com.lizhihua.carplaysender.util.Bg
 
 /**
  * 车机设置内容面板（Fragment 化）：车机 SettingsActivity 双栏右栏、
@@ -150,6 +151,16 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
 }
 
 class OrientationPanelFragment : SettingsPanelFragment() {
+    /**
+     * 系统侧真正开着覆盖的包集合（面板打开时后台查一次，行绑定只做内存查表——
+     * `dumpsys platform_compat` 单次约 30ms/36KB，绝不可每行一次）。
+     * 打开面板/清除残留后刷新；行内开关点击就地更新，避免重查。
+     */
+    private var systemOn: Set<String> = emptySet()
+    private var systemStateLoaded = false
+    private lateinit var listAdapter: OrientationAdapter
+    private lateinit var panelView: View
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -157,7 +168,68 @@ class OrientationPanelFragment : SettingsPanelFragment() {
     ): View = inflater.inflate(R.layout.fragment_panel_orientation, container, false)
 
     override fun onViewCreated(view: View) {
-        setupAppList(view, R.id.oriList, R.id.oriListIndex, OrientationAdapter())
+        panelView = view
+        listAdapter = OrientationAdapter()
+        // 应用清单就绪后重算横幅（首帧 apps 为空，全部会被误判成「不在列表」）
+        setupAppList(view, R.id.oriList, R.id.oriListIndex, listAdapter) { updateOrphanBanner() }
+        Bg.run("orientation-system-state") {
+            val state = AppOrientationCompat.systemEnabled()
+            activity?.runOnUiThread {
+                if (!isAdded || isDetached) return@runOnUiThread
+                systemOn = state
+                systemStateLoaded = true
+                listAdapter.notifyDataSetChanged()
+                updateOrphanBanner()
+            }
+        }
+    }
+
+    /**
+     * 面板外残留（清单里点不到、系统侧却开着覆盖的键）横幅：点击弹窗确认后清理。
+     * 包括两类：已卸载应用（覆盖只在 rawOverrides 可见）、以及历史脏数据里的
+     * `包/组件` 键——这些在应用列表里都没有对应行，行内小字覆盖不到。
+     */
+    private fun updateOrphanBanner() {
+        if (!::panelView.isInitialized) return
+        val banner = panelView.findViewById<TextView>(R.id.oriOrphanBanner) ?: return
+        // 应用清单未就绪时先不判定：apps 为空会让所有已开启覆盖都「看起来像列表外残留」
+        // （列表真正装载后 onAppsReady 会再调一次）
+        if (apps.isEmpty()) return
+        val known = apps.map { it.component.packageName }.toSet()
+        val orphans = systemOn.filter { it !in known }.sorted()
+        if (orphans.isEmpty()) {
+            banner.visibility = View.GONE
+            return
+        }
+        banner.visibility = View.VISIBLE
+        // 组件键（含 /）很长：显示时截到包名部分，完整键留给弹窗
+        val summary =
+            orphans.take(3).joinToString("、") { it.substringBefore('/') } +
+                if (orphans.size > 3) " 等 ${orphans.size} 个" else ""
+        banner.text = "另有 ${orphans.size} 个列表外的横屏残留：$summary\n点击清除"
+        banner.setOnClickListener {
+            androidx.appcompat.app.AlertDialog
+                .Builder(requireContext())
+                .setTitle("清除横屏残留")
+                .setMessage(
+                    "以下条目已不在应用列表，但系统侧横屏覆盖仍开着：\n" +
+                        orphans.joinToString("\n") { "· $it" } +
+                        "\n\n清除会立即重启在运行的这些应用（未保存的界面状态会丢失）；" +
+                        "已卸载的条目不受影响。是否继续？",
+                ).setPositiveButton("清除") { _, _ ->
+                    Bg.run("orientation-orphan-clear") {
+                        val cleared = orphans.count { AppOrientationCompat.clearSystemOnly(it) }
+                        activity?.runOnUiThread {
+                            if (!isAdded || isDetached) return@runOnUiThread
+                            hostToast("已清除 $cleared/${orphans.size} 个横屏残留")
+                            systemOn = systemOn - orphans.toSet()
+                            listAdapter.notifyDataSetChanged()
+                            updateOrphanBanner()
+                        }
+                    }
+                }.setNegativeButton("取消", null)
+                .show()
+        }
     }
 
     private inner class OrientationAdapter :
@@ -170,6 +242,7 @@ class OrientationPanelFragment : SettingsPanelFragment() {
     ) : AppHolder(row) {
         private val icon: ImageView = row.findViewById(R.id.oriIcon)
         private val name: TextView = row.findViewById(R.id.oriName)
+        private val hint: TextView = row.findViewById(R.id.oriHint)
         private val check: ImageView = row.findViewById(R.id.oriCheck)
         private lateinit var entry: VirtualLauncher.AppEntry
         private var shown = false
@@ -192,6 +265,8 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                     hostToast("写入失败（Shizuku 异常）")
                     return@setOnClickListener
                 }
+                // 就地更新系统侧缓存：开关点击已同步写入系统（无需重查 dumpsys）
+                systemOn = if (shown) systemOn + pkg() else systemOn - pkg()
                 refresh(shown)
                 // am compat 写入即生效：系统当场杀掉目标应用，返回时按新方向重启
                 // （2026-10-15 实测：enable/disable 后 pid 立即消失）。旧的「查活 +
@@ -203,10 +278,63 @@ class OrientationPanelFragment : SettingsPanelFragment() {
 
         private fun pkg() = entry.component.packageName
 
+        /**
+         * 勾选框 + 系统侧状态小字。三种状态：
+         *   勾选开 + 系统开 → 灰字「已开启横屏（会话期间生效）」（正常）
+         *   勾选关 + 系统开 → 红字高亮「系统残留：横屏仍在生效，点击清除」（异常，可点清除）
+         *   其它            → 隐藏（勾选框本身已表达偏好，不制造噪音）
+         */
         private fun refresh(enabled: Boolean) {
             check.setImageResource(
                 if (enabled) R.drawable.bg_checkbox_on else R.drawable.bg_checkbox_off,
             )
+            val onSystem = systemStateLoaded && pkg() in systemOn
+            when {
+                onSystem && enabled -> {
+                    hint.text = "已开启横屏（会话期间生效）"
+                    hint.setTextColor(0xFF8E8E93.toInt())
+                    hint.visibility = View.VISIBLE
+                    hint.setOnClickListener(null)
+                    hint.isClickable = false
+                }
+
+                onSystem -> {
+                    hint.text = "系统残留：横屏仍在生效 · 点击清除"
+                    hint.setTextColor(0xFFFF6B6B.toInt())
+                    hint.visibility = View.VISIBLE
+                    hint.isClickable = true
+                    // 只清系统侧覆盖、不动偏好（偏好本来就是关的）；弹窗提示会重启应用
+                    hint.setOnClickListener {
+                        androidx.appcompat.app.AlertDialog
+                            .Builder(requireContext())
+                            .setTitle("清除横屏残留")
+                            .setMessage(
+                                "「${entry.label}」的系统侧横屏覆盖仍在生效（可能是卸载前的残留）。" +
+                                    "\n\n清除会立即重启该应用（正在运行的应用会丢失未保存的界面状态）。是否继续？",
+                            ).setPositiveButton("清除") { _, _ ->
+                                Bg.run("orientation-row-clear") {
+                                    val ok = AppOrientationCompat.clearSystemOnly(pkg())
+                                    activity?.runOnUiThread {
+                                        if (!isAdded || isDetached) return@runOnUiThread
+                                        if (ok) {
+                                            systemOn = systemOn - pkg()
+                                            refresh(shown)
+                                            hostToast("「${entry.label}」横屏残留已清除——应用将重启")
+                                        } else {
+                                            hostToast("清除失败（Shizuku 异常）")
+                                        }
+                                    }
+                                }
+                            }.setNegativeButton("取消", null)
+                            .show()
+                    }
+                }
+
+                else -> {
+                    hint.visibility = View.GONE
+                    hint.setOnClickListener(null)
+                }
+            }
         }
     }
 }

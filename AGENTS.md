@@ -134,6 +134,16 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   残留清单变空 → 复原被跳过（2026-10-16 差点引入）。测试方式：写
   `shared_prefs/app_orientation.xml` 造 `force_<pkg>=true`，建会话后 force-stop 应用，
   重启应见 `ORIENTATION: 残留会话的横屏覆盖已复原 N 个`。
+- **系统侧 compat 覆盖的读法（应用横屏面板）**：事实源是 `dumpsys platform_compat`
+  （该 ROM 无 `cmd platform_compat`；全量 30ms/36KB，`grep` 到两个 ChangeId 后约 3KB，
+  面板打开时查一次、行绑定只做内存查表，绝不可每行一次）。**必须同时解析
+  `packageOverrides` 与 `rawOverrides`**：已卸载应用的覆盖只存在于 rawOverrides——
+  packageOverrides 按「已安装包」解析，包不存在时条目消失（2026-10-16 实测：给未安装
+  包写的覆盖只在 rawOverrides 可见，只读前者会让「列表外残留」横幅永远空着）。
+  rawOverrides 里还有 `force_xxx/组件` 形式的历史脏键（旧版本偏好键格式泄漏），
+  一并按「列表外残留」清理。UI 三层：行内小字（勾选开+系统开=灰字正常；勾选关+系统开=
+  **红色**「系统残留·点击清除」，弹窗提示会重启应用）、面板顶部列表外残留横幅（批量清）、
+  会话期 applyAll/resetAll 常规收口。
 - **`am compat enable/disable` 会立即杀掉目标应用**（兼容覆盖只能在新进程生效；
   2026-10-15 实测：执行后 pid 当场消失，用户返回时按新配置重启）。给「应用横屏」
   这类开关做交互时不要再设计「查活/询问是否重启」流程——问出问题时应用已经被
