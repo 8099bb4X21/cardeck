@@ -27,4 +27,8 @@ interface ICarInput {
 
     boolean ping();
     String diag();
+
+    // 服务进程 PID：应用侧清理「非当前绑定进程」的陈旧 UserService 时用于排除自己
+    // （旧进程持有的虚拟屏跨进程无法 release，杀进程是唯一释放途径，见 CarInputClient）。
+    int pid();
 }

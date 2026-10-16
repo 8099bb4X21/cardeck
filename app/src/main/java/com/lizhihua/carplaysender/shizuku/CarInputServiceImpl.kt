@@ -26,6 +26,49 @@ import java.lang.reflect.Method
 class CarInputServiceImpl(
     private val context: Context,
 ) : ICarInput.Stub() {
+    /**
+     * 僵尸自清（治本，2026-10-16）：Shizuku 按「组件+进程名+版本(APK lastUpdateTime)」复用
+     * 常驻 UserService 进程。重装 APK 后旧版本进程既不受 force-stop 影响、Shizuku 也不回收；
+     * 而它创建的虚拟屏**只有它自己能释放**（releaseDisplay 只查本进程的 map）——表现为
+     * 「重启后检测到残留屏，点清理却释放 0/N」。本进程周期性比对「启动时读到的
+     * lastUpdateTime」与当前安装值：不一致即自身 dex 已过期，自尽交系统回收进程，
+     * 它持有的全部虚拟屏随之释放。
+     */
+    private val startupLastUpdateTime: Long =
+        runCatching {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+        }.getOrDefault(-1L)
+
+    init {
+        fileLog("service start: pkg=${context.packageName} lastUpdate=$startupLastUpdateTime pid=${android.os.Process.myPid()}")
+        Thread({
+            while (true) {
+                try {
+                    Thread.sleep(STALE_CHECK_INTERVAL_MS)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+                val now =
+                    runCatching {
+                        @Suppress("DEPRECATION")
+                        context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+                    }.getOrDefault(-1L)
+                if (startupLastUpdateTime > 0 && now > 0 && now != startupLastUpdateTime) {
+                    fileLog(
+                        "stale self-reap: lastUpdateTime $startupLastUpdateTime -> $now，" +
+                            "exiting pid=${android.os.Process.myPid()}（其持有的虚拟屏随进程回收）",
+                    )
+                    android.os.Process.killProcess(android.os.Process.myPid())
+                    return@Thread
+                }
+            }
+        }, "carinput-stale-check").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
     private class Injector(
         val receiver: Any,
         val method: Method,
@@ -294,7 +337,13 @@ class CarInputServiceImpl(
     }
 
     override fun releaseDisplay(displayId: Int): Boolean {
-        val vd = synchronized(virtualDisplays) { virtualDisplays.remove(displayId) } ?: return false
+        val vd = synchronized(virtualDisplays) { virtualDisplays.remove(displayId) }
+        if (vd == null) {
+            // 不在本进程 map：该屏由其它（旧版本）UserService 进程创建，只有创建者能释放。
+            // 应用侧兜底见 CarInputClient.reapStaleUserServices（杀持有进程）。
+            fileLog("releaseDisplay id=$displayId -> 非本进程持有（跨进程无法释放）")
+            return false
+        }
         return try {
             vd.release()
             Log.i(TAG, "releaseDisplay id=$displayId")
@@ -311,8 +360,13 @@ class CarInputServiceImpl(
         "injector=" + (injector?.let { "${it.receiver.javaClass.name} ${it.method}" } ?: "null") +
             " setDisplayId=${setDisplayIdMethod != null}"
 
+    override fun pid(): Int = android.os.Process.myPid()
+
     companion object {
         private const val TAG = "CarInputSvc"
+
+        /** 自清巡检周期：重装 APK 后旧进程最迟约 15s 内自行退出（成本仅一次 PM 查询）。 */
+        private const val STALE_CHECK_INTERVAL_MS = 15_000L
 
         /** VIRTUAL_DISPLAY_FLAG_TRUSTED（@hide；AOSP 定义 = 1 << 10 = 0x400）。 */
         private const val FLAG_TRUSTED = 1 shl 10

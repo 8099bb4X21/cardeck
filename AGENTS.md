@@ -115,6 +115,25 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   `onWifiCredentials`：`videoSender.isRunning` 时直接忽略/只刷新密码缓存；真断连时
   推流自行终止，下一个端点自然接续。会话中的冗余 0x5703 还会连带触发 WiFi 重绑 +
   ctrl mDNS force 重注册，都会扰动推流，一并拦下。
+- **UserService 虚拟屏跨版本残留：三层收口**（2026-10-16 定谳，「重启后检测到残留屏、
+  点清理却释放 0/N」根因）：Shizuku 按「组件+进程名+版本(APK lastUpdateTime)」复用常驻
+  shell 进程——重装 APK 起新进程，旧进程 `am force-stop` 杀不掉（实测）、Shizuku 也不
+  回收；而虚拟屏**只有创建它的进程能释放**（`releaseDisplay` 只查本进程 map，跨进程返回
+  false）。判定进程版本看 `/proc/<pid>/maps` 的 base.apk 路径（`==deleted==` 即旧版本）。
+  三层收口（缺一有洞）：① `CarInputServiceImpl` 自清——周期性比对 lastUpdateTime，
+  过期自尽（重装后 ≤15s 旧进程退出、屏随之释放，实测 5s）；② `CarInputClient.
+  reapStaleUserServices`——绑定成功即枚举 `:car_input` 杀掉非当前绑定 pid（覆盖无自清
+  逻辑的历史旧进程，实测「已回收 1/1」）；③ 启动检测到残留先自动清理一轮，清不掉的
+  才弹窗。**今后任何「进程持有的资源」（虚拟屏等）都必须考虑跨版本残留的释放路径**：
+  进程回收是唯一兜底，`force-stop` 不可依赖。
+- **启动残留清理必须与「强制横屏复原」同条件触发**（2026-10-16）：`AppOrientationCompat.
+  resetAll` 挂在「检测到残留屏」这一条件上（`MainActivity.refreshShellState` 的
+  startupCheck 分支）——残留屏是「会话异常退出」的判据，会话末未执行的复原与它同源。
+  两条约束：① 复原必须在残留清理**之前**执行（清理会让残留清单变空）；② 预绑定
+  UserService（会触发旧进程回收）必须放在残留扫描**之后**，否则回收先让屏消失 →
+  残留清单变空 → 复原被跳过（2026-10-16 差点引入）。测试方式：写
+  `shared_prefs/app_orientation.xml` 造 `force_<pkg>=true`，建会话后 force-stop 应用，
+  重启应见 `ORIENTATION: 残留会话的横屏覆盖已复原 N 个`。
 - **`am compat enable/disable` 会立即杀掉目标应用**（兼容覆盖只能在新进程生效；
   2026-10-15 实测：执行后 pid 当场消失，用户返回时按新配置重启）。给「应用横屏」
   这类开关做交互时不要再设计「查活/询问是否重启」流程——问出问题时应用已经被

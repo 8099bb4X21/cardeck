@@ -122,15 +122,61 @@ object CarInputClient {
 
     private var diagAt = 0L
 
-    private fun diag(message: String) {
+    private fun diag(
+        message: String,
+        force: Boolean = false,
+    ) {
         Log.i(TAG, message)
         val now = android.os.SystemClock.uptimeMillis()
-        if (now - diagAt < 1_000L) return
+        if (!force && now - diagAt < 1_000L) return
         diagAt = now
         logSink?.invoke("SHIZUKU: $message")
     }
 
     private var binderListenerAdded = false
+
+    /**
+     * 回收旧版本残留的 UserService 进程，返回实际 kill 的数量（不足条件时 0）。
+     *
+     * Shizuku 按「组件+进程名+版本(lastUpdateTime)」复用常驻 shell 进程——重装 APK 后
+     * 旧版本进程既不受 force-stop 影响、Shizuku 也不回收；而虚拟屏只有创建它的进程能
+     * 释放（releaseDisplay 只查本进程的 map），表现为「重启后检测到残留屏，点清理却
+     * 释放 0/N」。这里枚举 :car_input 进程，杀掉除当前绑定进程外的全部——旧进程只持有
+     * 残留屏，进程回收即屏随之释放（不打断触摸注入，当前会话屏属于绑定进程）。
+     * 配合 UserService 侧的过期自清（CarInputServiceImpl 的 stale self-reap）双保险。
+     *
+     * 阻塞调用（含 shell ps/kill），须在后台线程执行；绑定成功时自动触发一次。
+     */
+    fun reapStaleUserServices(): Int {
+        val bound = service ?: return 0
+        val keepPid =
+            try {
+                bound.pid()
+            } catch (t: Throwable) {
+                // 旧 dex 无 pid() 事务（正常不会发生：Shizuku 按版本复用，绑定的必是当前版本）
+                diag("reap 跳过：pid() 不可用（${t.javaClass.simpleName}）")
+                return 0
+            }
+        val procName = (appContext?.packageName ?: return 0) + ":car_input"
+        val ps = Shell.exec("ps -A -o PID,ARGS", 5_000L)
+        if (!ps.ok) {
+            diag("reap 跳过：ps 失败（${ps.output.take(40)}）")
+            return 0
+        }
+        val stale =
+            ps.output
+                .lineSequence()
+                .mapNotNull { line ->
+                    val parts = line.trim().split(Regex("\\s+"), limit = 2)
+                    val pid = parts.getOrNull(0)?.toIntOrNull() ?: return@mapNotNull null
+                    if (parts.getOrNull(1) == procName && pid != keepPid) pid else null
+                }.toList()
+        if (stale.isEmpty()) return 0
+        val killed = stale.count { pid -> Shell.exec("kill -9 $pid", 3_000L).ok }
+        // force：紧随 bind 的 1s 节流窗口会吞掉这条关键结果（排查时必查）
+        diag("已回收 $killed/${stale.size} 个旧版本 UserService 进程（其残留虚拟屏随之释放）", force = true)
+        return killed
+    }
 
     private val conn =
         object : ServiceConnection {
@@ -150,6 +196,10 @@ object CarInputClient {
                 if (!ok) {
                     service = null
                     binding = false
+                } else {
+                    // 绑定成功后顺手回收旧版本残留进程（其持有的虚拟屏跨进程无法释放，
+                    // 只有进程回收才能让屏消失）。后台线程执行：内部含 shell ps/kill。
+                    Bg.run("stale-user-service-reap") { reapStaleUserServices() }
                 }
             }
 

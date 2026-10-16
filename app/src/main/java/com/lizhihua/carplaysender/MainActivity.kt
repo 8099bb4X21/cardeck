@@ -1053,7 +1053,7 @@ class MainActivity : AppCompatActivity() {
                 }
             runOnUiThread { shellStateText.text = text.trim() }
             if (startupCheck) {
-                val residual = carDisplays.filter { it.first !in currentSessionDisplayIds() }
+                var residual = carDisplays.filter { it.first !in currentSessionDisplayIds() }
                 if (residual.isNotEmpty()) {
                     log(
                         "SHELL: 启动检测到 ${residual.size} 个残留虚拟屏: " +
@@ -1066,6 +1066,16 @@ class MainActivity : AppCompatActivity() {
                             AppOrientationCompat
                                 .resetAll(applicationContext)
                         if (reset > 0) log("ORIENTATION: 残留会话的横屏覆盖已复原 $reset 个")
+                    }
+                    // 先自动清理一轮（含旧版本 UserService 进程回收——其持有的屏跨进程
+                    // 无法 release，只有进程回收能释放；重装 APK 后 Shizuku 按版本复用的
+                    // 旧进程正是「点清理释放 0/N」的根因，2026-10-16）。清不掉的再问用户。
+                    val released = releaseDisplays(residual.map { it.first })
+                    log("SHELL: 启动残留自动清理（释放 $released/${residual.size}）")
+                    if (released > 0) {
+                        residual =
+                            parseCarPlayDisplays(sh("dumpsys display"))
+                                .filter { it.first !in currentSessionDisplayIds() }
                     }
                 }
                 runOnUiThread {
@@ -1089,6 +1099,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+
+            // 预绑定 UserService：预热触摸注入，并触发旧版本残留进程回收（绑定回调内含
+            // reapStaleUserServices——重装 APK 后 Shizuku 不回收的旧进程，其持有的虚拟屏
+            // 只有进程回收能释放）。**必须晚于上方残留扫描**：回收会让旧进程的虚拟屏立即
+            // 消失，若先于扫描发生，残留清单可能变空 → resetAll（强制横屏复原）被跳过。
+            CarInputClient.ensure(this)
         }
     }
 
@@ -1153,7 +1169,18 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val bound = svc ?: return 0
-        return ids.count { runCatching { bound.releaseDisplay(it) }.getOrDefault(false) }
+        ids.forEach { runCatching { bound.releaseDisplay(it) } }
+        // 未直接释放的屏极可能由旧版本 UserService 进程持有（releaseDisplay 只查本进程
+        // map，跨进程无法释放——重装 APK 后 Shizuku 不回收旧进程的已知问题）。
+        // 回收旧进程让其随进程销毁释放，再以实际扫描结果复核（进程回收是异步的）。
+        CarInputClient.reapStaleUserServices()
+        val deadline = SystemClock.uptimeMillis() + 2_000L
+        while (true) {
+            val alive = parseCarPlayDisplays(sh("dumpsys display")).map { it.first }.toSet()
+            val gone = ids.count { it !in alive }
+            if (gone >= ids.size || SystemClock.uptimeMillis() >= deadline) return gone
+            Thread.sleep(200)
+        }
     }
 
     /** 一键把 shell 全局状态复位为系统默认值（含残留虚拟屏释放，保留当前会话屏）。 */
