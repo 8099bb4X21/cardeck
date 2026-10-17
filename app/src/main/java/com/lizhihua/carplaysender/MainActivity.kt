@@ -2,9 +2,13 @@ package com.lizhihua.carplaysender
 
 import android.Manifest
 import android.animation.ObjectAnimator
+import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -22,6 +26,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
+import com.lizhihua.carplaysender.bt.BtProfiles
 import com.lizhihua.carplaysender.bt.TargetDevicePrefs
 import com.lizhihua.carplaysender.input.TouchRouter
 import com.lizhihua.carplaysender.launcher.VirtualLauncher
@@ -873,7 +878,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 btBadge.background.mutate().setTint(getColor(R.color.m3_amber))
                 btBadge.text = "未配对"
-                btDesc.text = "尚未配对——请先与车机蓝牙配对"
+                btDesc.text = "尚未配对——点「选择设备」扫描并配对车机"
             }
             // 目标设备已不在已配对列表（如系统里删了配对）时提示重选
             if (target != null && bondedCount > 0) {
@@ -892,7 +897,9 @@ class MainActivity : AppCompatActivity() {
                     btDesc.text = "目标「${target.name}」已不在配对列表——请重新选择设备"
                 }
             }
-            btnPickTarget.visibility = if (bondedCount > 0) View.VISIBLE else View.GONE
+            // 弹窗内可扫描并直接配对未配对设备，因此不再只在「已有配对」时显示：
+            // 一台都没配对时，这里正是用户的入口。
+            btnPickTarget.visibility = View.VISIBLE
         } else {
             btnPickTarget.visibility = View.GONE
         }
@@ -910,86 +917,507 @@ class MainActivity : AppCompatActivity() {
         readyCount.text = "$ready/3"
     }
 
+    // ---- 目标车机选择弹窗（扫描/配对状态）----
+
+    /** 当前打开的弹窗（扫描回调要往里加行；关闭时统一收尾）。 */
+    private var targetPicker: androidx.appcompat.app.AlertDialog? = null
+
+    private var targetPickerReceiver: BroadcastReceiver? = null
+
+    /** 弹窗内已展示的扫描结果（按地址去重；已配对的单独进上组，不进这里）。 */
+    private val scannedTargets = LinkedHashMap<String, TargetPickerEntry>()
+
+    /** 扫描期间点过「配对」的设备地址（配对完成后自动选中为目标）。 */
+    private var pendingBondAddress: String? = null
+
+    private data class TargetPickerEntry(
+        val address: String,
+        val name: String,
+        val rssi: Int,
+        val bonded: Boolean,
+    )
+
+    /** 扫描权限被拒后置位：授权回调里继续（弹窗可能已关，则忽略）。 */
+    private var pendingTargetScan = false
+
+    private val targetScanPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            log("BT-SCAN: BLUETOOTH_SCAN 授权: $granted")
+            if (granted && pendingTargetScan) {
+                pendingTargetScan = false
+                targetPicker?.let { startTargetScan(it) }
+            } else if (!granted) {
+                pendingTargetScan = false
+                targetPicker?.let { _ ->
+                    updatePickerStatus("未授予「附近的设备」权限——无法扫描；可到系统设置授权后重开本弹窗", warn = true)
+                    pickerToast("未授予「附近的设备」权限——无法扫描附近设备")
+                }
+            }
+        }
+
     /**
-     * 目标车机选择对话框（2026-10-16）：列出**已配对**设备（车机必须先系统级蓝牙配对，
-     * 这是无线 CarPlay 的前置；此处不做蓝牙扫描发现新设备——未配对设备无法建 iAP2 会话）。
-     * 首项「自动（不指定）」按传统行为逐个尝试/来者不拒；选中后出站只连目标、
-     * 入站拒绝非目标（防误连家里另一台车机）。
-     * 选择立即生效（链路动态读取目标，无需重连）；正在进行的连接会因目标变更
-     * 在下一轮尝试/下一次连入时切换。
+     * 目标车机选择弹窗（2026-10-18 改版）：
+     *  组 1「已配对」——直接选用（车机无线 CarPlay 的前置是系统级蓝牙配对）；
+     *  组 2「附近的设备」——实时扫描（经典蓝牙 discovery），点击未配对设备即发起
+     *  系统配对，配对成功后自动设为目标。
+     *
+     * 首行「自动（不指定）」保留原有语义：出站逐个尝试、入站来者不拒；
+     * 选定后出站只连目标、入站拒绝非目标（防误连家里另一台车机）。
+     * 选择立即生效（链路动态读取目标，无需重连）。
      */
     private fun showTargetPicker() {
-        val bonded =
+        val adapter =
             try {
                 (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
                     .adapter
-                    ?.bondedDevices
-                    ?.toList()
-                    .orEmpty()
-            } catch (_: SecurityException) {
-                emptyList()
+            } catch (_: Exception) {
+                null
             }
-        if (bonded.isEmpty()) {
-            snack("没有已配对的设备——请先到系统蓝牙设置与车机配对")
+        if (adapter == null || !adapter.isEnabled) {
+            snack("蓝牙未开启——请先开启蓝牙")
             return
         }
+        val view = layoutInflater.inflate(R.layout.dialog_target_picker, null)
+        val dialog =
+            androidx.appcompat.app.AlertDialog
+                .Builder(this)
+                .setView(view)
+                .create()
+        targetPicker = dialog
+        scannedTargets.clear()
+        pendingBondAddress = null
+        view.findViewById<TextView>(R.id.btnCancelPicker).setOnClickListener { dialog.dismiss() }
+        view.findViewById<TextView>(R.id.btnRescan).setOnClickListener { startTargetScan(dialog) }
+        renderBondedGroup(view)
+        dialog.setOnDismissListener {
+            stopTargetScan()
+            targetPicker = null
+            pendingBondAddress = null
+            updateReadyRow()
+        }
+        dialog.setOnShowListener {
+            // 面板自带圆角：窗口底色必须透明，否则四角露出方角
+            dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+            val width = (resources.displayMetrics.widthPixels * 0.92f).toInt()
+            dialog.window?.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        dialog.show()
+        startTargetScan(dialog)
+    }
+
+    /** 渲染「已配对」组：自动行 + 每个已配对设备。 */
+    private fun renderBondedGroup(view: View) {
+        val list = view.findViewById<LinearLayout>(R.id.bondedList)
+        val empty = view.findViewById<TextView>(R.id.bondedEmpty)
+        list.removeAllViews()
         val current = TargetDevicePrefs.get(this)
-        val labels =
-            buildList {
-                add("自动（不指定 · 逐个尝试）")
-                bonded.forEach { device ->
-                    val name =
-                        try {
-                            device.name ?: device.address
-                        } catch (_: SecurityException) {
-                            device.address
-                        }
-                    add("$name\n${device.address}")
-                }
-            }.toTypedArray()
-        // 当前选中项高亮（0=自动；若目标已不在列表则落在自动）
-        val checked =
-            if (current == null) {
-                0
-            } else {
-                bonded
-                    .indexOfFirst { TargetDevicePrefs.matches(current, it.address) }
-                    .let { if (it >= 0) it + 1 else 0 }
-            }
-        androidx.appcompat.app.AlertDialog
-            .Builder(this)
-            .setTitle("选择目标车机")
-            .setSingleChoiceItems(labels, checked) { dialog, which ->
-                dialog.dismiss()
-                if (which == 0) {
-                    TargetDevicePrefs.set(this, null)
+        // 「自动（不指定）」是模式而非设备：单独放在两组之上，不混进「已配对」组
+        view.findViewById<LinearLayout>(R.id.autoRowContainer).apply {
+            removeAllViews()
+            addView(
+                inflateTargetRow(
+                    name = "自动（不指定目标）",
+                    address = "逐个尝试 · 接受任一设备连入",
+                    action = if (current == null) "当前" else "选择",
+                    highlighted = current == null,
+                    iconTint = R.color.m3_outline,
+                ) {
+                    TargetDevicePrefs.set(this@MainActivity, null)
                     log("TARGET: 已取消目标指定——出站逐个尝试已配对设备，入站接受任一设备")
+                    // 先关弹窗再提示（snackbar 在 Activity 窗口内，会被弹窗盖住）
+                    targetPicker?.dismiss()
                     snack("已切换为自动（不指定目标）")
-                } else {
-                    val device = bonded[which - 1]
-                    val name =
-                        try {
-                            device.name ?: device.address
-                        } catch (_: SecurityException) {
-                            device.address
+                },
+            )
+        }
+        val bonded = bondedDevices()
+        empty.visibility = if (bonded.isEmpty()) View.VISIBLE else View.GONE
+        bonded.forEach { device ->
+            val address = device.address
+            val name = deviceDisplayName(device)
+            val isCurrent = current != null && TargetDevicePrefs.matches(current, address)
+            list.addView(
+                inflateTargetRow(
+                    name = name,
+                    address = address,
+                    action = if (isCurrent) "当前" else "选择",
+                    highlighted = isCurrent,
+                    iconTint = R.color.m3_primary,
+                ) {
+                    setTarget(device, name, closePicker = true)
+                },
+            )
+        }
+    }
+
+    /** 单个设备行（两组共用；highlighted 时名称用主色）。 */
+    private fun inflateTargetRow(
+        name: String,
+        address: String,
+        action: String,
+        highlighted: Boolean,
+        iconTint: Int,
+        onClick: () -> Unit,
+    ): View {
+        val row = layoutInflater.inflate(R.layout.item_target_device, null)
+        row.background =
+            ContextCompat.getDrawable(
+                this@MainActivity,
+                if (highlighted) R.drawable.bg_bt_device_row_current else R.drawable.bg_bt_device_row,
+            )
+        row.findViewById<TextView>(R.id.devName).apply {
+            text = name
+            setTextColor(getColor(if (highlighted) R.color.m3_primary else R.color.m3_on_surface))
+        }
+        row.findViewById<TextView>(R.id.devAddr).text = address
+        row.findViewById<TextView>(R.id.devAction).apply {
+            // 「当前」= 实心绿胶囊 + 对勾 + 深色字；「选择/配对」= 描边胶囊 + 青色字。
+            // 只靠色相区分不够（青 #7EDCE6 vs 绿 #7BD8A5 小字号下难辨），改用形态差异。
+            if (highlighted) {
+                text = "✓ $action"
+                setTextColor(getColor(R.color.m3_surface))
+                background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_pill_current)
+            } else {
+                text = action
+                setTextColor(getColor(R.color.m3_primary))
+                background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tbtn)
+            }
+            // 实心/描边切换后 padding 由 drawable 决定，不需要重设
+            setPadding(paddingLeft, paddingTop, paddingRight, paddingBottom)
+        }
+        row.findViewById<ImageView>(R.id.devIcon).setColorFilter(getColor(iconTint))
+        row.setOnClickListener { onClick() }
+        return row
+    }
+
+    /**
+     * 开始扫描附近设备：注册 ACTION_FOUND / ACTION_BOND_STATE_CHANGED 后 startDiscovery。
+     * 发现结果按地址去重、排除已配对设备（它们在上一组）；点「配对」调 createBond()。
+     */
+    private fun startTargetScan(dialog: androidx.appcompat.app.AlertDialog) {
+        val adapter =
+            try {
+                (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
+                    .adapter
+            } catch (_: Exception) {
+                null
+            } ?: return
+        val granted =
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) ==
+                PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            pendingTargetScan = true
+            updatePickerStatus("需要「附近的设备」权限才能扫描…", warn = true)
+            targetScanPermissionLauncher.launch(Manifest.permission.BLUETOOTH_SCAN)
+            return
+        }
+        val scannedList = dialog.findViewById<LinearLayout>(R.id.scannedList) ?: return
+        // 已配对的地址集合：扫描结果里剔掉（避免同一设备在两处出现）
+        val bondedAddresses =
+            bondedDevices()
+                .map { it.address }
+                .toSet()
+        scannedTargets.clear()
+        scannedList.removeAllViews()
+        updatePickerStatus("正在扫描附近的蓝牙设备…")
+        stopTargetScan()
+        val receiver =
+            object : BroadcastReceiver() {
+                override fun onReceive(
+                    context: Context,
+                    intent: Intent,
+                ) {
+                    when (intent.action) {
+                        BluetoothDevice.ACTION_FOUND -> {
+                            @Suppress("DEPRECATION")
+                            val device =
+                                intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                                    ?: return
+                            val rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, 0).toInt()
+                            onTargetFound(dialog, device, rssi, bondedAddresses)
                         }
-                    val previous = TargetDevicePrefs.get(this)
-                    TargetDevicePrefs.set(this, TargetDevicePrefs.Target(device.address, name))
-                    log(
-                        "TARGET: 目标车机已设为「$name」(${device.address})" +
-                            "——出站只连该设备、入站拒绝其它设备" +
-                            if (previous != null && previous.address != device.address) {
-                                "（原目标「${previous.name}」）"
-                            } else {
-                                ""
-                            },
-                    )
-                    snack("目标已设为「$name」——只向该设备发请求")
+
+                        BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+                            val device =
+                                intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                                    ?: return
+                            val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
+                            onBondStateChanged(dialog, device, state)
+                        }
+                    }
                 }
-                updateReadyRow()
-            }.setNegativeButton("取消", null)
+            }
+        targetPickerReceiver = receiver
+        val filter =
+            IntentFilter().apply {
+                addAction(BluetoothDevice.ACTION_FOUND)
+                addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+            }
+        // 系统（蓝牙栈）发出的广播：必须用 EXPORTED 才能在部分 ROM 上收到
+        ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        val started =
+            try {
+                adapter.startDiscovery()
+            } catch (_: SecurityException) {
+                false
+            }
+        if (!started) {
+            updatePickerStatus("扫描启动失败——请确认蓝牙已开启后点「重新扫描」", warn = true)
+        } else {
+            log("BT-SCAN: 开始扫描附近蓝牙设备")
+        }
+    }
+
+    /** 扫描到一台设备：已配对→忽略；新设备→加一行（点「配对」发起系统配对）。 */
+    private fun onTargetFound(
+        dialog: androidx.appcompat.app.AlertDialog,
+        device: BluetoothDevice,
+        rssi: Int,
+        bondedAddresses: Set<String>,
+    ) {
+        val address =
+            try {
+                device.address
+            } catch (_: SecurityException) {
+                return
+            }
+        if (address in bondedAddresses || scannedTargets.containsKey(address)) return
+        val name = deviceDisplayName(device)
+        scannedTargets[address] = TargetPickerEntry(address, name, rssi, bonded = false)
+        val list = dialog.findViewById<LinearLayout>(R.id.scannedList) ?: return
+        // 扫描仍在继续：状态行保留并计数，用户知道还可以继续等其它设备。
+        // 刻意不走 updatePickerStatus——它会把列表滚到状态行，发现新设备时抢滚动位置。
+        dialog.findViewById<TextView>(R.id.scanStatus)?.apply {
+            text = "继续扫描中…已发现 ${scannedTargets.size} 台未配对设备"
+            setTextColor(getColor(R.color.m3_mono_dim))
+            visibility = View.VISIBLE
+        }
+        list.addView(
+            inflateTargetRow(
+                name = name,
+                address = "$address · ${rssi}dBm",
+                action = "配对",
+                highlighted = false,
+                iconTint = R.color.m3_amber,
+            ) {
+                beginBond(device)
+            },
+        )
+    }
+
+    /** 点击未配对设备：先停扫描（扫描期间配对易失败），再 createBond()。 */
+    private fun beginBond(device: BluetoothDevice) {
+        val address =
+            try {
+                device.address
+            } catch (_: SecurityException) {
+                return
+            }
+        stopDiscoveryOnly()
+        pendingBondAddress = address
+        val name = deviceDisplayName(device)
+        val ok =
+            try {
+                device.createBond()
+            } catch (error: SecurityException) {
+                log("BT-PAIR: 配对「$name」失败 - 缺少权限：${error.message}")
+                false
+            }
+        if (ok) {
+            log("BT-PAIR: 已发起与「$name」($address) 的配对——请在系统弹窗确认")
+            pickerNotice("正在配对「$name」：请在系统弹窗确认")
+        } else {
+            pendingBondAddress = null
+            log("BT-PAIR: 配对「$name」($address) 发起失败（设备可能已配对或蓝牙忙）")
+            pickerNotice("无法发起配对——请在系统蓝牙设置中手动配对")
+        }
+    }
+
+    /**
+     * 弹窗打开期间的提示。
+     *
+     * 弹窗是**独立窗口**（更高层级 + 全屏遮罩），Activity 里的 snackbar 必然被它盖住
+     * ——用户只能看到底部一条被压暗的色块（2026-10-18 反馈）。系统 Toast 属更高窗口层，
+     * 能浮在弹窗之上；同时更新弹窗内的状态行（滚动到可见位置）作为长期可见的说明。
+     */
+    private fun pickerNotice(message: String) {
+        pickerToast(message)
+        updatePickerStatus(message, warn = true)
+    }
+
+    /**
+     * 弹窗打开期间的系统 Toast。系统 Toast 属更高窗口层，能浮在弹窗之上；
+     * Activity 内的 snackbar 会被弹窗（独立窗口 + 遮罩）完全盖住。
+     */
+    private fun pickerToast(message: String) {
+        android.widget.Toast
+            .makeText(this, message, android.widget.Toast.LENGTH_SHORT)
             .show()
     }
+
+    /** 更新弹窗内的状态行并滚动到可见位置（`scanStatus` 在「附近的设备」标题下）。 */
+    private fun updatePickerStatus(
+        message: String,
+        warn: Boolean = false,
+    ) {
+        val dialog = targetPicker ?: return
+        val status = dialog.findViewById<TextView>(R.id.scanStatus) ?: return
+        status.text = message
+        status.setTextColor(getColor(if (warn) R.color.m3_amber else R.color.m3_mono_dim))
+        status.visibility = View.VISIBLE
+        // 状态行在视口外才滚动（用户在浏览上面的已配对列表时不该被抢走位置）。
+        status.post {
+            val scroll = dialog.findViewById<android.widget.ScrollView>(R.id.pickerScroll) ?: return@post
+            val content = scroll.getChildAt(0) ?: return@post
+            val top = offsetWithin(status, content)
+            val bottom = top + status.height
+            val visibleTop = scroll.scrollY
+            val visibleBottom = visibleTop + scroll.height
+            if (top < visibleTop || bottom > visibleBottom) {
+                val y = top - (12 * resources.displayMetrics.density).toInt()
+                scroll.smoothScrollTo(0, y.coerceAtLeast(0))
+            }
+        }
+    }
+
+    /** view 相对 ancestor 的内容偏移（沿父链累加 top；ancestor 必须是其祖先）。 */
+    private fun offsetWithin(
+        view: View,
+        ancestor: View,
+    ): Int {
+        var current: View? = view
+        var y = 0
+        while (current != null && current !== ancestor) {
+            y += current.top
+            current = current.parent as? View
+        }
+        return y
+    }
+
+    /** 配对状态变化：成功后设为目标并关弹窗；失败给出提示。 */
+    private fun onBondStateChanged(
+        dialog: androidx.appcompat.app.AlertDialog,
+        device: BluetoothDevice,
+        state: Int,
+    ) {
+        val address =
+            try {
+                device.address
+            } catch (_: SecurityException) {
+                return
+            }
+        if (address != pendingBondAddress) return
+        when (state) {
+            BluetoothDevice.BOND_BONDED -> {
+                pendingBondAddress = null
+                val name = deviceDisplayName(device)
+                log("BT-PAIR: ✓ 已与「$name」($address) 完成配对——自动设为目标")
+                // 先关弹窗再提示：snackbar 在 Activity 窗口内，弹窗未关时会被盖住
+                dialog.dismiss()
+                setTarget(device, name)
+                // 「只配对、不连接」：系统/车机在配对完成后常会自动建立 HFP/A2DP
+                // 连接，而奥迪实测这种「已连接」状态会让车机拒绝 CarPlay。立即与
+                // 1.5s 后各断一次（车机侧重连通常在这两个时间点之间发生）。
+                val app = applicationContext
+                Bg.run("bt-pair-only") {
+                    repeat(2) { attempt ->
+                        val dropped = BtProfiles.disconnect(app, device)
+                        if (dropped.isNotEmpty()) {
+                            log(
+                                "BT-PAIR: 已断开配对后自动建立的 ${dropped.joinToString("/")} 连接" +
+                                    "（保持仅配对，避免车机拒绝 CarPlay）",
+                            )
+                        }
+                        if (attempt == 0) {
+                            try {
+                                Thread.sleep(1_500)
+                            } catch (_: InterruptedException) {
+                                return@run
+                            }
+                        }
+                    }
+                }
+            }
+
+            BluetoothDevice.BOND_NONE -> {
+                pendingBondAddress = null
+                log("BT-PAIR: 与 $address 配对未完成（用户取消或失败）")
+                // 弹窗仍开着：用 Toast（浮在弹窗之上）+ 弹窗内状态行，不用被遮挡的 snackbar
+                pickerNotice("配对未完成——可再点「配对」重试，或到系统蓝牙设置手动配对")
+            }
+            // BOND_BONDING：继续等（系统确认框未应答）
+        }
+    }
+
+    /**
+     * 设为出站目标；正在进行的连接在下一轮尝试/下一次连入时切换。
+     *
+     * @param closePicker true = 先关闭设备选择弹窗再提示（snackbar 属 Activity 窗口，
+     *   弹窗开着时必被盖住——见 pickerNotice 注释）。
+     */
+    private fun setTarget(
+        device: BluetoothDevice,
+        name: String,
+        closePicker: Boolean = false,
+    ) {
+        if (closePicker) targetPicker?.dismiss()
+        val previous = TargetDevicePrefs.get(this)
+        TargetDevicePrefs.set(this, TargetDevicePrefs.Target(device.address, name))
+        log(
+            "TARGET: 目标车机已设为「$name」(${device.address})" +
+                "——出站只连该设备、入站拒绝其它设备" +
+                if (previous != null && previous.address != device.address) {
+                    "（原目标「${previous.name}」）"
+                } else {
+                    ""
+                },
+        )
+        snack("目标已设为「$name」——只向该设备发请求")
+        updateReadyRow()
+    }
+
+    /** 停掉扫描并注销监听（弹窗关闭/重扫时调用）。 */
+    private fun stopTargetScan() {
+        stopDiscoveryOnly()
+        targetPickerReceiver?.let {
+            runCatching { unregisterReceiver(it) }
+            targetPickerReceiver = null
+        }
+    }
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun stopDiscoveryOnly() {
+        // 调用点均已先确认 BLUETOOTH_SCAN 已授予（扫描流程入口），且此处整体捕获异常
+        try {
+            (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
+                .adapter
+                ?.cancelDiscovery()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun bondedDevices(): List<BluetoothDevice> =
+        try {
+            (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
+                .adapter
+                ?.bondedDevices
+                ?.toList()
+                .orEmpty()
+        } catch (_: SecurityException) {
+            emptyList()
+        }
+
+    /** 设备展示名（无名称时退回地址）；读名需要 BLUETOOTH_CONNECT，异常时用地址。 */
+    private fun deviceDisplayName(device: BluetoothDevice): String =
+        try {
+            device.name?.takeIf { it.isNotBlank() } ?: device.address
+        } catch (_: SecurityException) {
+            try {
+                device.address
+            } catch (_: SecurityException) {
+                "未知设备"
+            }
+        }
 
     /** 设备营销名（ro.product.marketname），取不到时退回 Build.MODEL。 */
     private fun deviceName(): String =
@@ -1387,6 +1815,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // 蓝牙扫描/配对监听随界面销毁收尾：Activity 退出后不再需要（也避免广播泄漏）
+        runCatching { stopTargetScan() }
+        targetPicker = null
         // 只解绑"挂屏"，不动会话——连接由前台服务保活、对象归 SessionController 持有；
         // 显式断开请用「断开连接」按钮（任意实例都能断到真管线）。
         if (SessionController.logListener === logListener) SessionController.logListener = null

@@ -193,6 +193,19 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   `disconnect()`（用户断开/取消的终态）detach。**改会话退役逻辑时先确认没有新增
   中途关 RFCOMM 的路径**；`SessionController.kt:876` 的「第二阶段 hack」（配对失败
   后故意断 BT 重试）对 DiPlay 必然触发一次整栈重建，属已知代价。
+- **蓝牙只配对、不连接**（2026-10-18，用户实测奥迪 MIB3）：手机与车机处于蓝牙
+  **已连接**状态（HFP/A2DP 在线）时，车机**不开放无线 CarPlay 的 iAP2 服务窗口**
+  ——表现为 `BT-C: 连接失败（车机未就绪或不在无线配对窗口）` 每 3s 重试，直到系统
+  空闲自己断开才连上。真 iPhone 的无线 CarPlay 也只用系统级配对 + iAP2 RFCOMM
+  （独立 SDP 服务），声音走 WiFi 的 AirPlay，这些音频/通话配置文件可断。
+  实现（`bt/BtProfiles`）：发 iAP2 连接前查目标地址的配置文件状态，有连接就先断开
+  （配对成功回调里也断两次：立即 + 1.5s 后，车机侧重连常发生在两者之间）。
+  **注意 API 约束**：`BluetoothHeadset/A2dp/LeAudio.disconnect(BluetoothDevice)` 是
+  **@SystemApi**（编译不可见，运行时只要 `BLUETOOTH_CONNECT`），只能反射调用；
+  查询用公开的 `getProfileProxy` + `connectedDevices`（需主 Looper）。**不要**把这段
+  挪进 Shizuku UserService（曾试过，不可行）：UserService 里
+  `BluetoothManager.getAdapter()` 返回 null（无主 Looper 的应用上下文），查询恒为
+  「未连接」，反而掩盖真实状态。诊断日志：`BT-PROFILE: 连接前…的蓝牙配置文件状态=`。
 - **Shell 命令**：参数用 `shellQuote`（单引号转义）；WiFi 连接走
   `cmd wifi connect-network`，查开关/当前 SSID 用一次 `cmd wifi status`
   （勿用「任意 WiFi 即成功」的盲绑判定——手机连着别的 WiFi 时会误判）。

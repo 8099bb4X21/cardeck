@@ -45,6 +45,9 @@ class Iap2BluetoothClient(
         private const val SESSION_TIMEOUT_MILLIS = 90_000L
         private const val RETRY_DELAY_MILLIS = 3_000L
         private const val FAILURE_LOG_THROTTLE_MILLIS = 15_000L
+
+        /** 「蓝牙已连接→已断开」日志节流（车机可能反复自动重连，避免刷屏）。 */
+        private const val PROFILE_LOG_THROTTLE_MILLIS = 15_000L
     }
 
     private var thread: Thread? = null
@@ -68,6 +71,9 @@ class Iap2BluetoothClient(
 
     /** 目标设备不在已配对列表的提示节流（避免每 3 秒刷屏）。 */
     private var lastTargetMissingLogAt = 0L
+
+    /** 「蓝牙已连接→已断开」日志节流时间戳。 */
+    private var lastProfileLogAt = 0L
 
     val isRunning: Boolean get() = running
 
@@ -145,6 +151,25 @@ class Iap2BluetoothClient(
                         null
                     } ?: device.address
                 runCatching { adapter.cancelDiscovery() }
+                // 「只配对、不连接」：奥迪 MIB3 实测手机与车机处于蓝牙已连接状态
+                // （HFP/A2DP 在线）时，车机不开放无线 CarPlay 的 iAP2 服务窗口——
+                // 表现为每 3s 连接失败。iAP2 是独立的 SDP 直连服务，与这些配置文件
+                // 无关，断开后不影响 CarPlay 本身（声音走 WiFi 的 AirPlay）。
+                run {
+                    val dropped = BtProfiles.disconnect(context, device)
+                    if (dropped.isNotEmpty()) {
+                        val now = android.os.SystemClock.uptimeMillis()
+                        if (now - lastProfileLogAt > PROFILE_LOG_THROTTLE_MILLIS) {
+                            lastProfileLogAt = now
+                            val left = BtProfiles.stillConnected(context, device.address)
+                            log(
+                                "BT-C: $name 处于蓝牙已连接状态（${dropped.joinToString("/")}）——已断开" +
+                                    if (left.isEmpty()) "" else "（仍有 ${left.joinToString("/")} 在线）",
+                            )
+                            log("BT-C: 车机在「蓝牙已连接」状态下不接受 CarPlay——保持仅配对")
+                        }
+                    }
+                }
                 val socket = tryConnect(device)
                 if (socket != null) {
                     log("BT-C: ✓ 已连入 $name 的无线 iAP2 服务（RFCOMM 建立）")

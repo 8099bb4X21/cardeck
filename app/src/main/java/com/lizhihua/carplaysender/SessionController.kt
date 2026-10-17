@@ -4,6 +4,7 @@ import android.content.Context
 import android.view.KeyEvent
 import com.lizhihua.carplaysender.airplay.AirPlayClient
 import com.lizhihua.carplaysender.audio.AudioSender
+import com.lizhihua.carplaysender.bt.BtProfiles
 import com.lizhihua.carplaysender.bt.BtSessionGate
 import com.lizhihua.carplaysender.bt.Iap2BluetoothClient
 import com.lizhihua.carplaysender.bt.Iap2BluetoothServer
@@ -350,6 +351,16 @@ object SessionController {
         // 测试台路径：监听手机侧 iPhone UUID，等 DiPlay/xcertplay 回连
         bluetoothClient?.start()
         bluetoothServer?.start()
+        // 诊断（奥迪实测：手机与车机「蓝牙已连接」时车机不开放 CarPlay）：
+        // 连之前把目标设备的蓝牙配置文件状态打出来，失败时一眼看出是不是这个原因。
+        Bg.run("bt-profile-diag") {
+            val target = appContext?.let { TargetDevicePrefs.get(it) } ?: return@run
+            val connected = BtProfiles.connectedNames(context.applicationContext, target.address)
+            appendLog(
+                "BT-PROFILE: 连接前「${target.name}」的蓝牙配置文件状态=" +
+                    (connected.takeIf { it.isNotEmpty() }?.joinToString("/") ?: "未连接"),
+            )
+        }
     }
 
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
