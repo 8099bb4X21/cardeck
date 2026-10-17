@@ -252,6 +252,11 @@ object VirtualLauncher {
     /**
      * 已安装的默认地图（用户显式设置优先——DefaultMapPrefs；否则按优先序取
      * 第一个已安装者；null = 无任何地图应用）。
+     *
+     * ⚠️ 本函数**只是**对 [DefaultMapPrefs.resolve] 的转调，而后者不得反过来调用
+     * 本函数（会无限递归 → StackOverflowError）。优先序扫描已在 resolve 内部就地
+     * 实现，正确性由它负责；此处保留仅为对外 API 语义（VirtualLauncher 是调用方
+     * 的主要入口）。2026-10-18 定谳。
      */
     fun defaultMapComponent(context: Context): ComponentName? = DefaultMapPrefs.resolve(context)
 
@@ -859,8 +864,17 @@ object VirtualLauncher {
      * 无任务=新启动。后台线程调用。
      */
     private fun ensureMapTask() {
-        if (mapDisplayId < 0) return
-        val ctx = appContextRef ?: return
+        if (mapDisplayId < 0) {
+            // 诊断（2026-10-18「重装后地图卡不渲染」）：此前静默 return，无法区分
+            // 「没创建地图屏」与「地图屏已创建但没启动 app」
+            logSink?.invoke("LAUNCHER: 地图屏未创建（mapDisplayId=-1）——跳过默认地图启动")
+            return
+        }
+        val ctx =
+            appContextRef ?: run {
+                logSink?.invoke("LAUNCHER: appContext 未就绪——跳过默认地图启动")
+                return
+            }
         val component =
             defaultMapComponent(ctx) ?: run {
                 logSink?.invoke("LAUNCHER: 未找到任何地图应用（白名单内）——地图 tile 空")
@@ -875,8 +889,9 @@ object VirtualLauncher {
         // 不带 MULTIPLE_TASK：任务已在地图屏时等价于带回前台
         val result = Shell.exec("am start -n $target --display $mapDisplayId", timeoutMs = 8000)
         logSink?.invoke(
-            "LAUNCHER: 默认地图 ${component.packageName} → 地图屏 ok=" +
-                (result.ok && result.output.contains("Starting:", ignoreCase = true)),
+            "LAUNCHER: 默认地图 ${component.packageName} → 地图屏（display=$mapDisplayId）ok=" +
+                (result.ok && result.output.contains("Starting:", ignoreCase = true)) +
+                (if (!result.ok) " err=${result.output.take(120)}" else ""),
         )
     }
 

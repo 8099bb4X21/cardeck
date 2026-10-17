@@ -129,6 +129,17 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
 - **出帧节奏**在 DualDisplayComposer 合成循环：有新帧按 `1000/targetFps` 节流，
   静止画面保底 33ms 心跳（编码器断粮 = 接收端画面冻结）；「新帧」只统计会画进
   输出画面的输入（dock + 活动应用屏 + tile 可见时的 map）。
+- **默认地图解析禁止回环**（2026-10-18，「卸载重装后地图卡不渲染」根因）：
+  `DefaultMapPrefs.resolve()` 在「未设置默认地图」时曾回调
+  `VirtualLauncher.defaultMapComponent()`，而后者只是转调回 `resolve()` ——
+  无限递归 → `StackOverflowError`。触发条件恰好是**偏好为空**（卸载重装/清除数据
+  后的状态），所以症状是「重装后首次连接地图卡黑屏、在车机设置里重选一次默认地图
+  就恢复」。异常还被 `Bg.run` 的 catch 吞进 logcat（本机型 HKS 加密读不到），
+  文件日志完全静默——极易误判成虚拟屏/合成器问题。
+  现状：解析逻辑集中在纯函数 `resolveDefaultMap()`（显式优先 → 优先序扫描），
+  单测 `DefaultMapPrefsTest` 覆盖 5 条路径（含「反复解析必须终止」）。
+  **改默认地图相关代码时不要引入跨对象互调**；`VirtualLauncher.defaultMapComponent`
+  只允许单向转调 `DefaultMapPrefs`。
 - **会话生命周期钩子**：强制横屏覆盖（AppOrientationCompat）attach 时 applyAll、
   retireSession/onEnded 时 resetAll——新加系统级写入（settings/cmd）照此模式收口。
 - **取消连接必须全程可中断**：`sessionStarting` 互斥标志的复位依赖配对流程线程
