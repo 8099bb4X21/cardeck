@@ -104,6 +104,10 @@ class WifiCarPlayConnector(
             }
         callback.set(newCallback)
         connectivityManager.requestNetwork(request, newCallback)
+        // 提示性看门狗（**不决定成败**）：requestNetwork 在「手机尚未连上 WiFi」时
+        // 会一直挂起，等系统关联+DCHP 完成才回调 onAvailable——实测用户手动加入
+        // 热点时可达 10s+。这里只在 5s 时给用户一句指引，超时判定由调用方的
+        // WIFI_BIND_WAIT_S 负责；不要在这里取消请求（回调晚到仍会正确绑定）。
         Bg.run("wifi-bind-watchdog") {
             try {
                 Thread.sleep(5_000)
@@ -111,7 +115,7 @@ class WifiCarPlayConnector(
                 return@run
             }
             if (!reported.get()) {
-                log("WiFi: 5 秒未绑定——手机当前不在任何WiFi上。请到 设置>WLAN 加入接收端热点（如 \"Redmi K40\"），加入后本轮挂起的绑定会自动完成")
+                log("WiFi: 5 秒尚未绑定（手机可能还没连上热点）——请到 设置>WLAN 加入接收端热点，加入后本轮绑定会自动完成")
             }
         }
     }

@@ -485,13 +485,10 @@ object VirtualLauncher {
                         "appHi=$appHiDisplayId(${appHiWidth}x$appHiHeight @${appHiDensity}dpi scale=x$appScaleFactor)",
                 )
                 // 会话建立：为「强制应用横屏」名单内的应用逐个写入兼容覆盖
-                // （会话结束/断开时由 SessionController 统一复原，见 retireSession/onEnded）
-                runCatching {
-                    val applied =
-                        AppOrientationCompat
-                            .applyAll(context)
-                    if (applied > 0) log("ORIENTATION: 已为 $applied 个应用启用强制横屏（会话期间生效）")
-                }
+                // （会话结束/断开时由 SessionController 统一复原，见 retireSession/onEnded）。
+                // 异步：6 个应用 × 2 次 am compat ≈1.6s，此前同步跑在虚拟屏 attach 里，
+                // 直接推迟首帧（2026-10-18 实测）。
+                AppOrientationCompat.applyAllAsync(context, log)
             } else {
                 // 回退：应用侧 PUBLIC 屏（应用内跳转任务会逃逸到手机主屏，尽量可用的降级形态）
                 val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -902,6 +899,10 @@ object VirtualLauncher {
      */
     fun launchApp(component: ComponentName): Boolean {
         if (appDisplayId < 0) return false
+        // 会话建立时的「强制横屏」覆盖是异步写的，而 am compat 会立即杀掉目标应用：
+        // 必须等队列排空再启动，否则应用刚起来就被覆盖写入杀掉（表现为闪退/落回手机屏）。
+        // 执行器单线程 FIFO，正常情况下覆盖早已写完，这里立即返回。
+        AppOrientationCompat.awaitPending()
         // 地图应用 → 地图屏全屏（任务常驻地图屏；从桌面 grid 点击同样去地图屏，
         // 与仪表盘共用同一任务，导航状态不丢）
         if (isMapPackage(component.packageName) && mapDisplayId >= 0) {

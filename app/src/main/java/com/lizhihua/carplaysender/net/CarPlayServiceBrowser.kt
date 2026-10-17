@@ -13,6 +13,8 @@ import android.net.nsd.NsdServiceInfo
 class CarPlayServiceBrowser(
     context: Context,
     private val log: (String) -> Unit,
+    /** 结果验收：只缓存/上报真正的车机端点（手机双归属时 mDNS 会混入其它 AirPlay 设备）。 */
+    private val accept: (NsdServiceInfo) -> Boolean = { true },
     private val onEndpoint: (NsdServiceInfo) -> Unit = {},
 ) {
     companion object {
@@ -23,6 +25,36 @@ class CarPlayServiceBrowser(
 
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     private var discovering = false
+
+    /**
+     * 已解析到的 `_airplay._tcp`（本网段）。在加入车机热点的瞬间就开始后台发现，
+     * 到真正需要端点地址时通常已命中——对照 catplay：它用常驻 Bonjour cache +
+     * `watch`，收到 ctrl 邀请时地址现成；我们此前才在配对前现查，白等好几秒。
+     */
+    @Volatile
+    private var resolved: NsdServiceInfo? = null
+
+    /** 新会话开始时清掉上一轮缓存（车机可能换了地址/端口）。 */
+    fun resetCache() {
+        resolved = null
+    }
+
+    /**
+     * 等已解析结果（轮询缓存）。返回 null = 超时仍未发现。
+     * 调用方通常在等待期间继续做别的事（绑定网络、握手），不是纯粹的阻塞 sleep。
+     */
+    fun awaitEndpoint(timeoutMillis: Long): NsdServiceInfo? {
+        val deadline = android.os.SystemClock.uptimeMillis() + timeoutMillis
+        while (android.os.SystemClock.uptimeMillis() < deadline) {
+            resolved?.let { return it }
+            try {
+                Thread.sleep(100)
+            } catch (_: InterruptedException) {
+                return resolved
+            }
+        }
+        return resolved
+    }
 
     fun start(serviceType: String = AIRPLAY_TYPE) {
         if (discovering) {
@@ -103,8 +135,11 @@ class CarPlayServiceBrowser(
                                     .orEmpty()
                             "$key=$text"
                         }
-                    log("$TAG: OK ${info.serviceName} -> $host:${info.port}")
+                    // 验收放在缓存之前：非车机端点（如同一 WiFi 上的 Mac）不得污染 awaitEndpoint
+                    val accepted = accept(info)
+                    log("$TAG: OK ${info.serviceName} -> $host:${info.port}${if (accepted) "" else "（非车机，忽略）"}")
                     if (txt.isNotEmpty()) log("$TAG: TXT $txt")
+                    if (accepted) resolved = info
                     onEndpoint(info)
                 }
             }

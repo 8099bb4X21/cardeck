@@ -32,11 +32,21 @@ object DeviceIdentity {
     @Volatile
     private var lastAttemptAtMillis = 0L
 
-    /** 真实蓝牙 MAC（大写冒号格式）；解析失败返回占位。 */
-    fun bluetoothMac(context: Context): String {
+    /**
+     * 真实蓝牙 MAC（大写冒号格式）；解析失败返回占位。
+     *
+     * @param forceRetry 忽略静默窗口立即重试。ctrl 广播提前到「启动连接」后，
+     *   首次注册可能赶上 Shizuku 尚未就绪、只能拿到占位值；而车机按 TXT id
+     *   （=真实蓝牙 MAC）匹配是否邀请——占位值等于永远不被邀请。广播侧检测到
+     *   占位时必须能立刻重试，而不是等满 10 秒静默窗口。
+     */
+    fun bluetoothMac(
+        context: Context,
+        forceRetry: Boolean = false,
+    ): String {
         cachedMac?.let { return it }
         val now = SystemClock.uptimeMillis()
-        if (now - lastAttemptAtMillis < RETRY_QUIET_MILLIS) return PLACEHOLDER_MAC
+        if (!forceRetry && now - lastAttemptAtMillis < RETRY_QUIET_MILLIS) return PLACEHOLDER_MAC
         synchronized(this) {
             cachedMac?.let { return it }
             lastAttemptAtMillis = now

@@ -83,6 +83,10 @@ class Iap2SenderSessionTest {
 
             // WiFi 配置
             expect(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
+            // 迟到一条订阅请求（真实车机 bring-up 常见：0x5000 与 0x5703 相邻到达）。
+            // 它必须被暂存而不是在 expectOrNull 里被反复重读——旧实现把非预期帧塞回
+            // 「自己下一轮优先读取」的队列，同一帧无限循环（2026-10-18 日志刷屏根因）。
+            send(Iap2MessageIds.START_NOW_PLAYING_UPDATES)
             send(
                 Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION,
                 Iap2Csm.string(1, "MockAP"),

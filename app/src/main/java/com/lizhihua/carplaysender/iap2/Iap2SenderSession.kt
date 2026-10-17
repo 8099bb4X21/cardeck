@@ -45,22 +45,50 @@ class Iap2SenderSession(
     )
 
     private val parser = Iap2Csm.Parser()
+
+    /** 刚解析、尚未分类的帧（到达顺序）。 */
     private val receivedFrames = ArrayDeque<Iap2Csm.Frame>()
 
-    /** 非预期帧的暂存区（expectOrNull 等可选等待用）；recvFrame 优先从这里取。 */
+    /**
+     * [expectOrNull] 等待期间取到的「非预期」帧暂存区；[recvFrame] 优先从这里取。
+     *
+     * **必须与 [receivedFrames] 分开**：两者若混用，expectOrNull 把非目标帧塞回
+     * 它自己下一轮优先读取的队列，就会同一帧反复取出—记录—塞回形成活锁
+     * （2026-10-18 实测：车机 bring-up 期间发 0x5000 StartNowPlayingUpdates，
+     * 日志以 ~1000 行/秒刷屏直到等待超时）。
+     */
     private val pendingFrames = ArrayDeque<Iap2Csm.Frame>()
+
+    /** 暂存区上限：车机订阅类消息可能在长等待期间持续到达，无上限会吃内存。 */
+    private val maxPendingFrames = 256
+    private var pendingOverflowLogged = false
+
     private val random = SecureRandom()
 
     /** 0x5703 解析结果（保活期间车机重发 0x5702 时需重新应答）。 */
     @Volatile
     private var wifi: WifiConfiguration? = null
 
+    /**
+     * 0x1D01 参数 6：车机声明「它可发送」的消息 ID 清单。
+     * 用它判断 0x6800 (StartHID) / 0x4301 是否真的会来——声明里没有就不该盲等：
+     * 奥迪实测只声明 0x5703/0xea03，旧流程因此在 0x4301 上空等 10s、StartHID 上空等 2s。
+     */
+    private var accessorySendIds: Set<Int> = emptySet()
+
+    /** 车机是否声明会发某消息；null = 未提供清单（未知，按保守策略等待）。 */
+    private fun accessoryDeclaresSend(messageId: Int): Boolean? = if (accessorySendIds.isEmpty()) null else messageId in accessorySendIds
+
     private companion object {
         /** 等 StartHID 的窗口：xcertplay 会发（订阅后立即到），DiPlay 不发。 */
         const val HID_WAIT_NANOS = 2_000_000_000L
 
-        /** 等 0x4301 的短窗口（真车不发该消息，走 mDNS；测试台毫秒级应答）。 */
-        const val START_SESSION_WAIT_NANOS = 10_000_000_000L
+        /**
+         * 等 0x4301 的短窗口（声明会发的测试台毫秒级应答；没声明的车机直接跳过）。
+         * 只在「车机没给声明清单」时才会用满窗口——从 10s 收到 3s：真车整个
+         * bring-up 只有几十秒预算，且实测应答都在毫秒级。
+         */
+        const val START_SESSION_WAIT_NANOS = 3_000_000_000L
 
         /**
          * MFi 挑战「被拒档位」进程级记忆：只记录**导致链路被拆**的挑战长度
@@ -195,11 +223,19 @@ class Iap2SenderSession(
             Iap2MessageIds.CARPLAY_AVAILABILITY,
             Iap2Csm.group(1, Iap2Csm.u8(0, 1), Iap2Csm.string(1, bluetoothMac)),
         )
+        // 车机声明里没有 0x4301 就直接跳过等待（Audi 实测每轮白等 10s）：
+        // 真 iPhone 对这类车机也不等——AirPlay 端点经 mDNS/网关合成。
+        val declaresStartSession = accessoryDeclaresSend(Iap2MessageIds.CARPLAY_START_SESSION)
         val startSession =
-            expectOrNull(
-                Iap2MessageIds.CARPLAY_START_SESSION,
-                minOf(deadline, System.nanoTime() + START_SESSION_WAIT_NANOS),
-            )
+            if (declaresStartSession == false) {
+                log("iap2 车机未声明会发 0x4301——跳过等待（AirPlay 端点走 mDNS/网关）")
+                null
+            } else {
+                expectOrNull(
+                    Iap2MessageIds.CARPLAY_START_SESSION,
+                    minOf(deadline, System.nanoTime() + START_SESSION_WAIT_NANOS),
+                )
+            }
         val endpoint =
             if (startSession != null) {
                 parseStartSession(startSession, wifi)
@@ -246,11 +282,25 @@ class Iap2SenderSession(
      */
     fun pumpIncomingForever() {
         log("SESSION 保活中（链路保持打开，持续记录配件消息）")
+        // 同一消息 ID 连续到达时限流：车机进入媒体播放后会周期性发 NowPlaying 更新，
+        // 逐条打日志会把文件日志撑爆（文件超 2MB 直接删，等于丢掉真正有用的上下文）。
+        var lastLoggedId = -1
+        var repeatCount = 0
         while (true) {
             val frame = recvFrame(30_000L)
             if (frame == null) {
                 if (!channel.isAlive) break
                 continue
+            }
+            if (frame.messageId == lastLoggedId) {
+                repeatCount++
+                if (repeatCount % 100 != 0) continue
+            } else {
+                if (repeatCount >= 99) {
+                    log("iap2 上一条 0x${lastLoggedId.toString(16)} 重复 ${repeatCount + 1} 次（同类已限流）")
+                }
+                lastLoggedId = frame.messageId
+                repeatCount = 0
             }
             log(
                 "iap2 rx=0x${frame.messageId.toString(16).padStart(4, '0')} " +
@@ -391,15 +441,25 @@ class Iap2SenderSession(
         expectOrNull(messageId, deadline)
             ?: throw IOException("等待 0x${messageId.toString(16)} 超时")
 
-    /** 同 [expect]，但超时返回 null（用于可选消息）。非预期帧放回队列供后续消费。 */
+    /**
+     * 同 [expect]，但超时返回 null（用于可选消息）。非预期帧进暂存区供后续消费。
+     *
+     * 只从 [receivedFrames] 读新帧，**不重读自己刚暂存的帧**：旧实现两者共用一个
+     * 队列，非预期帧被塞回后立刻又被本函数取出，形成活锁（见 pendingFrames 注释）。
+     * 目标帧若已在暂存区（早到），先从这里取，保证不漏。
+     */
     private fun expectOrNull(
         messageId: Int,
         deadlineNanos: Long,
     ): Iap2Csm.Frame? {
+        pendingFrames.firstOrNull { it.messageId == messageId }?.let {
+            pendingFrames.remove(it)
+            return it
+        }
         while (true) {
             val remaining = (deadlineNanos - System.nanoTime()) / 1_000_000L
             if (remaining <= 0) return null
-            val frame = recvFrame(remaining)
+            val frame = recvNewFrame(remaining)
             if (frame == null) {
                 if (!channel.isAlive) return null
                 continue
@@ -410,10 +470,22 @@ class Iap2SenderSession(
                     "(${Iap2MessageIds.nameOf(frame.messageId)})，非预期，暂存待后续消费",
             )
             pendingFrames += frame
+            if (pendingFrames.size > maxPendingFrames) {
+                pendingFrames.removeFirst()
+                if (!pendingOverflowLogged) {
+                    pendingOverflowLogged = true
+                    log("iap2 非预期帧暂存区超过 $maxPendingFrames 条——丢弃最旧的（车机订阅类消息过多）")
+                }
+            }
         }
     }
 
     private fun awaitOptionalHid(deadline: Long) {
+        // 声明清单里没有 StartHID 就不等（DiPlay/奥迪实测均不发，旧流程每轮白等 2s）。
+        if (accessoryDeclaresSend(Iap2MessageIds.START_HID) == false) {
+            log("iap2 车机未声明会发 0x6800 StartHID——跳过 2s 等待")
+            return
+        }
         val hidWindowNanos = minOf(System.nanoTime() + HID_WAIT_NANOS, deadline)
         while (true) {
             val remaining = (hidWindowNanos - System.nanoTime()) / 1_000_000L
@@ -446,12 +518,20 @@ class Iap2SenderSession(
         }
     }
 
+    /**
+     * 通用取帧（MFi 挑战 / HID 等待 / 保活泵）：优先消费暂存的非预期帧
+     * （保持到达顺序：暂存 > 新解析），再读新帧。
+     */
     private fun recvFrame(timeoutMillis: Long): Iap2Csm.Frame? {
-        // 优先：可选等待暂存的非预期帧（保持到达顺序：暂存 > 已解析队列）
         pendingFrames.firstOrNull()?.let {
             pendingFrames.removeFirst()
             return it
         }
+        return recvNewFrame(timeoutMillis)
+    }
+
+    /** 只取新帧（先已解析队列、再读 socket）；绝不返回暂存区的帧。 */
+    private fun recvNewFrame(timeoutMillis: Long): Iap2Csm.Frame? {
         receivedFrames.firstOrNull()?.let {
             receivedFrames.removeFirst()
             return it
@@ -553,7 +633,15 @@ class Iap2SenderSession(
         val sends = params[6]?.value?.asU16List()
         val receives = params[7]?.value?.asU16List()
         if (sends != null) {
+            // 后续可选消息（0x6800/0x4301）按此清单判断是否会来，避免固定窗口空等
+            accessorySendIds = sends.toSet()
             log("iap2 0x1d01 车机发送清单(${sends.size})=" + sends.joinToString(" ") { "0x%04x".format(it) })
+            log(
+                "iap2 0x1d01 可选消息声明：StartHID(0x6800)=" +
+                    (accessoryDeclaresSend(Iap2MessageIds.START_HID)?.let { if (it) "会发" else "不发" } ?: "未知") +
+                    " CarPlayStartSession(0x4301)=" +
+                    (accessoryDeclaresSend(Iap2MessageIds.CARPLAY_START_SESSION)?.let { if (it) "会发" else "不发" } ?: "未知"),
+            )
         }
         if (receives != null) {
             log("iap2 0x1d01 车机可收清单(${receives.size})=" + receives.joinToString(" ") { "0x%04x".format(it) })

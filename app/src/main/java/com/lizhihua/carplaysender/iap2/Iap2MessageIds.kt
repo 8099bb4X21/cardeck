@@ -88,6 +88,11 @@ object Iap2MessageIds {
             EA_OPEN_SESSION -> "StartEASession"
             EA_CLOSE_SESSION -> "StopEASession"
             EA_SESSION_STATUS -> "EASessionStatus"
+            START_NOW_PLAYING_UPDATES -> "StartNowPlayingUpdates"
+            START_ROUTE_GUIDANCE_UPDATES -> "StartRouteGuidanceUpdates"
+            START_POWER_UPDATES -> "StartPowerUpdates"
+            START_COMMUNICATIONS_UPDATES -> "StartCommunicationsUpdates"
+            START_CALL_STATE_UPDATES -> "StartCallStateUpdates"
             else -> "0x%04X".format(messageId)
         }
 }

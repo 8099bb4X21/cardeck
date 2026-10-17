@@ -138,6 +138,50 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   （**只在用户终态做，见下条**）、AirPlayClient.cancelled 标志让配对重试循环提前退出、
   cancelConnecting 强制 `sessionStarting.set(false)`（用户显式取消即强制解锁）。
   **新增任何长等待点时必须响应 connectCancelled**，且取消路径要实测「发起后立即取消」场景。
+- **连接耗时三大头（奥迪实测，2026-10-18 日志量化）**：从「车机 ctrl 邀请/端点解析」
+  到 RECORD 的 4.9s 里，`/info` ~3.0s 是车机侧会话初始化（返回值与车机第二次 ctrl
+  邀请同一毫秒到达——它在窗口就绪前不应答，catplay 同样要等，**不可优化**）；
+  自家代码可省的两笔已移出关键路径：
+  ① `retireSession` 的 `AppOrientationCompat.resetAll`（6 应用 × 2 次 `am compat`
+     ≈1.6s，原先同步跑在配对前）；
+  ② 虚拟屏 attach 里的 `applyAll`（≈2.0s，原先推迟首帧）。
+  两者改为同一个**单线程执行器**异步执行（`applyAllAsync`/`resetAllAsync`，串行保证
+  「先复原上一会话、后写入本会话」）。**注意异步化的副作用**：`am compat enable`
+  会立即杀目标应用，而桌面图标点击可能在写入完成前发生——`VirtualLauncher.launchApp`
+  必须先 `AppOrientationCompat.awaitPending()` 排空队列，否则应用刚启动就被杀。
+  另一笔大浪费是 WiFi 绑定超时竞态：旧 `latch.await(5s)` 在手动加入热点场景会在
+  onAvailable 到达前 ~116ms 判失败并放弃整轮（真实耗时 20:02:09.352 放弃 →
+  20:02:09.467 成功），用户白等一轮 BT 重连（+13s）。现窗口 15s、分片等待可取消；
+  `WifiCarPlayConnector` 的 5s 看门狗只提示不改判定。
+- **iAP2 接收队列：暂存区与新到帧必须分开**（2026-10-18，日志刷屏活锁根因）：
+  `expectOrNull` 等待期间会把非目标帧放进 `pendingFrames`「待后续消费」，而
+  `recvFrame` 又优先从 `pendingFrames` 取——旧实现两者共用一个优先队列，同一帧被
+  反复取出→打日志→塞回，形成活锁，日志 ~1000 行/秒直到等待超时（触发场景：车机
+  bring-up 时 `0x5000 StartNowPlayingUpdates` 与 `0x5703` 相邻到达；跳过 2s
+  StartHID 空等后它直接落进下一段等待）。修法：`recvFrame`（通用，优先暂存）与
+  `recvNewFrame`（只读新帧）分开，`expectOrNull` 只走后者、并先查暂存区里是否已有
+  目标帧；暂存区加 256 条上限。回归测试 `Iap2SenderSessionTest` 在 mock 时序里插入
+  迟到的 0x5000——去掉修复即超时失败。另外 `pumpIncomingForever` 对同一消息 ID
+  连续到达做了限流（文件日志超 2MB 会被删，刷屏等于丢掉有用上下文）。
+- **连接时序：能力广播先行、邀请驱动、不盲等**（2026-10-18，对照 catplay 连接流程）：
+  catplay 发送端的顺序是「CarPlayCtrlServer 常驻广播 `_carplay-ctrl._tcp`（每 1s
+  force_announce）→ 车机 `GET /ctrl-int/1/connect` 邀请 → 收到邀请立刻建 AirPlay」，
+  全程没有固定 sleep。我们旧流程三处盲等，合计每轮白花 5~13s：
+  1) ctrl 广播要等 0x5703 才发布（车机发现手机天然晚一步）→ 改为 `startConnection`
+     即发布，0x5703/绑网后只做 `ensureForNetwork` 重注册；
+  2) 端点交接后固定睡 1.6s「赌邀请已到」→ 改 `awaitCtrlInvite`（邀请计数事件驱动，
+     2s 未到补一次 force_announce，4s 兜底；已发现 `_airplay._tcp` 也放行）；
+  3) 等 StartHID 2s + 等 0x4301 10s 无条件 → 先读 0x1D01 参数 6（车机声明它可发送的
+     消息清单），没声明就跳过（奥迪只声明 0x5703/0xea03，正是这两个空等的来源），
+     未给清单时才按保守窗口（0x4301 由 10s 收到 3s）。
+  配套：`_airplay._tcp` 发现器常驻（绑网即后台发现，需要时查缓存而非现查重试 3×6s）；
+  端点解析移到邀请之后（车机服务常在受邀后才上线）且不再占用网络回调线程；
+  WiFi 绑定前先确认 SSID 已是车机热点（`bindCurrentWifi` 只按 transport 请求、
+  **不校验 SSID**，切网途中会绑到旧网）；`bindCurrentWifi` 的 release+rebind 会
+  解绑进程网络，故绑过同一热点后走快路径、并用锁串行化两条绑定路径。
+  **注意**：广播提前后首注册可能赶上 Shizuku 未就绪 → TXT id 写成占位 MAC，
+  而车机按该 id 匹配手机（占位 = 永不邀请）。`DeviceIdentity.bluetoothMac(forceRetry)`
+  + `CarPlayCtrlAdvertiser.repairPlaceholderMac`（每 2s 重试、成功即重注册）是必需兜底。
 - **配对/推流期间绝不能断 BT 控制会话**（2026-10-16 定谳，「连上约 3 秒即断」循环根因）：
   DiPlay 在 WiFi 隧道 iAP2 就绪前（AirPlay 通道从未下发 `disableBluetooth`，
   `handoffRequested=false`）看到 RFCOMM 断开即判 `wireless bring-up failed` →
