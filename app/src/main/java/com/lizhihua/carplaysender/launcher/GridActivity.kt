@@ -21,7 +21,8 @@ import com.lizhihua.carplaysender.ui.WallpaperStore
 import com.lizhihua.carplaysender.util.Bg
 
 /**
- * CarPlay 主区桌面：纯黑背景 + 4×3 图标分页网格 + 底部页点。
+ * CarPlay 主区桌面：纯黑背景 + 图标分页网格（横屏 4×3 CarPlay 规格；竖屏按格子
+ * 高宽比自适应、最多 6 行，见 computeCellMetrics）+ 底部页点。
  * 布局声明在 res/layout（activity_grid / item_grid_page / item_app_cell），
  * 代码只做动态格子尺寸计算与数据绑定。无字母导航（对照 CarPlay 主屏）。
  *
@@ -46,6 +47,9 @@ class GridActivity : AppCompatActivity() {
     private var cellWidthPx = 0
     private var cellHeightPx = 0
     private var iconSizePx = 0
+
+    /** 当前行数（横屏 3；竖屏按格子高宽比自适应，分页容量 = COLUMNS × rows）。 */
+    private var rows = ROWS_MIN
 
     /** 应用清单缓存（每次 resume 重扫 packageManager 会拖慢回桌面——仅在首次载入时扫描）。 */
     private var appsCache: List<VirtualLauncher.AppEntry>? = null
@@ -288,26 +292,15 @@ class GridActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_grid)
 
-        // 格子尺寸按屏幕动态计算（布局关系在 XML，尺寸测量在代码）
-        val dm = resources.displayMetrics
-        val density = dm.density
-        val chromeHorizontalPx = (2 * 10 * density).toInt() // item_grid_page 左右 padding
-        val chromeVerticalPx = ((8 + 26 + 16) * density).toInt() // 上/下 padding + 页点区
-        cellWidthPx = (dm.widthPixels - chromeHorizontalPx) / COLUMNS
-        cellHeightPx = (dm.heightPixels - chromeVerticalPx) / ROWS
-        iconSizePx = (cellHeightPx * 0.63f).toInt().coerceAtMost((cellWidthPx * 0.72f).toInt())
+        // 格子尺寸/行数按屏幕动态计算（布局关系在 XML，尺寸测量在代码）
+        computeCellMetrics()
         // 虚拟屏重建竞态：dm 短暂为 0 时 cell/icon 尺寸会算出 0，首帧绑定即崩
         // （Bitmap.createBitmap 0 宽高）。夹最小值保底，并在 pager 首帧布局后重算+重绑。
         if (iconSizePx <= 0) {
             iconSizePx = 48
             findViewById<ViewPager2>(R.id.gridPager).post {
-                cellWidthPx = (dm.widthPixels - chromeHorizontalPx) / COLUMNS
-                cellHeightPx = (dm.heightPixels - chromeVerticalPx) / ROWS
-                iconSizePx =
-                    (cellHeightPx * 0.63f)
-                        .toInt()
-                        .coerceAtMost((cellWidthPx * 0.72f).toInt())
-                        .coerceAtLeast(48)
+                computeCellMetrics()
+                iconSizePx = iconSizePx.coerceAtLeast(48)
                 if (cellWidthPx > 0) reload()
             }
         }
@@ -440,6 +433,41 @@ class GridActivity : AppCompatActivity() {
         refreshWallpaperIfChanged()
     }
 
+    /**
+     * 计算格子尺寸与行数：
+     * 横屏（CarPlay 规格）：固定 4 列 × 3 行，行为与此前一致。
+     * 竖屏：固定 3 行会把格子拉成 ~1:2.5 的瘦高条（图标只占三成、满屏空框，
+     * 2026-10-17 用户开「显示布局边界」截图暴露）；按「格子高 ≈ 宽 × 1.25」
+     * 自适应加行（上限 6，对齐 iPhone 竖屏主屏 4×6 的观感），图标尺寸同步
+     * 跟随格子宽，避免格子过大/图标过小的比例失衡。
+     */
+    private fun computeCellMetrics() {
+        val dm = resources.displayMetrics
+        val density = dm.density
+        val chromeHorizontalPx = (2 * 10 * density).toInt() // item_grid_page 左右 padding
+        val chromeVerticalPx = ((8 + 26 + 16) * density).toInt() // 上/下 padding + 页点区
+        val usableW = dm.widthPixels - chromeHorizontalPx
+        val usableH = dm.heightPixels - chromeVerticalPx
+        if (usableW <= 0 || usableH <= 0) {
+            cellWidthPx = 0
+            cellHeightPx = 0
+            iconSizePx = 0
+            return
+        }
+        cellWidthPx = usableW / COLUMNS
+        // 横竖屏统一：先按 3 行试算，格子过高（竖屏）时加行收敛到目标比例
+        var rowCount = ROWS_MIN
+        if (cellWidthPx > 0) {
+            rowCount = (usableH / (cellWidthPx * CELL_HEIGHT_RATIO)).toInt().coerceIn(ROWS_MIN, ROWS_MAX)
+        }
+        rows = rowCount
+        cellHeightPx = usableH / rowCount
+        iconSizePx =
+            (cellHeightPx * 0.63f)
+                .toInt()
+                .coerceAtMost((cellWidthPx * 0.72f).toInt())
+    }
+
     /** 重新读取应用清单与桌面选择（首帧与每次回到桌面时调用）。 */
     private fun reload() {
         val apps =
@@ -463,7 +491,7 @@ class GridActivity : AppCompatActivity() {
                 apps.filter { it.component.flattenToString() in selected }.forEach { add(Cell.App(it)) }
             }
         // 第 0 页 = 仪表盘，其后为桌面网格页：左右滑动即互相切换
-        pages = listOf(listOf<Cell>(Cell.Dashboard)) + cells.chunked(COLUMNS * ROWS)
+        pages = listOf(listOf<Cell>(Cell.Dashboard)) + cells.chunked(COLUMNS * rows)
 
         val current = pager?.currentItem ?: 0
         pager?.adapter?.notifyDataSetChanged()
@@ -490,6 +518,8 @@ class GridActivity : AppCompatActivity() {
             } else {
                 val grid = layoutInflater.inflate(R.layout.item_grid_page, parent, false) as GridLayout
                 grid.columnCount = COLUMNS
+                // 行数由 computeCellMetrics 按横竖屏决定（横屏 3、竖屏最多 6）
+                grid.rowCount = rows
                 PageHolder(grid)
             }
 
@@ -684,6 +714,14 @@ class GridActivity : AppCompatActivity() {
 
     private companion object {
         const val COLUMNS = 4 // CarPlay 规格：强制 4 列
-        const val ROWS = 3
+
+        /** 横屏 CarPlay 规格行数（竖屏自适应时用作下限）。 */
+        const val ROWS_MIN = 3
+
+        /** 竖屏自适应行数上限（对齐 iPhone 竖屏主屏 4×6 的观感）。 */
+        const val ROWS_MAX = 6
+
+        /** 格子目标高宽比（高/宽）：竖屏加行的收敛目标。 */
+        const val CELL_HEIGHT_RATIO = 1.25f
     }
 }

@@ -77,6 +77,14 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   （designScale = densityDpi/420；不用 sp——dock 是像素级设计画布，不跟手机字体缩放）；
   ③ 模糊半径等物理像素量同样乘 designScale；④ `fitClockText` 的行程/步进也按
   designScale 缩放。改 dock 视觉时先确认这三处都随密度走。
+- **竖屏桌面网格行数自适应**（2026-10-17 修复「竖屏单元格占用范围过大」：用户开
+  「显示布局边界」截图暴露——固定 3 行把格子拉成 ~1:2.5 瘦高条，图标只占三成、
+  大片空框）：`GridActivity.computeCellMetrics()` 按**格子目标高宽比 1.25** 自适应
+  行数（`usableH / (格宽 × 1.25)`，钳制 3~6 行）——横屏 CarPlay 规格仍算出 3 行、
+  行为与旧版完全一致；竖屏（如 648×1241 应用屏）算出 6 行（对齐 iPhone 竖屏主屏
+  4×6 观感），格子收敛到 ~154×193。分页容量 = `COLUMNS × rows`（运行时字段，
+  勿回退成常量）。UI 验证技巧：手机开发者选项「显示布局边界」下截图，单元格
+  红框即实况边界；改尺寸后先算 `usableH/(格宽×1.25)` 再对照截图红框高度核对。
 - **流尺寸必须为偶数**（H.264 4:2:0）：奇数高度会让编码器首帧输入时进错误态且
   曾被静默吞掉。缩放计算后统一在 SessionController 对齐（VideoSender 内另有兜底）。
 - **虚拟屏 resize 必须同步消费端**：`VirtualDisplay.resize` 后要
