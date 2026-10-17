@@ -171,7 +171,9 @@ object TouchRouter {
                     .moveThrottleMs(context)
                     .toLong()
         }
-        if (moveThrottleMs > 0 && contact.down && pressed &&
+        if (moveThrottleMs > 0 &&
+            contact.down &&
+            pressed &&
             pressedDisplay == targetDisplay &&
             nowMs - lastInjectAt < moveThrottleMs
         ) {
