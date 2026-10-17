@@ -161,6 +161,15 @@ class OrientationPanelFragment : SettingsPanelFragment() {
     private lateinit var listAdapter: OrientationAdapter
     private lateinit var panelView: View
 
+    /**
+     * 本机是否支持「强制横屏」——null = 探测中。
+     *
+     * 两个 ChangeId 是 OEM 定制项（AOSP 标准表里没有）：荣耀 Android 15 注册了，
+     * 红米 Android 13 没注册。不支持时整列置灰并给出原因，否则用户会反复点开关、
+     * 每次只得到失败提示（2026-10-18 实测）。
+     */
+    private var supported: Boolean? = null
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -172,6 +181,16 @@ class OrientationPanelFragment : SettingsPanelFragment() {
         listAdapter = OrientationAdapter()
         // 应用清单就绪后重算横幅（首帧 apps 为空，全部会被误判成「不在列表」）
         setupAppList(view, R.id.oriList, R.id.oriListIndex, listAdapter) { updateOrphanBanner() }
+        // 能力探测：一次 dumpsys（约 30ms，结果进程内缓存），与系统状态查询并行
+        Bg.run("orientation-capability") {
+            val ok = AppOrientationCompat.changeIdsRegistered()
+            activity?.runOnUiThread {
+                if (!isAdded || isDetached) return@runOnUiThread
+                supported = ok
+                applyCapabilityState()
+                listAdapter.notifyDataSetChanged()
+            }
+        }
         Bg.run("orientation-system-state") {
             val state = AppOrientationCompat.systemEnabled()
             activity?.runOnUiThread {
@@ -182,6 +201,34 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                 updateOrphanBanner()
             }
         }
+    }
+
+    /**
+     * 按能力探测结果调整面板：不支持时显示横幅、整列变暗且不可点。
+     *
+     * 置灰而不是隐藏列表：用户能看到「这台机器做不到」，而不是面对一个消失的功能
+     * 猜测原因。横幅文案说明是 ROM 缺项、换机型才能生效（避免误以为是 Shizuku 问题）。
+     */
+    private fun applyCapabilityState() {
+        if (!::panelView.isInitialized) return
+        val banner = panelView.findViewById<TextView>(R.id.oriUnsupportedBanner) ?: return
+        val list = panelView.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.oriList)
+        val index = panelView.findViewById<LinearLayout>(R.id.oriListIndex)
+        if (supported != false) {
+            banner.visibility = View.GONE
+            list?.alpha = 1f
+            index?.alpha = 1f
+            return
+        }
+        banner.visibility = View.VISIBLE
+        banner.text =
+            "本机系统不支持该功能：需要 Android 14 及以上" +
+            "（这两个横屏兼容项自 Android 14 起才进入平台）。\n" +
+            "当前 Android ${android.os.Build.VERSION.RELEASE}" +
+            "（SDK ${android.os.Build.VERSION.SDK_INT}），开关置灰不可用。"
+        // 整列变暗表达「不可操作」；点击事件在 OriHolder 里按 supported 拦截
+        list?.alpha = 0.38f
+        index?.alpha = 0.38f
     }
 
     /**
@@ -258,12 +305,36 @@ class OrientationPanelFragment : SettingsPanelFragment() {
             refresh(shown)
 
             row.setOnClickListener {
+                // 面板顶部已探测到本机不支持（ROM 未注册 ChangeId）：直接忽略点击，
+                // 不再发起注定失败的 shell 往返，也不用 toast 反复打扰。
+                if (supported == false) return@setOnClickListener
                 shown = !shown
-                if (!AppOrientationCompat.setEnabled(requireContext(), pkg(), shown)) {
-                    shown = !shown
-                    refresh(shown)
-                    hostToast("写入失败（Shizuku 异常）")
-                    return@setOnClickListener
+                when (AppOrientationCompat.setEnabled(requireContext(), pkg(), shown)) {
+                    AppOrientationCompat.WriteResult.OK -> Unit
+                    AppOrientationCompat.WriteResult.UNSUPPORTED -> {
+                        // 两种成因（ROM 未注册 ChangeId / user build 限制）都不可重试：
+                        // 明确说清原因，不要把用户引向「Shizuku 有问题」的错误方向。
+                        shown = !shown
+                        refresh(shown)
+                        supported = false
+                        // 探测结果落地后再刷新面板（置灰整列 + 横幅），避免用户继续试
+                        applyCapabilityState()
+                        hostToast(
+                            if (AppOrientationCompat.changeIdsRegistered()) {
+                                "系统限制：user 版本只能修改可调试(debuggable)应用的兼容设置"
+                            } else {
+                                "本机系统不支持该功能（需 Android 14 及以上）"
+                            },
+                        )
+                        return@setOnClickListener
+                    }
+
+                    AppOrientationCompat.WriteResult.FAILED -> {
+                        shown = !shown
+                        refresh(shown)
+                        hostToast("写入失败（Shizuku 未就绪或超时）——可稍后重试")
+                        return@setOnClickListener
+                    }
                 }
                 // 就地更新系统侧缓存：开关点击已同步写入系统（无需重查 dumpsys）
                 systemOn = if (shown) systemOn + pkg() else systemOn - pkg()

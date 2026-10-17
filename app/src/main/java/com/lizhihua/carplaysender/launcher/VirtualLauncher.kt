@@ -562,11 +562,13 @@ object VirtualLauncher {
                 detach()
                 return false
             }
-            // 应用屏方向策略：高德等横屏应用在竖屏虚拟屏上会被 letterbox
-            Shell.exec("cmd window set-ignore-orientation-request -d $appDisplayId reset")
-            if (appHiDisplayId >= 0) {
-                Shell.exec("cmd window set-ignore-orientation-request -d $appHiDisplayId reset")
-            }
+            // 应用屏方向策略：**忽略应用请求的方向**，虚拟屏保持创建时的形态。
+            // 竖屏应用（头条等）在横屏车机上会请求 portrait，系统若照办会把整个
+            // 虚拟屏旋转（dumpsys 里 rotation 0→3、逻辑尺寸 2251×1152→1152×2251），
+            // 而合成器按整幅映射、触摸按未旋转坐标换算 —— 表现为「分辨率变了 +
+            // 点击漂移、点不到目标」，退回桌面也仍是旋转态（2026-10-18 实测）。
+            // 缩在 letterbox 里（见下方 aspectRatio）才是车机该有的形态。
+            applyIgnoreOrientationRequest(appDisplayId, appHiDisplayId, mapDisplayId)
             // 放宽竖屏应用的 letterbox 窗口（默认窄条 → 手机宽度）；断开时还原（detach）
             Shell.exec("cmd window set-letterbox-style --aspectRatio $LETTERBOX_ASPECT_RATIO")
             log(
@@ -599,6 +601,24 @@ object VirtualLauncher {
     fun detach() {
         ScreenDimmer
             .detach()
+        // 还原方向策略（false = 跟随应用请求，系统默认）。
+        //
+        // **必须异步且不读回**：detach 由 disconnect() 在 UI 线程触发，而这里的每一次
+        // `Shell.exec` 都是 Shizuku newProcess + 进程等待（单条 100ms 量级、异常时可达
+        // 数秒超时）。三块屏 × (set+get) = 6 次往返足以触发 ANR（2026-10-18 实测：
+        // 手动断开后连续弹出「应用无响应」）。改为一次性投递到后台，不再读回——
+        // 这里是**清理**路径，失败也只是残留一个方向策略，不影响会话正确性；
+        // 建立路径（applyIgnoreOrientationRequest）才需要读回校验。
+        //
+        // 执行时机：投递后立即释放虚拟屏，但后台任务与释放是并发的——为保证命令
+        // 命中的是**尚存活的 displayId**，这里先同步取好 id 字符串并在投递时即排队；
+        // 若已被释放（id 失效）命令只会报错，不影响后续会话（下轮创建时会重新设置）。
+        val orientationIds = intArrayOf(appDisplayId, appHiDisplayId, mapDisplayId).filter { it >= 0 }
+        if (orientationIds.isNotEmpty()) {
+            Bg.run("orientation-cleanup") {
+                orientationIds.forEach { runCatching { setIgnoreOrientationRequest(it, false, verify = false) } }
+            }
+        }
         if (displaysViaService) {
             val svc = CarInputClient.service
             if (svc != null) {
@@ -1118,6 +1138,52 @@ object VirtualLauncher {
                 isDaemon = true
                 start()
             }
+    }
+
+    /**
+     * 让应用屏**忽略应用请求的方向**（保持虚拟屏创建时的横/竖形态）。
+     *
+     * 命令只接受 true/1/false/0 —— 传 `reset` 会报
+     * `Error: expecting true, 1, false, 0, but we get reset` 且**只写 stderr**，
+     * 而 `Shell.exec` 不读 stderr，于是静默无效（本方法的前身就是这么写的：
+     * 方向策略从未生效，头条把 AppHi 屏整块旋转成竖屏）。因此这里写完必须读回校验。
+     */
+    private fun applyIgnoreOrientationRequest(vararg ids: Int) {
+        val targets = ids.filter { it >= 0 }
+        if (targets.isEmpty()) return
+        val failed = targets.filter { id -> !setIgnoreOrientationRequest(id, true) }
+        if (failed.isEmpty()) {
+            logSink?.invoke("LAUNCHER: 应用屏已忽略方向请求 ${targets.joinToString("/")}（防竖屏应用旋转虚拟屏）")
+        } else {
+            logSink?.invoke(
+                "LAUNCHER: ⚠ 应用屏忽略方向请求失败 $failed（读回非 true）" +
+                    "——竖屏应用可能旋转虚拟屏，导致画面比例异常与触摸漂移",
+            )
+        }
+    }
+
+    /**
+     * 设置单个屏的忽略方向策略。
+     *
+     * @param verify true 时读回校验（**仅用于会话建立路径**——那条路径本就在后台线程，
+     *   且策略不生效会导致整屏旋转、必须确认）。清理路径传 false，避免触发一连串
+     *   shell 往返（那是 ANR 根因，2026-10-18）。
+     * @return verify=false 时恒为 true（只表示命令已投递）
+     */
+    private fun setIgnoreOrientationRequest(
+        displayId: Int,
+        enabled: Boolean,
+        verify: Boolean = true,
+    ): Boolean {
+        if (displayId < 0) return true
+        val value = if (enabled) "true" else "false"
+        Shell.exec("cmd window set-ignore-orientation-request -d $displayId $value", timeoutMs = 3_000)
+        if (!verify) return true
+        val readBack =
+            Shell
+                .exec("cmd window get-ignore-orientation-request -d $displayId", timeoutMs = 3_000)
+                .output
+        return readBack.contains(value)
     }
 
     data class AppEntry(

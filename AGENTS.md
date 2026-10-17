@@ -121,6 +121,20 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   仍落手机屏。**诊断工具**：反射读 `WindowManager` 全部 IME_POLICY 字段 + 逐屏读策略
   （`/data/local/tmp/const.jar ImeConst <ids...>`）；`dumpsys` 看 `mViewsCreated` 与
   `mImeWindow` 是否同真。改动文件：`CarInputServiceImpl.createDisplay`。
+- **虚拟屏必须「忽略应用请求的方向」**（2026-10-18 定谳，头条旋转整屏的根因）：
+  竖屏应用（头条等）在横屏虚拟屏上会请求 portrait，系统照办就把**整块虚拟屏**旋转
+  ——`dumpsys display` 可见 `rotation 0→3`、`real 2251x1152→1152x2251`。后果是一连串：
+  合成器按整幅映射 → 画面比例异常；`TouchRouter` 按未旋转尺寸换算坐标 → 点击漂移、
+  点不到目标；退回桌面时仍是旋转态 → 「桌面分辨率也变了」。
+  修法：会话建立时对 **app / appHi / map 三块屏**执行
+  `cmd window set-ignore-orientation-request -d <id> true`，`detach` 时置回 false
+  （必须在释放虚拟屏**之前**，否则 id 失效、设置以 uniqueId 残留到下次会话）。
+  **踩过的坑**：这条命令只接受 `true|1|false|0`，传 `reset` 会报
+  `Error: expecting true, 1, false, 0, but we get reset` 且**只写 stderr**——
+  而 `Shell.exec` 不读 stderr，于是旧代码静默无效了整整一段时间（方向策略从未生效）。
+  现在 `setIgnoreOrientationRequest()` 写完**读回校验**，失败会打印
+  `⚠ 应用屏忽略方向请求失败`。**新增任何 shell 写操作都应读回确认**，
+  尤其 `cmd window` 这类参数校验严格的命令。
 - **GL 绘制坐标约定**：DualDisplayComposer 顶点/裁剪的 y 全程是 **GL 坐标（底部
   原点，向上增长）**，触摸/流坐标是顶部原点——两套方向相反，混用即出 bug。圆角
   裁剪矩形（uClipRect）必须与顶点同坐标系直传；曾因翻转成屏幕坐标 + 全高 tile
@@ -279,6 +293,34 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   这类开关做交互时不要再设计「查活/询问是否重启」流程——问出问题时应用已经被
   系统杀了，pidof 是在与击杀竞态（提示时对时错）。会话建立时的 `applyAll` 批量
   写入同样会杀掉正在运行的名单内应用（含手机侧实例），属已知代价。
+- **「强制横屏」需要 Android 14+（AOSP 标准 ChangeId，SDK 门槛）**（2026-10-18 定谳，
+  「车机设置→应用横屏」勾选报「写入失败」的根因）：两个 ChangeId
+  （`265451093` OVERRIDE_UNDEFINED_ORIENTATION_TO_NOSENSOR /
+  `265464455` OVERRIDE_ANY_ORIENTATION）**是 AOSP 标准项，自 Android 14 / SDK 34
+  起定义**在 `android.content.pm.ActivityInfo`（`@ChangeId @Disabled @Overridable`），
+  由 `LetterboxUiController` 消费；Android 16 起重构到
+  `AppCompatOrientationOverrides`。**Android 13 及更早的 ActivityInfo 里一个
+  orientation 类 ChangeId 都没有**（实测 A13=0 个、A14=9 个）——这是硬版本门槛。
+  **实测对照（同一操作、同一个包 `com.autonavi.minimap`）**：
+  - 荣耀 Magic7 Pro（Android 17 / SDK 37）：注册 392 个 ChangeId，含这两个 →
+    写入成功，`packageOverrides` 里可见 `com.autonavi.minimap=true`；
+  - 红米 K40（Android 13 / SDK 33）：只注册 173 个，两个都不在表内 → 必失败。
+  **与 Shizuku 无关**（adb shell 与 UserService 同为 uid 2000，结果一致），
+  换 Shizuku 版本或重试都无效。
+  次要因素：即便 ChangeId 已注册，user build 也只允许改 debuggable 应用
+  （`Cannot override a change on a non-debuggable app and user build.`）。
+  另注意「给未安装的包写入会假成功」（只落 rawOverrides、不做 debuggable 校验），
+  所以**用包名试探得出的结论会自相矛盾**，必须以 `dumpsys` 的 name 字段为准。
+  代码侧：`AppOrientationCompat.MIN_SUPPORTED_SDK = 34` 先做零成本版本判定，
+  SDK ≥ 34 再用 `changeIdsRegistered()` 跑一次 dumpsys 复核（约 30ms，进程内缓存，
+  两个 ID 必须**各自**带 `name=`——只注册一个时用整段 `grep name=` 会误判）；
+  `WriteResult.UNSUPPORTED`（永久：偏好**不落盘**，否则下次连接白跑 applyAll
+  且 UI 与系统脱节）vs `FAILED`（Shizuku 临时故障，保留用户意愿待重试）；
+  `applyAll` 探测失败即整体跳过，不再逐应用空跑 2×4s 的 shell 往返；
+  面板顶部显示黄色横幅并整列置灰。
+  **查证方法教训**：gitiles 的 `?format=TEXT` 单文件抓取失败时会返回空/错误页，
+  grep 不到不代表不存在——要校验字节数，或直接下 `+archive/.../<dir>.tar.gz`
+  整目录再搜（本结论最初就是被一次静默失败的抓取误导成「OEM 定制项」）。
 - **媒体卡片**：元数据切歌是分阶段的（歌名先到、封面/时长滞后），空结果需短退避重试
   而非固化缓存；播放位置用「锚点 + 速度」外推，UI 每秒自刷新。
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战

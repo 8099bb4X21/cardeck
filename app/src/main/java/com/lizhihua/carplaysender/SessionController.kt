@@ -96,6 +96,9 @@ object SessionController {
     fun ensure(context: Context) {
         appContext = context.applicationContext
         ensureSessionObjects(context.applicationContext)
+        // 横屏兼容写入失败的原因（user build 限制 / Shizuku 故障）只有这里能落盘：
+        // 车机侧设置面板的 toast 只给用户看，排查需要日志。
+        AppOrientationCompat.diagSink = ::appendLog
     }
 
     /** 追加一行日志：logcat + 文件 + 进程级缓冲 + 挂屏渲染（增量行直送）。任意线程可调。 */
