@@ -1,6 +1,7 @@
 package com.lizhihua.carplaysender
 
 import android.content.Context
+import android.view.KeyEvent
 import com.lizhihua.carplaysender.airplay.AirPlayClient
 import com.lizhihua.carplaysender.audio.AudioSender
 import com.lizhihua.carplaysender.bt.BtSessionGate
@@ -10,6 +11,7 @@ import com.lizhihua.carplaysender.bt.TargetDevicePrefs
 import com.lizhihua.carplaysender.capture.HiddenDisplaySource
 import com.lizhihua.carplaysender.iap2.Iap2MessageIds
 import com.lizhihua.carplaysender.iap2.Iap2SenderSession
+import com.lizhihua.carplaysender.input.ConsumerKeys
 import com.lizhihua.carplaysender.input.TouchReports
 import com.lizhihua.carplaysender.input.TouchRouter
 import com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
@@ -95,6 +97,17 @@ object SessionController {
     }
 
     fun logText(): String = synchronized(logLock) { logBuilder.toString() }
+
+    /**
+     * 派发系统媒体键（AudioManager 全局路由给**当前活跃媒体会话**，无需权限）。
+     * 桌面音乐卡的按钮与车机/方向盘媒体键（Consumer HID）共用这一路径。
+     */
+    fun dispatchMediaKey(keyCode: Int) {
+        val ctx = appContext ?: return
+        val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+        audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+    }
 
     /**
      * 清空进程级日志缓冲（UI 刷新是调用方的事：显式 `renderConsole(logText())`）。
@@ -926,14 +939,60 @@ object SessionController {
                                     "hidSendReport" -> {
                                         val uuid = command["uuid"]?.toString()
                                         val report = command["hidReport"] as? ByteArray
+                                        // 车机媒体键（Consumer Control）走 hidSendReport 通路，
+                                        // 判定**以设备描述符为准**（不按 uuid、不按车机型号写死）：
+                                        // 描述符声明了 Consumer 页(0x0C)的设备才当媒体键，报告字节是
+                                        // Usage 数组下标（HID Array 语义）。触摸/旋钮/电话设备的描述符
+                                        // 分别是 Digitizer/GenericDesktop/Telephony 页，一律不走这里——
+                                        // DiPlay 的 knob(4B) 与 telephony(1B) 报告长度与媒体键重叠，
+                                        // 只靠长度会误判（如 telephony usage 0xB3 会误发「快进」）。
+                                        val descriptor = uuid?.let { setup.hidDescriptors[it] }
+                                        val keyMap =
+                                            descriptor?.let(ConsumerKeys::parseDescriptor)
+                                        val rawValue =
+                                            report
+                                                ?.takeIf { it.isNotEmpty() }
+                                                ?.let { it[0].toInt() and 0xFF }
+                                        val consumerUsage =
+                                            when {
+                                                // 有描述符：只有 Consumer 设备才解析（非 Consumer → null）
+                                                descriptor != null -> keyMap?.let { rawValue?.let(it::usageFor) }
+                                                // 描述符缺失（未知车机）：保守回退——仅 1 字节报告，
+                                                // 值当 Usage ID 直读
+                                                report != null && report.size == 1 -> rawValue?.takeIf { it != 0 }
+                                                else -> null
+                                            }
                                         val contacts =
-                                            if (uuid != null && report != null) {
-                                                TouchReports
-                                                    .parseByUuid(uuid, report)
+                                            if (consumerUsage == null && report != null) {
+                                                // 触摸格式按设备描述符判定（Digitizer 页 + 单指/多槽），
+                                                // 描述符不可用时按报文长度回退——不依赖车机型号或 uuid
+                                                val touchFormat =
+                                                    descriptor?.let(TouchReports::formatFromDescriptor)
+                                                TouchReports.parse(report, touchFormat)
                                             } else {
                                                 null
                                             }
-                                        if (contacts != null) {
+                                        if (consumerUsage != null) {
+                                            val keyCode = ConsumerKeys.keyCodeFor(consumerUsage)
+                                            if (keyCode != 0) {
+                                                dispatchMediaKey(keyCode)
+                                                appendLog(
+                                                    "EVENT: 车机媒体键 ${ConsumerKeys.nameOf(consumerUsage)}" +
+                                                        "（uuid=$uuid usage=0x%02x → keyCode=$keyCode）"
+                                                            .format(consumerUsage),
+                                                )
+                                            } else {
+                                                appendLog(
+                                                    "EVENT: 车机媒体键 ${ConsumerKeys.nameOf(consumerUsage)}" +
+                                                        "（uuid=$uuid usage=0x%02x）无对应 Android 键，忽略"
+                                                            .format(consumerUsage),
+                                                )
+                                            }
+                                        } else if (keyMap != null && report != null) {
+                                            // Consumer 设备的「无按键」/释放报文（值为 0 或下标越界）：
+                                            // 静默计数，避免释放事件刷屏
+                                            consumerReleaseCount++
+                                        } else if (contacts != null) {
                                             if (touchLogCount <= 30 || touchLogCount % 50 == 0) {
                                                 appendLog(
                                                     "EVENT: 触摸 " +
@@ -950,7 +1009,10 @@ object SessionController {
                                                 )
                                             }
                                         } else if (report != null) {
-                                            appendLog("EVENT: 其他 HID 报告 uuid=$uuid bytes=${report.size}")
+                                            appendLog(
+                                                "EVENT: 其他 HID 报告 uuid=$uuid bytes=${report.size}" +
+                                                    " hex=${report.joinToString(" ") { "%02x".format(it) }}",
+                                            )
                                         }
                                     }
 
@@ -1158,6 +1220,10 @@ object SessionController {
     /** 触摸/隧道事件低频计数（迁移自 MainActivity 字段，保持日志节流行为一致）。 */
     @Volatile
     private var touchLogCount = 0
+
+    /** 车机媒体键「释放」报文计数（值为 0 的 1 字节报告，静默丢弃，仅计数备查）。 */
+    @Volatile
+    private var consumerReleaseCount = 0
 
     @Volatile
     private var iapEventMessageCount = 0

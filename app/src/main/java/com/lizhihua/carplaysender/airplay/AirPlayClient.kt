@@ -501,6 +501,8 @@ class AirPlayClient(
         // HID 设备描述（触摸）、以及任何我们没实现的能力声明
         // uuid 原样保留（奥迪发字符串 "0"/"1"，DiPlay 用整数——hidSetInputMode 原样回传）
         val parsedHidUuids = ArrayList<String>()
+        // uuid → HID 描述符（媒体键记录需按下标取 Usage，触摸记录不需要但一并留存）
+        val parsedHidDescriptors = HashMap<String, ByteArray>()
         infoRoot?.let { root ->
             val skipped = setOf("displays")
             val summary =
@@ -548,6 +550,9 @@ class AirPlayClient(
                                 "AIRPLAY: hidDescriptor[$index] ${descriptor.size}B hex=" +
                                     descriptor.take(96).joinToString(" ") { "%02x".format(it) },
                             )
+                            // 媒体键（Consumer Control）的 Usage 数组顺序只能从描述符得到：
+                            // Array 报告的字节是「下标」而非 Usage ID（见 ConsumerKeys 注释）
+                            if (uuid != null) parsedHidDescriptors[uuid] = descriptor
                         }
                     }
                 }
@@ -567,6 +572,7 @@ class AirPlayClient(
                 displayUuid = (display?.get("uuid") ?: display?.get("UUID"))?.toString(),
                 maxFps = ((display?.get("maxFPS") as? Long) ?: 30L).toInt(),
                 hidDeviceUuids = parsedHidUuids,
+                hidDescriptors = parsedHidDescriptors,
             )
         log(
             "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
@@ -589,6 +595,11 @@ class AirPlayClient(
         val maxFps: Int,
         /** /info hidDevices[].uuid 列表（0=触摸、1=旋钮；DiPlay 同款编号）。 */
         val hidDeviceUuids: List<String> = emptyList(),
+        /**
+         * uuid → HID 描述符。媒体键（Consumer Control）的 Array 报告字节是 Usage 数组下标，
+         * 必须解析描述符才能得到正确映射（奥迪实测：按下「下一首」收 0x05=usages[5]=0xB5）。
+         */
+        val hidDescriptors: Map<String, ByteArray> = emptyMap(),
     )
 
     /** 屏幕流协商结果。 */
@@ -1256,17 +1267,17 @@ class AirPlayClient(
      * 手机把 PCM 帧按 [AudioSender] 的格式发过去。密钥 = HKDF(shared,
      * "DataStream-Salt<音频 connId>", "DataStream-Output-Encryption-Key")。
      *
-     * 字段按 catplay 发送端（`StreamDescriptionAudio::new`）对齐（2026-10-17）：
-     *  - `audioLatencyMs` 必填（接收端会读；漏发会让严格实现（奥迪 MIB3）拆会话）
-     *  - `audioType` 用 `compatibility`：奥迪 /info 只声明 type=100 的
-     *    compatibility/alert，DiPlay 声明 compatibility/default——交集是 compatibility；
-     *    此前写死 `media` 两边都未声明（奥迪实测：SETUP 返回 200 但随即 reset 事件通道）
+     * 字段按 catplay 发送端（`StreamDescriptionAudio::new`）对齐：
+     *  - `audioLatencyMs` 必填（接收端会读；漏发会让严格实现拆会话）
+     *  - `audioType` **按车机 /info 声明协商**（见 [negotiateAudio]）：媒体音频优先
+     *    `media` 通道；曾经写死 `compatibility` 时车机接受 SETUP、给端口、照收包，
+     *    但不接入播放通路（无声）——这是 2026-10-17 的主根因之一
      *  - `streamConnectionID` 用随机正 i64（catplay 同款 `rand::random::<u64>()`）：时间戳
      *    余数在短时间重连时会撞号
-     *  - 不再额外 GET /info（实测多花 ~2.5s，且 RECORD 前的长时间空档会触发车机拆会话）
+     *  - 不额外 GET /info（实测多花 ~2.5s；/info 已在握手阶段拉过并缓存复用）
      *
-     * 格式固定 PCM 48k 立体声：奥迪 type=100 compatibility 的 audioOutputFormats
-     * （-30636）含 bit15、DiPlay 同样含 bit15，均为接收方向支持。
+     * 格式：优先 PCM 48k 立体声（bit15），车机只声明 44.1k 时退 bit11；采样率下发给
+     * [AudioSender] 保持一致。
      */
     fun runAudioStream(sharedSecret: ByteArray): AudioStreamInfo? {
         // 按车机 /info 的实际声明协商（不写死某一台车机的 audioType/延迟/采样率）：
@@ -2117,8 +2128,8 @@ class AirPlayClient(
                 )
             }
         }
-        // 音频能力逐条打印（整行 /info 在日志里会被截断，audioFormats 恰好落在截断处）：
-        // 决定 audioType 只能靠这里——奥迪 type=100 到底声明了 compatibility 还是 media
+        // 音频能力逐条打印（整行 /info 的日志会被截断，audioFormats 恰好落在截断处）：
+        // 各车机为 type=100 声明的 audioType 档位与位图差异很大，协商依赖这些明细
         (root["audioFormats"] as? List<*>)?.forEachIndexed { index, entry ->
             val format = entry as? Map<*, *> ?: return@forEachIndexed
             val output = (format["audioOutputFormats"] as? Number)?.toLong() ?: 0L

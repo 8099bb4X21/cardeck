@@ -243,6 +243,21 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   「分配 CSeq + 加密写」；`soTimeout=0`（超时由待响应表的 poll 控制）。重连时旧 socket
   必须关（防两个读线程抢包），cipher 由空转非空的瞬间要丢弃明文残渣（否则密文帧
   边界错位、后续应答全解不出）。
+- **HID 设备的能力一律按「设备描述符」判定，不按车机型号/uuid/报文长度写死**
+  （2026-10-17：车机媒体键「收到但不切歌」+ 触摸多车机兼容的教训）：
+  ① **媒体键（Consumer Control）**走 `hidSendReport`，1 字节报告、**字节值是 Usage
+  数组下标**（HID Array 语义，`LogicalMax` = 数组长度-1），**不是 Usage ID**。
+  奥迪按下「下一首」实测收 0x05 → usages[5]=0xB5；早期把 0x05 直接当 Usage ID →
+  无对应键（表现为「有反应但不切歌」）。映射由 `ConsumerKeys.parseDescriptor()`
+  解析描述符的 Usage 顺序得到，再按 `[KEYCODE_MEDIA_PLAY/PAUSE/NEXT/PREVIOUS/...]`
+  派发（`AudioManager.dispatchMediaKeyEvent`，与桌面音乐卡同一路径）。
+  ② **触摸**同样按描述符判格式：Digitizer(0x0D) 页 + X/Y 16bit 才是触摸设备；
+  单指 Collection（奥迪 5 字节 `[tip][X u16LE][Y u16LE]`）vs 多槽（DiPlay 12 字节
+  `[槽][down][X][Y]×2`）按「Contact Identifier(0x09 0x22) 出现次数」区分。
+  **不能用报文长度或 uuid 判**：DiPlay 的 knob(4B)/telephony(1B) 与媒体键长度重叠，
+  只靠长度会把 telephony 的 usage 0xB3 当成「快进」误发。描述符缺失时才回退长度判据。
+  ③ 判定实现均有单测钉死语义（`ConsumerKeysTest` / `TouchReportsTest`，含奥迪与
+  DiPlay 两套真实描述符），改这些解析器先看测试。
 - **风格**：Kotlin，中文注释（注释写「为什么/实测依据」而非复述代码）；UI 文案中文。
   `reference/` 下是 GPL 参考仓库（gitignore，勿复制代码入本项目、勿外传）。
 
