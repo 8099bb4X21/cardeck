@@ -658,20 +658,22 @@ object SessionController {
      *
      * 依赖 MediaProjection（AudioPlaybackCapture 的授权来源），且需用户在「启动连接」
      * 弹窗中选择「开启声音」——音视频同时推流显著增加负载（实测会卡顿/断连）。
+     *
+     * @return 音频通道是否真正启动（调用方据此决定是否补发 RECORD 激活新加入的流）
      */
     fun startAudioChannel(
         context: Context,
         client: AirPlayClient,
         sharedSecret: ByteArray,
         host: String?,
-    ) {
+    ): Boolean {
         if (!audioEnabledForSession) {
             appendLog("AUDIO: 本次连接未开启车机侧声音（「启动连接」弹窗选择）——仅推视频")
-            return
+            return false
         }
         if (host == null) {
             appendLog("AUDIO: 无接收端 IPv4 地址，跳过音频通道")
-            return
+            return false
         }
         val projection = CarPlayService.mediaProjection
         if (projection == null) {
@@ -679,10 +681,10 @@ object SessionController {
                 "AUDIO: 缺少投屏权限（播放捕获依赖 MediaProjection）——音频通道未启动。" +
                     "现在点「申请投屏权限」也可即时补启（无需重连）；注意「断开连接」会停服务并连带失效投屏授权",
             )
-            return
+            return false
         }
-        try {
-            val audio = client.runAudioStream(sharedSecret) ?: return
+        return try {
+            val audio = client.runAudioStream(sharedSecret) ?: return false
             val sender =
                 AudioSender(
                     host = host,
@@ -690,14 +692,19 @@ object SessionController {
                     streamKey = audio.streamKey,
                     log = { line -> appendLog(line) },
                     context = context.applicationContext,
+                    sampleRate = audio.sampleRate,
                 )
             audioSender = sender
             if (!sender.start(projection)) {
                 audioSender = null
+                false
+            } else {
+                true
             }
         } catch (error: Exception) {
             appendLog("AUDIO: 通道启动异常 - ${error.message}")
             audioSender = null
+            false
         }
     }
 
@@ -1003,10 +1010,15 @@ object SessionController {
                                         )
                                     }
                                 }
-                                // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
-                                // 协议顺序：全部 SETUP 完成后再 RECORD 激活会话；失败不影响主链路。
-                                startAudioChannel(context, client, keys.sharedSecret, host)
-                                client.record()
+                                // 关键时序（2026-10-17 奥迪定谳）：屏幕 SETUP 后必须尽快连上
+                                // dataPort——车机有 ~2s 看门狗。音频 SETUP 实测要 ~2.1s，
+                                // 若排在前面，端口连接迟到即触发车机 reset 控制通道
+                                // （日志特征：`音频 SETUP 往返 2091ms` 与 `EVENT 读取结束
+                                // - Connection reset` 同一毫秒）。故先建 VideoSender 并
+                                // openDataPort()，再协商音频，最后 RECORD + 启动编码器。
+                                var pendingVideoW = 0
+                                var pendingVideoH = 0
+                                var pendingVideoDensity = 0
                                 if (host != null) {
                                     // 「显示」偏好：流画布/虚拟屏按车机分辨率百分比生成。
                                     // 只在会话建立时生效——编码器与虚拟屏尺寸此时定型；
@@ -1045,6 +1057,17 @@ object SessionController {
                                         "DISPLAY: 流 ${setup.displayWidth}x${setup.displayHeight} → " +
                                             "${streamW}x$streamH（$scalePct%）@${fps}fps",
                                     )
+                                    pendingVideoW = streamW
+                                    pendingVideoH = streamH
+                                    // dock 屏密度随画布短边等比（设计基准 1160×540@420dpi，
+                                    // 见 design/launcher-proto.html：dock 48dp=126px）：高分辨率
+                                    // 车机（测试台 2320×1080=2×）下 dock 文字/图标与奥迪同比例
+                                    // 放大——此前固定 420dpi，dock 相对画布减半显小（2026-10-17）。
+                                    // 上限 4×（4K 级画布）。
+                                    pendingVideoDensity =
+                                        (420f * minOf(streamW, streamH) / 540f)
+                                            .toInt()
+                                            .coerceIn(120, 1680)
                                     videoSender =
                                         VideoSender(
                                             host = host,
@@ -1067,15 +1090,21 @@ object SessionController {
                                                 }
                                             },
                                         )
-                                    // dock 屏密度随画布短边等比（设计基准 1160×540@420dpi，
-                                    // 见 design/launcher-proto.html：dock 48dp=126px）：高分辨率
-                                    // 车机（测试台 2320×1080=2×）下 dock 文字/图标与奥迪同比例
-                                    // 放大——此前固定 420dpi，dock 相对画布减半显小（2026-10-17）。
-                                    // 上限 4×（4K 级画布）。
-                                    val density =
-                                        (420f * minOf(streamW, streamH) / 540f)
-                                            .toInt()
-                                            .coerceIn(120, 1680)
+                                    // 先连端口（车机看门狗），编码器等 RECORD 后再启动
+                                    videoSender?.openDataPort()
+                                }
+                                // 先 RECORD 激活会话并起视频，再协商音频（2026-10-17 奥迪定谳）：
+                                // 车机在「屏幕流 SETUP 之后」有约 2s 看门狗，等不到 RECORD/数据流即
+                                // 拆掉整轮会话。音频 SETUP 实测本身要 ~2.05-2.16s（车机侧音频通路
+                                // 初始化），排在 RECORD 之前必然超时——日志里 reset 与音频 SETUP
+                                // 返回同一毫秒、且 5 次实测全部复现。故顺序改为：
+                                //   屏幕 SETUP → 连数据端口 → RECORD → 起编码器（出帧）→ 音频 SETUP
+                                // 音频 SETUP 失败只丢声音，视频会话保持。
+                                client.record()
+                                if (host != null) {
+                                    val videoW = pendingVideoW
+                                    val videoH = pendingVideoH
+                                    val videoDensity = pendingVideoDensity
                                     videoSender?.start { surface ->
                                         // 唯一模式：隐形屏（双屏启动器：dock + 应用屏）
                                         val source =
@@ -1087,14 +1116,25 @@ object SessionController {
                                         val ok =
                                             source.attach(
                                                 surface,
-                                                streamW,
-                                                streamH,
-                                                density,
+                                                videoW,
+                                                videoH,
+                                                videoDensity,
                                             )
                                         appendLog(
                                             "MODE: 隐形屏 ${if (ok) "已启动（高德车机版优先）display=${source.displayId}" else "启动失败（Shizuku 就绪？）"}",
                                         )
                                     }
+                                }
+                                // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
+                                // 会话已激活（RECORD 完成）后再协商；失败不影响视频主链路。
+                                val audioStarted = startAudioChannel(context, client, keys.sharedSecret, host)
+                                if (audioStarted) {
+                                    // 流在 RECORD 之后加入：AirPlay 语义要求再发一次 RECORD
+                                    // 把新流纳入已激活的会话。缺这一步时车机对 SETUP 回 200
+                                    // 并给 dataPort，但不会真正播放（2026-10-17 奥迪实测：
+                                    // 音频包持续发送、采集内容非零，车机无声）。
+                                    appendLog("AUDIO: 音频流已加入——补发 RECORD 激活（流后加入会话）")
+                                    client.record()
                                 }
                             }
                         }

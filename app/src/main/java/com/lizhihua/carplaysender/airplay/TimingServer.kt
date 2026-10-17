@@ -22,6 +22,13 @@ class TimingServer(
     @Volatile
     private var running = false
 
+    /** 收到的 timesync 请求计数（诊断：车机是否真的来同步媒体时钟）。 */
+    private var syncRequests = 0L
+    private var lastSyncLogAt = 0L
+
+    /** 非 timesync 包计数（诊断：有没有别的 UDP 报文打到这个端口）。 */
+    private var unexpected = 0L
+
     val port: Int get() = socket?.localPort ?: 0
 
     fun start(): Boolean {
@@ -58,7 +65,20 @@ class TimingServer(
                 return // socket closed
             }
             val request = buffer.copyOfRange(0, packet.length)
-            val response = buildResponse(request, System.nanoTime()) ?: continue
+            val response = buildResponse(request, System.nanoTime())
+            if (response == null) {
+                unexpected++
+                if (unexpected <= 5) {
+                    log("TIMING: 收到非 timesync 报文 ${request.size}B（累计 $unexpected）")
+                }
+                continue
+            }
+            syncRequests++
+            val now = System.currentTimeMillis()
+            if (syncRequests <= 3 || now - lastSyncLogAt >= 30_000L) {
+                lastSyncLogAt = now
+                log("TIMING: timesync 应答 #$syncRequests → ${packet.address.hostAddress}:${packet.port}")
+            }
             try {
                 s.send(DatagramPacket(response, response.size, packet.address, packet.port))
             } catch (_: Exception) {

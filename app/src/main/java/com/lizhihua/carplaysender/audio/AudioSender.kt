@@ -10,7 +10,6 @@ import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -37,13 +36,22 @@ class AudioSender(
     private val log: (String) -> Unit,
     /** 静音手机媒体音量（声音只从车机出）。null = 不做（测试用）。 */
     private val context: android.content.Context? = null,
+    /**
+     * 采集采样率（Hz）：必须与 SETUP 协商出的格式一致（48k 主选，车机只支持
+     * 44.1k 时由 AirPlayClient 协商下发）。默认 48k。
+     */
+    private val sampleRate: Int = 48_000,
 ) {
     companion object {
-        const val SAMPLE_RATE = 48_000
         const val CHANNELS = 2
 
-        /** 每包样本帧数（48000/512 ≈ 93.75 包/秒 ≈ 10.7ms/包）。 */
-        const val SAMPLES_PER_PACKET = 512
+        /**
+         * 每包样本帧数 = AirPlay 标准 SPF 352（catplay `MAX_FRAMES_PER_PACKET_PCM`，
+         * 真车验证）。48000/352 ≈ 136 包/秒（7.33ms/包）。
+         * 2026-10-17 实测：此前用 512 帧（10.67ms/包），奥迪接收端无声音——
+         * 与真 iPhone 的包长不一致时接收端可能按固定 SPF 缓冲而丢弃。
+         */
+        const val SAMPLES_PER_PACKET = 352
 
         /** 一包负载字节数（16bit 立体声）。 */
         const val PACKET_BYTES = SAMPLES_PER_PACKET * CHANNELS * 2
@@ -79,7 +87,12 @@ class AudioSender(
     private var record: AudioRecord? = null
     private var thread: Thread? = null
 
-    private val ssrc = SecureRandom().nextInt()
+    /**
+     * RTP SSRC：固定 0（catplay `prepare_header` 在真车上即用 0；DiPlay 收端不校验）。
+     * 2026-10-17 实测：此前用随机值，奥迪接收端无声音——部分车机按 SSRC 关联 SETUP
+     * 声明的流（非 0 视为未知流丢弃）。
+     */
+    private val ssrc = 0
 
     /** 采集+推流统计（日志限流用）。 */
     private var packetsSent = 0L
@@ -122,9 +135,13 @@ class AudioSender(
             }
             mutedOriginalVolume = restoreTarget
             manager.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, 0, 0)
+            // 回读校验：ROM 的音频策略可能拒绝/立刻回弹（实测见过 volume 仍为原值），
+            // 此时手机继续外放——必须让日志能直接看出来
+            val after = manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
             log(
                 "AUDIO: 已静音手机媒体输出（原音量 ${if (restoreTarget > 0) restoreTarget else "未知"}，" +
-                    "断开后恢复）——声音只从车机出",
+                    "断开后恢复）——回读音量=$after" +
+                    if (after != 0) "（⚠ 静音未生效，手机仍会外放）" else "",
             )
         } catch (error: Exception) {
             log("AUDIO: 静音手机媒体失败 - ${error.message}")
@@ -175,7 +192,7 @@ class AudioSender(
                 AudioFormat
                     .Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(SAMPLE_RATE)
+                    .setSampleRate(sampleRate)
                     .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
                     .build()
             val recorder =
@@ -197,7 +214,7 @@ class AudioSender(
             running.set(true)
             mutePhoneMedia()
             log(
-                "AUDIO: 已启动（播放捕获 48kHz 立体声 → $host:$dataPort，" +
+                "AUDIO: 已启动（播放捕获 ${sampleRate}Hz 立体声 → $host:$dataPort，" +
                     "每包 ${SAMPLES_PER_PACKET} 帧）",
             )
 
@@ -269,6 +286,27 @@ class AudioSender(
                 }
                 if (read < PACKET_BYTES) continue // 残包（缓冲尾部）：丢弃，等下一个整包
                 readFailures = 0
+
+                // 内容诊断（2026-10-17）：播放捕获可能拿到全零（app 禁止捕获 / 音频路由
+                // 到蓝牙 / 无音频播放）。全零时车机静音但手机仍在响，用户会报「声音在
+                // 手机上」——必须能区分「没采到」与「采到了但车机没播」。
+                if (sequence < 3 || sequence % 1875 == 0) { // 约每 20s 抽样一次
+                    var nonZero = 0
+                    var peak = 0
+                    var index = 0
+                    while (index < read) {
+                        val value = ((pcm[index + 1].toInt() and 0xFF) shl 8) or (pcm[index].toInt() and 0xFF)
+                        val magnitude = if (value > 32767) 65536 - value else value
+                        if (magnitude > peak) peak = magnitude
+                        if (magnitude > 0) nonZero++
+                        index += 2
+                    }
+                    val percent = nonZero * 100 / (read / 2)
+                    log(
+                        "AUDIO: 采集样本 seq=$sequence 非零$percent% 峰值=$peak" +
+                            if (peak == 0) "（⚠ 全零：捕获不到音频——app 可能禁止播放捕获或音频走了蓝牙）" else "",
+                    )
+                }
 
                 val wire = sealPacket(pcm, sequence, timestamp, nonceCounter)
                 sequence = (sequence + 1) and 0xFFFF

@@ -55,22 +55,46 @@ class VideoSender(
     val framesSentTotal: Long get() = framesSent
 
     /**
+     * 提前建立屏幕数据端口 TCP 连接（幂等）。
+     *
+     * 车机看门狗（2026-10-17 奥迪实测）：屏幕流 SETUP 之后 ~2s 内数据端口必须连上，
+     * 否则直接 reset 控制通道拆掉整轮会话。音频 SETUP 本身要 ~2.1s，若排在它后面，
+     * 端口连接必然迟到——所以协商音频前先调本方法。catplay 亦然（视频 SETUP 后立即
+     * finish_tx 连流，再协商音频）。
+     */
+    fun openDataPort(): Boolean {
+        val existing = socket
+        if (existing != null && !existing.isClosed) return true
+        return try {
+            val client = Socket()
+            client.connect(InetSocketAddress(host, dataPort), 5_000)
+            client.tcpNoDelay = true
+            socket = client
+            log("VIDEO: 数据端口已连通 $host:$dataPort（等 RECORD 后启动编码器）")
+            true
+        } catch (error: Exception) {
+            log("VIDEO: 数据端口连接失败 - ${error.message}")
+            false
+        }
+    }
+
+    /**
      * 启动编码与推流。编码器输入 Surface 通过 [onSurfaceReady] 交给调用方渲染
      * （隐形屏模式下由 DualDisplayComposer 的合成画布填充）。
      */
     fun start(onSurfaceReady: (Surface) -> Unit): Boolean {
         if (running.get()) return true
         return try {
-            val client = Socket()
-            client.connect(InetSocketAddress(host, dataPort), 5_000)
-            client.tcpNoDelay = true
-            socket = client
+            if (!openDataPort()) {
+                stop()
+                return false
+            }
             val bitrate =
                 (
                     ((width * height * 6L).toInt()).coerceIn(2_000_000, 10_000_000) *
                         if (targetFps >= 60) 1.5f else 1f
                 ).toInt().coerceAtMost(15_000_000)
-            log("VIDEO: TCP 已连通 $host:$dataPort，启动编码器 ${width}x$height@$targetFps ${bitrate / 1_000_000}Mbps")
+            log("VIDEO: 启动编码器 ${width}x$height@$targetFps ${bitrate / 1_000_000}Mbps（端口已连通）")
 
             val format =
                 MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {

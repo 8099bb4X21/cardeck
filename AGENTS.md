@@ -216,6 +216,33 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
   32B/20B、0x4301 有无、ctrl 邀请死锁等），细节见 `docs/PROTOCOL-NOTES.md` §9，
   改协议代码前先对照。
+- **音频通道（车机侧声音）三条硬约束**（2026-10-17 奥迪联网实测打通，此前从无声音）：
+  ① **会话建立顺序必须是 屏幕SETUP → 连数据端口 → RECORD → 视频起流 → 音频SETUP →
+  补发RECORD**：车机对「屏幕流 SETUP 后约 2s 内未激活」有看门狗，而音频 SETUP 本身
+  要 2.0~2.7s（车机侧音频通路初始化），排在 RECORD 前必然把激活拖过看门狗——日志特征
+  是 `音频 SETUP 往返 20xxms` 与 `EVENT 读取结束 - Connection reset` 同一毫秒、5 次
+  实测全复现。音频流在 RECORD 之后加入时必须**补发一次 RECORD**才纳入会话。
+  ② **audioType 必须用 `media`**（媒体音频专用通路）：车机 /info 的 audioFormats 里
+  type=100 分档声明（奥迪有 compatibility/alert/default/media/telephony/speechRecognition
+  六档，**每档位图不同**）；往 compatibility 推媒体流时车机接受 SETUP、给 dataPort、
+  照收 UDP 包，**但不接入播放通路**（表现：手机静音成功、采集非零、包持续发送、无声）。
+  必须**全量解析 audioFormats 逐档选**，不能只看前两档（旧日志 take(200) 截断曾导致
+  误判「只有 compatibility」）。具体选择交给 `AirPlayClient.negotiateAudio()`：优先
+  media 档 + PCM48k 立体声（bit15），退 44.1k（bit11），延迟取该档 audioLatencies 的
+  outputLatencyMicros，无 /info 时回退协议基线（media/48k/250ms）。
+  ③ **RTP 参数按 catplay 真车值**：SSRC=**0**（随机 SSRC 会被当未知流）、每包 **352**
+  样本帧（AirPlay 标准 SPF）、timestamp 按帧递增、PT=100、大端 s16、AAD=头 4..12、
+  尾 8B 小端 nonce。改这些值等于改线上格式，必须对照 catplay `rtp_recorder.rs` /
+  `rtp_cipher_chacha.rs`。
+  诊断三件套（无声时按序看）：`AUDIO: 采集样本 非零X% 峰值=N`（0%=没采到：应用禁止
+  捕获或音频走了蓝牙）、`音频协商 → audioType=?`（选错通路）、车机 `/feedback` 里该
+  connId 的 sampleTime 是否推进。
+- **RTSP 控制通道必须异步读**（2026-10-17）：一条连接一把锁 + 同步读响应的实现，
+  会让任何慢请求（奥迪音频 SETUP 2s+）期间 feedback 心跳停摆；车机对 feedback 有
+  ~3s 看门狗，断供即拆会话。现为独立读线程收包解密 + 按 CSeq 投递，写侧只串行化
+  「分配 CSeq + 加密写」；`soTimeout=0`（超时由待响应表的 poll 控制）。重连时旧 socket
+  必须关（防两个读线程抢包），cipher 由空转非空的瞬间要丢弃明文残渣（否则密文帧
+  边界错位、后续应答全解不出）。
 - **风格**：Kotlin，中文注释（注释写「为什么/实测依据」而非复述代码）；UI 文案中文。
   `reference/` 下是 GPL 参考仓库（gitignore，勿复制代码入本项目、勿外传）。
 
