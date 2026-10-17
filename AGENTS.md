@@ -62,6 +62,22 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
 - **线程**：短命一次性任务用 `Bg.run("name") { }`（util/Bg.kt，cached 池）；长驻循环
   线程（GL 合成、链路 reader/pacer、accept 循环、看门狗等）保持独立 Thread——需要
   命名、interrupt 和生命周期持有，不要收进池。主线程禁止 IO/解码（封面等走专用执行器）。
+- **UI 线程绝对禁止 `Shell.exec`/Shizuku 调用**（2026-10-18 系统排查，两次真机 ANR 的
+  共同根因）：每条 `Shell.exec` 都是 `newProcess` + 进程等待，正常 ~100ms、超时上限
+  可达数秒；`detach()` 里 3 屏 ×(set+get) = 6 条直接 ANR，横屏勾选框的 `setEnabled`
+  2 条（各 4s 超时）最坏 8s 也够 ANR。**已加运行时守卫**：`Shell.exec` 检测到主线程
+  调用时累加 `mainThreadViolations` 并写文件日志
+  （`SHELL: ⚠ 主线程调用 shell（第 N 次）cmd=…`），接线在 `SessionController.ensure`。
+  出现该日志即说明有新代码走了 UI 线程，必须改 `Bg.run` / 异步包装。
+  排查结论（2026-10-18 全量复查）：`MainActivity`（refreshShellState/resetShellState/
+  releaseDisplays/通知授权）、`ScreenDimmer`、`SessionController`（autoJoinCarWifi/
+  shellWifiStatus，仅由 Bg 调用）、`DeviceIdentity.bluetoothMac`（调用方均在后台）、
+  `VirtualLauncher.launchApp`（三个调用点都包在 Bg）均已正确；本次修掉的两处是
+  `VirtualLauncher.detach` 与 `AppOrientationCompat.setEnabled`（后者新增
+  `setEnabledAsync` 供 UI 用，内部执行器串行保证连点顺序）。
+  另注意 `BtProfiles.proxy()` 用 `getProfileProxy`，其**回调经主线程 Handler 投递**——
+  在主线程调用必然等满 1.2s 超时并返回 null（已加显式主线程守卫与告警日志），
+  这类「阻塞等主线程回调」的 API 一律只能在后台调用。
 - **三套坐标系**：车机触摸 = 通告视图坐标系（如 1160×540）；流/虚拟屏 = 缩放后尺寸
   （如 1450×674）。`TouchRouter.setCoordinateScale` 在会话建立时换算，改动触摸路由
   时不要破坏这层映射。地图屏坐标 = 显示内容本身（动态 resize 后）。

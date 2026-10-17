@@ -99,6 +99,8 @@ object SessionController {
         // 横屏兼容写入失败的原因（user build 限制 / Shizuku 故障）只有这里能落盘：
         // 车机侧设置面板的 toast 只给用户看，排查需要日志。
         AppOrientationCompat.diagSink = ::appendLog
+        // 主线程调用 shell 的告警（历史上两次真机 ANR 都源于此；HKS 下 logcat 不可读）
+        com.lizhihua.carplaysender.shizuku.Shell.violationSink = ::appendLog
     }
 
     /** 追加一行日志：logcat + 文件 + 进程级缓冲 + 挂屏渲染（增量行直送）。任意线程可调。 */

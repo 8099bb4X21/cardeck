@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.SystemClock
+import android.util.Log
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -29,6 +30,8 @@ import java.util.concurrent.atomic.AtomicReference
  * 上下文），查询恒为「未连接」，反而掩盖真实状态。故固定在应用进程内做。
  */
 object BtProfiles {
+    private const val TAG = "BT-PROFILE"
+
     /** 关心的配置文件（按断开优先级排列）。 */
     private val profiles: List<Int> =
         listOf(
@@ -154,7 +157,13 @@ object BtProfiles {
                 false
             }
         if (!requested) return null
-        // 回调走主线程 Handler；调用方都在后台线程，这里短等（代理通常已存在，毫秒级）
+        // `getProfileProxy` 的回调经**主线程 Handler** 投递：若本方法跑在主线程，
+        // 回调永远无法执行 → 必然白等到超时（1.2s）并返回 null。宁可显式失败也不
+        // 静默卡顿——调用方必须转到后台线程（本对象所有入口都是后台调用）。
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            Log.w(TAG, "proxy() 在主线程调用——getProfileProxy 回调会被阻塞，返回 null")
+            return null
+        }
         if (!latch.await(1_200, TimeUnit.MILLISECONDS)) return null
         return ref.get()?.also { synchronized(proxies) { proxies[profile] = it } }
     }

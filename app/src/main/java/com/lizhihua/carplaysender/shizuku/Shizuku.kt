@@ -55,10 +55,33 @@ object Shell {
         val ok: Boolean get() = exitCode == 0
     }
 
+    /** 主线程调用 `Shell.exec` 的累计次数（诊断用；见 [exec] 里的守卫）。 */
+    @Volatile
+    var mainThreadViolations: Int = 0
+        private set
+
+    /**
+     * 在主线程调用 shell 的告警出口（SessionController.appendLog）。
+     * 单条 shell 通常 100ms 量级、超时可达数秒，串几条就够 ANR——
+     * 这类问题只在真机上暴露（HKS 下 logcat 不可读），必须进文件日志。
+     */
+    @Volatile
+    var violationSink: ((String) -> Unit)? = null
+
     fun exec(
         cmd: String,
         timeoutMs: Long = 6000L,
     ): Result {
+        // **UI 线程禁止 shell**：每次 exec 都是 Shizuku newProcess + 进程等待。
+        // 这里不强行拦截（会让原本可用的功能失效），但记录并告警——历史上
+        // 已有两次真机 ANR 源于此（detach 清理、横屏勾选框）。
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            mainThreadViolations++
+            violationSink?.invoke(
+                "SHELL: ⚠ 主线程调用 shell（第 $mainThreadViolations 次）cmd=${cmd.take(60)}" +
+                    "（$timeoutMs ms 上限）——应改用 Bg.run / 后台线程",
+            )
+        }
         val binder =
             rikka.shizuku.Shizuku.getBinder()
                 ?: return Result(-1, "Shizuku 未连接")

@@ -308,42 +308,46 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                 // 面板顶部已探测到本机不支持（ROM 未注册 ChangeId）：直接忽略点击，
                 // 不再发起注定失败的 shell 往返，也不用 toast 反复打扰。
                 if (supported == false) return@setOnClickListener
-                shown = !shown
-                when (AppOrientationCompat.setEnabled(requireContext(), pkg(), shown)) {
-                    AppOrientationCompat.WriteResult.OK -> Unit
-                    AppOrientationCompat.WriteResult.UNSUPPORTED -> {
-                        // 两种成因（ROM 未注册 ChangeId / user build 限制）都不可重试：
-                        // 明确说清原因，不要把用户引向「Shizuku 有问题」的错误方向。
-                        shown = !shown
-                        refresh(shown)
-                        supported = false
-                        // 探测结果落地后再刷新面板（置灰整列 + 横幅），避免用户继续试
-                        applyCapabilityState()
-                        hostToast(
-                            if (AppOrientationCompat.changeIdsRegistered()) {
-                                "系统限制：user 版本只能修改可调试(debuggable)应用的兼容设置"
-                            } else {
-                                "本机系统不支持该功能（需 Android 14 及以上）"
-                            },
-                        )
-                        return@setOnClickListener
-                    }
+                // **异步**：setEnabled 内部是 2 次 shell（各 4s 超时，最坏 8s），
+                // 直接同步调用会把点击回调所在的主线程卡到 ANR。
+                val target = !shown
+                shown = target
+                refresh(shown) // 立即回显（乐观更新），失败时回滚
+                AppOrientationCompat.setEnabledAsync(requireContext(), pkg(), target) { result ->
+                    if (!isAdded || isDetached) return@setEnabledAsync
+                    when (result) {
+                        AppOrientationCompat.WriteResult.OK -> {
+                            // 就地更新系统侧缓存（写入已同步完成，无需重查 dumpsys）
+                            systemOn = if (target) systemOn + pkg() else systemOn - pkg()
+                            refresh(target)
+                            // am compat 写入即生效：系统当场杀掉目标应用，返回时按新方向重启
+                            // （2026-10-15 实测：enable/disable 后 pid 立即消失）。旧的「查活 +
+                            // 询问是否结束」流程问的是已被系统杀掉的应用，pidof 又与击杀竞态、
+                            // 提示时对时错（「未在运行」误导），整体移除、如实告知即可。
+                            hostToast("「${entry.label}」横屏：${if (target) "开" else "关"}——应用将以新设置重启")
+                        }
 
-                    AppOrientationCompat.WriteResult.FAILED -> {
-                        shown = !shown
-                        refresh(shown)
-                        hostToast("写入失败（Shizuku 未就绪或超时）——可稍后重试")
-                        return@setOnClickListener
+                        AppOrientationCompat.WriteResult.UNSUPPORTED -> {
+                            shown = !target
+                            refresh(shown)
+                            supported = false
+                            applyCapabilityState()
+                            hostToast(
+                                if (AppOrientationCompat.changeIdsRegistered()) {
+                                    "系统限制：user 版本只能修改可调试(debuggable)应用的兼容设置"
+                                } else {
+                                    "本机系统不支持该功能（需 Android 14 及以上）"
+                                },
+                            )
+                        }
+
+                        AppOrientationCompat.WriteResult.FAILED -> {
+                            shown = !target
+                            refresh(shown)
+                            hostToast("写入失败（Shizuku 未就绪或超时）——可稍后重试")
+                        }
                     }
                 }
-                // 就地更新系统侧缓存：开关点击已同步写入系统（无需重查 dumpsys）
-                systemOn = if (shown) systemOn + pkg() else systemOn - pkg()
-                refresh(shown)
-                // am compat 写入即生效：系统当场杀掉目标应用，返回时按新方向重启
-                // （2026-10-15 实测：enable/disable 后 pid 立即消失）。旧的「查活 +
-                // 询问是否结束」流程问的是已被系统杀掉的应用，pidof 又与击杀竞态、
-                // 提示时对时错（「未在运行」误导），整体移除、如实告知即可。
-                hostToast("「${entry.label}」横屏：${if (shown) "开" else "关"}——应用将以新设置重启")
             }
         }
 

@@ -88,7 +88,32 @@ object AppOrientationCompat {
     }
 
     /**
+     * 用户开关的**异步包装**：UI 线程唯一入口。
+     *
+     * `setEnabled` 内部是 2 次 `Shell.exec`（各 4s 超时），最坏 8s——直接放在
+     * 勾选框的点击回调里会远超 ANR 阈值（2026-10-18 同批修复）。这里改为投递到
+     * 串行执行器，结果回主线程回调；**执行器串行**保证同一应用连续点击时
+     * 写入/复原按点击顺序落地，不会互相覆盖。
+     */
+    fun setEnabledAsync(
+        context: Context,
+        pkg: String,
+        enable: Boolean,
+        onResult: (WriteResult) -> Unit,
+    ) {
+        val app = context.applicationContext
+        executor.execute {
+            val result = runCatching { setEnabled(app, pkg, enable) }.getOrElse { WriteResult.FAILED }
+            android.os
+                .Handler(android.os.Looper.getMainLooper())
+                .post { onResult(result) }
+        }
+    }
+
+    /**
      * 用户开关：写系统覆盖（设置页用）。**成功后才落偏好**。
+     *
+     * **只能在后台线程调用**（内部含 2 次 shell 往返，最坏 8s）。UI 用 [setEnabledAsync]。
      *
      * 失败分类见 [WriteResult]：`UNSUPPORTED` 时偏好保持原样（用户意愿不落盘，
      * 因为落盘只会让下次连接再白跑一次 applyAll）；`FAILED` 保留用户意愿。
