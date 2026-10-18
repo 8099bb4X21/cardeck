@@ -1205,6 +1205,16 @@
                             android:contentDescription="复制日志"
                             android:padding="9dp"
                             android:src="@drawable/ic_copy" />
+
+                        <ImageView
+                            android:id="@+id/btnExportLog"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:layout_marginStart="4dp"
+                            android:background="@drawable/bg_ripple_circle"
+                            android:contentDescription="导出日志文件"
+                            android:padding="9dp"
+                            android:src="@drawable/ic_export" />
                     </LinearLayout>
 
                     <FrameLayout

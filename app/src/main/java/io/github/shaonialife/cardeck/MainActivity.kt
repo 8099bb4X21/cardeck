@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -45,6 +46,7 @@ import io.github.shaonialife.cardeck.ui.ScreenDimmer
 import io.github.shaonialife.cardeck.ui.SignalWavesView
 import io.github.shaonialife.cardeck.ui.WallpaperStore
 import io.github.shaonialife.cardeck.util.Bg
+import io.github.shaonialife.cardeck.util.LogExporter
 import java.util.Locale
 
 /**
@@ -833,6 +835,12 @@ class MainActivity : AppCompatActivity() {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             clipboard.setPrimaryClip(ClipData.newPlainText("CarDeck 日志", text))
             snack("已复制 ${text.length} 字符日志")
+        }
+        findViewById<ImageView>(R.id.btnExportLog).setOnClickListener { exportLogFile() }
+        // 长按导全部历史：默认只导本次启动，历史日志量大时按需手动取
+        findViewById<ImageView>(R.id.btnExportLog).setOnLongClickListener {
+            exportLogFile(LogExporter.Scope.ALL)
+            true
         }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
@@ -1719,6 +1727,153 @@ class MainActivity : AppCompatActivity() {
             .exec(cmd, timeoutMs)
 
     private fun sh(cmd: String): String = shExec(cmd).output
+
+    /**
+     * 导出日志到「下载/CarDeck/」并弹窗告知位置。
+     *
+     * 默认只导**本次进程启动之后**的日志（历史轮次对排查是噪音，动辄几百 KB）；
+     * 长按导出按钮导全部历史（[LogExporter.Scope.ALL]）。
+     * 为什么必须弹窗而不是 snack：snack 只在页面底部浮 2.4s，用户点了导出后
+     * 往往正在看日志区、根本注意不到；且失败时也必须有明确反馈（写文件可能因
+     * 存储满/媒体库异常失败）。
+     */
+    private fun exportLogFile(scope: LogExporter.Scope = LogExporter.Scope.CURRENT_SESSION) {
+        snack(if (scope == LogExporter.Scope.ALL) "正在导出全部日志…" else "正在导出本次启动的日志…")
+        val fallback = SessionController.logText()
+        Bg.run("export-log") {
+            val result = LogExporter.export(applicationContext, fallback, scope)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (result == null) {
+                    snack("导出失败——请检查存储空间后重试", 4_000L)
+                    return@runOnUiThread
+                }
+                log("日志已导出（${scope.label}）: ${result.displayPath}（${result.bytes} 字节）")
+                val scopeNote =
+                    if (scope == LogExporter.Scope.CURRENT_SESSION) {
+                        "仅含本次 App 启动之后的日志。需要更早的历史，请长按导出按钮。"
+                    } else {
+                        "包含历史日志（文件上限 2MB，超出时只保留最近一段）。"
+                    }
+                DarkMessageDialog.show(
+                    this,
+                    title = "日志已导出",
+                    message =
+                        "文件位置：\n${result.displayPath}\n\n" +
+                            "大小：${formatBytes(result.bytes)}\n$scopeNote\n\n" +
+                            "可在「文件管理 → 下载 → CarDeck」中找到，也可直接分享给开发者排查问题。",
+                    actions =
+                        listOf(
+                            DarkMessageDialog.Action("打开文件", DarkMessageDialog.Emphasis.PRIMARY) {
+                                openExportedFile(result.uri, result.displayPath)
+                            },
+                            DarkMessageDialog.Action("打开文件夹") {
+                                openExportFolder(result.displayPath)
+                            },
+                            DarkMessageDialog.Action("分享文件") {
+                                shareExportedFile(result.uri)
+                            },
+                            DarkMessageDialog.Action("关闭", onClick = {}),
+                        ),
+                )
+            }
+        }
+    }
+
+    /** 人类可读大小：<1KB 显示字节（整数除法会显示成误导性的「0 KB」）。 */
+    private fun formatBytes(bytes: Long): String =
+        when {
+            bytes < 1024 -> "$bytes 字节"
+            bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+            else -> String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
+        }
+
+    /**
+     * 打开系统文件管理器并定位到导出目录（DocumentsUI 的 document URI 可直达子目录）。
+     *
+     * 为什么优先**显式组件**：荣耀 ROM 的隐式 ACTION_VIEW + directory 会被 resolver
+     * 乱匹配（2026-10-18 实测弹出了「网易云音乐」默认项）；同一条 intent 用
+     * `am start` 却正确落到 DocumentsUI。显式指定 FilesActivity 可跳过 resolver，
+     * 失败再逐级回退（别的 ROM 组件名可能不同 → 隐式 → 外部存储根 → 文字指引）。
+     */
+    private fun openExportFolder(displayPath: String) {
+        val folder = displayPath.substringBeforeLast('/')
+        val relative = folder.removePrefix("/storage/emulated/0/")
+        val dirUri =
+            Uri.parse(
+                "content://com.android.externalstorage.documents/document/" +
+                    "primary%3A" + Uri.encode(relative).replace("/", "%2F"),
+            )
+        val explicit =
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(dirUri, "vnd.android.document/directory")
+                component =
+                    android.content.ComponentName(
+                        "com.android.documentsui",
+                        "com.android.documentsui.files.FilesActivity",
+                    )
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        val implicit =
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(dirUri, "vnd.android.document/directory")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        val storageRoot =
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(
+                    Uri.parse("content://com.android.externalstorage.documents/root/primary"),
+                    "vnd.android.document/directory",
+                )
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        for (intent in listOf(explicit, implicit, storageRoot)) {
+            if (runCatching { startActivity(intent) }.isSuccess) {
+                if (intent !== explicit) snack("请按路径打开：$folder", 5_000L)
+                return
+            }
+        }
+        snack("请到「文件管理 → 下载 → CarDeck」查看", 5_000L)
+    }
+
+    /** 用系统默认应用打开（多数 ROM 会落到文件管理器 / 文本查看器预览）。 */
+    private fun openExportedFile(
+        uri: Uri,
+        displayPath: String,
+    ) {
+        val view =
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "text/plain")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        if (runCatching { startActivity(view) }.isSuccess) return
+        // 无文本查看器时退到「文件管理器」：DocumentsUI 的内部存储根（用户按路径进 下载/CarDeck）
+        val storageRoot =
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(
+                    Uri.parse("content://com.android.externalstorage.documents/root/primary"),
+                    "vnd.android.document/root",
+                )
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        if (runCatching { startActivity(storageRoot) }.isSuccess) {
+            snack("请按路径打开：$displayPath", 5_000L)
+            return
+        }
+        snack("没有可打开文件的应用——请到文件管理器中按上述路径查找", 5_000L)
+    }
+
+    /** 分享日志文件（微信/QQ/邮件等），内容 URI 带临时读权限。 */
+    private fun shareExportedFile(uri: Uri) {
+        val send =
+            Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        runCatching { startActivity(Intent.createChooser(send, "分享日志文件")) }
+            .onFailure { snack("没有可分享的应用") }
+    }
 
     private fun updateLogBottomButton() {
         findViewById<ImageView>(R.id.btnLogBottom)?.visibility =

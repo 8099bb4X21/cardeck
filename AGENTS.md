@@ -21,6 +21,14 @@ adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk
 若仍被拒，先 `input keyevent KEYCODE_WAKEUP` 亮屏再装——**熄屏时确认弹窗无人应答会被
 系统自动拒绝**（2026-10-15 实测三次 INSTALL_FAILED_ABORTED，亮屏后即成）。
 
+**装过 release 包之后 debug 包装不上**（2026-10-18）：`app-debug.apk` 用 debug 证书、
+release 包用正式 keystore，`adb install -r` 会报
+`INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match`。同一台机器上要换类型只能
+先 `adb uninstall`（会丢应用数据/Shizuku 授权），或直接改用
+`./gradlew :app:assembleRelease` 的产物验证——**推荐后者**，签名一致、可覆盖安装。
+注意 release 包不可 debuggable，`run-as ... tail files/main_debug.log` 会报
+`package not debuggable`；日志验证要另走 debug 包或临时开 debuggable。
+
 **卸载应用不会释放虚拟屏**（2026-10-18 实测，比上面更隐蔽）：虚拟屏由 Shizuku 的
 UserService 子进程持有，**父应用卸载后该进程仍存活**，4 块屏（CarPlayDock/App/AppHi/Map）
 继续占位。此时再 `adb install`，确认弹窗仍会落到这些屏上，表现为「安装卡死」，
@@ -364,6 +372,22 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   `onWifiCredentials`：`videoSender.isRunning` 时直接忽略/只刷新密码缓存；真断连时
   推流自行终止，下一个端点自然接续。会话中的冗余 0x5703 还会连带触发 WiFi 重绑 +
   ctrl mDNS force 重注册，都会扰动推流，一并拦下。
+- **0x4301 是活事件，不是「该车机不发」**（2026-10-18，Audi MMI 9310 用户日志定谳）：
+  这台车识别帧明确声明 `车机发送清单=0x4301 0xea03`，但 0x4301 在 Phase 1 结束后
+  **2 分 35 秒**（配对 120s 窗口都已耗尽、mDNS 也始终没发现 `_airplay._tcp`）才到达；
+  车机等到 15 秒无人连入 AirPlay 就自己拆掉 RFCOMM——用户看到的是「连上后自动断开」。
+  旧实现有两处会吞掉它：`pumpIncomingForever` 把所有消息当 keep-alive 只记长度，
+  且同 ID 连续到达会被限流 `continue`。现行三层修复：
+  ① `Iap2SenderSession` 在保活泵里先于限流识别 0x4301 → `parseStartSession`（用缓存的
+  0x5703）→ `onEndpointUpdate` 回调，并由 BT client/server 透传到
+  `SessionController.onLateEndpoint`；② `onLateEndpoint` 按状态分流：推流中忽略（防上面
+  的拆会话循环）/ 配对进行中 → `AirPlayClient.updateEndpoint` 热更新（关旧 socket，下一轮
+  重连新地址）/ 交接尚未建 client → 暂存进 `pendingEndpointUpdate`，建 client 时 `drain`
+  / 上一轮已失败 → 用新端点重走一轮 `onCarPlayEndpoint`；③ `AirPlayClient` 配对循环每轮
+  重试前调用 `endpointRefresher` 再读一次 mDNS 缓存，网关兜底地址连不通时能及时切换。
+  **新增生命周期消息（0x5702/0x6800/0x4301 等）时，先判断「它晚到会怎样」**——保活泵里
+  必须按消息 ID 分流，不能只当日志。另：`resolveEndpointHost` 的等待窗口只有 3s，
+  不能在超时日志里断言车机「不发」（MMI 9310 就是声明会发但晚到）。
 - **UserService 虚拟屏跨版本残留：三层收口**（2026-10-16 定谳，「重启后检测到残留屏、
   点清理却释放 0/N」根因）：Shizuku 按「组件+进程名+版本(APK lastUpdateTime)」复用常驻
   shell 进程——重装 APK 起新进程，旧进程 `am force-stop` 杀不掉（实测）、Shizuku 也不
@@ -456,6 +480,23 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   `setCanceledOnTouchOutside(false)`；底部菜单入口只读（无倒计时/无滚动要求）。
 - **媒体卡片**：元数据切歌是分阶段的（歌名先到、封面/时长滞后），空结果需短退避重试
   而非固化缓存；播放位置用「锚点 + 速度」外推，UI 每秒自刷新。
+- **日志导出落 `下载/CarDeck/`，不能落应用私有目录**（2026-10-18）：用户要能自己找到
+  并转发给开发者。实现走 `MediaStore.Downloads`（无需存储权限、文件管理器可见、
+  微信/分享面板能直接选到）；`filesDir` 与 `Android/data/<pkg>` 在 Android 11+ 的
+  系统文件管理器里直接被屏蔽，导出等于没导。导出弹窗必须用 `DarkMessageDialog`
+  列出**绝对路径 + 大小**，snack 两秒就消失、用户看不到（本次需求即为此）。
+  **默认只导本次进程启动后的日志**（历史轮次动辄几百 KB、淹没关键行）：
+  `SenderApp.onCreate` 用 `DebugFileLog.markSessionStart` 写一条
+  `SESSION_MARKER` 进文件，导出时 `lastIndexOf` 截取最后一条之后的内容；
+  长按导出按钮走 `Scope.ALL` 取全量。标记**必须写在文件里**而不是只记内存偏移
+  ——2MB 截断会让偏移失效；截断后也要立刻补写一条标记，否则导出退化为全量。
+  无标记（旧版本文件）时回退全文——全量比空好。
+- **荣耀 ROM 打开目录要用显式组件**（2026-10-18 实测）：`ACTION_VIEW` +
+  `vnd.android.document/directory` 走隐式 intent 会被 resolver 乱匹配（实测弹出
+  「网易云音乐」当默认项）；而 `am start` 同样的 intent 却正确落到 DocumentsUI。
+  解法：优先显式 `ComponentName("com.android.documentsui",
+  "com.android.documentsui.files.FilesActivity")` + `document/primary%3ADownload%2FCarDeck`，
+  失败再退隐式/存储根/文字指引。**凡是「唤起系统 UI」的功能都不要只写隐式 intent**。
 - **「音乐在播但卡片显示媒体信息未连接」= 没拿到通知使用权**（2026-10-18 定谳）：
   `MediaSessionManager.getActiveSessions()` 在**未授权时仍返回会话**——`PlaybackState`
   正常（`playing=true` 照常翻转），但 `metadata` 恒为 null，于是歌名/歌手全空。
