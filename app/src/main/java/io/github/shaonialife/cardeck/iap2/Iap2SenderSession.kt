@@ -30,6 +30,15 @@ class Iap2SenderSession(
      * **邀请被接受后才发 0x4301**；若等到 0x4301 之后才广播则双方互等死锁。
      */
     private val onWifiCredentials: ((WifiConfiguration) -> Unit)? = null,
+    /**
+     * 0x4301 在 Phase 1 结束后才到达时的回调（车机打开 CarPlay 窗口的晚信号）。
+     *
+     * 保活泵此前把所有消息都当心跳只记长度：Audi MMI 9310 实测 0x4301 在
+     * Phase 1 结束后 **2 分 35 秒**才到（车机侧窗口刚开），被日志吞掉后我们
+     * 没有发起 AirPlay 连接，车机等 15 秒无人连入便拆掉整条 RFCOMM——
+     * 用户看到的就是「连上之后自动断开」。收到就必须交给主控热更新端点/重试配对。
+     */
+    private val onEndpointUpdate: ((CarPlayEndpoint) -> Unit)? = null,
 ) {
     /** 从 0x5703 + 0x4301 解析出的接收端信息。 */
     data class CarPlayEndpoint(
@@ -69,6 +78,12 @@ class Iap2SenderSession(
     @Volatile
     private var wifi: WifiConfiguration? = null
 
+    /** 0x4301 原始体是否已记录（每轮会话一次，避免周期补发刷屏）。 */
+    private var startSessionRawLogged = false
+
+    /** 最近一次晚到 0x4301 的端点指纹（车机周期重发相同内容时不重复打详情）。 */
+    private var lastLateStartSessionSignature: Int? = null
+
     /**
      * 0x1D01 参数 6：车机声明「它可发送」的消息 ID 清单。
      * 用它判断 0x6800 (StartHID) / 0x4301 是否真的会来——声明里没有就不该盲等：
@@ -89,6 +104,9 @@ class Iap2SenderSession(
          * bring-up 只有几十秒预算，且实测应答都在毫秒级。
          */
         const val START_SESSION_WAIT_NANOS = 3_000_000_000L
+
+        /** 0x4301 原始体日志上限（Audi 实测 261B，完整记录；异常大的只截前段）。 */
+        const val START_SESSION_RAW_LOG_BYTES = 1_024
 
         /**
          * MFi 挑战「被拒档位」进程级记忆：只记录**导致链路被拆**的挑战长度
@@ -240,7 +258,18 @@ class Iap2SenderSession(
             if (startSession != null) {
                 parseStartSession(startSession, wifi)
             } else {
-                log("iap2 0x4301 未到（该车机不发；AirPlay 端点走 mDNS _airplay._tcp）")
+                // 不能断言「该车机不发」：Audi MMI 9310 声明会发、也确实发，只是晚到
+                // 2 分 35 秒（2026-10-18 日志）。措辞必须保留「稍后可能补发」的预期，
+                // 否则排查时会被这句话误导成「这条路对本车不通」。
+                log(
+                    if (declaresStartSession == true) {
+                        "iap2 0x4301 在 ${START_SESSION_WAIT_NANOS / 1_000_000_000}s 窗口内未到" +
+                            "（车机声明会发——可能稍后补发，保活期间收到会重新触发配对）——" +
+                            "先用 mDNS/网关"
+                    } else {
+                        "iap2 0x4301 未到（车机未声明会发；AirPlay 端点走 mDNS _airplay._tcp）"
+                    },
+                )
                 CarPlayEndpoint(
                     ssid = wifi.ssid,
                     passphrase = wifi.passphrase,
@@ -254,6 +283,7 @@ class Iap2SenderSession(
                 )
             }
         if (startSession != null) {
+            logStartSessionRaw(startSession)
             log(
                 "iap2 rx=0x4301 airPlayPort=${endpoint.airPlayPort} " +
                     "device=${endpoint.deviceIdentifier} publicKey=${endpoint.publicKey?.take(16)}… " +
@@ -292,6 +322,13 @@ class Iap2SenderSession(
                 if (!channel.isAlive) break
                 continue
             }
+            // 生命周期消息必须先于日志限流处理：0x4301 可能作为「车机刚打开 CarPlay
+            // 窗口」的晚信号在 Phase 1 之后才到。若跟着限流逻辑走，它要么被当成
+            // keep-alive 只记长度，要么因与上一条同 ID 被 continue 掉——两种都等于
+            // 丢弃（2026-10-18 Audi MMI 9310「连上后 15 秒自动断开」的根因）。
+            if (frame.messageId == Iap2MessageIds.CARPLAY_START_SESSION) {
+                handleLateStartSession(frame)
+            }
             if (frame.messageId == lastLoggedId) {
                 repeatCount++
                 if (repeatCount % 100 != 0) continue
@@ -308,6 +345,42 @@ class Iap2SenderSession(
             )
         }
         log("SESSION 保活结束（链路断开）")
+    }
+
+    /**
+     * 保活期间收到 0x4301：解析成端点交给主控（配对窗口内热更新，或上一轮失败后重走）。
+     * 缺 0x5703 缓存的极端情况（0x4301 早于 WiFi 配置）只记日志——没有 SSID/密码
+     * 无法构成可用端点。
+     */
+    private fun handleLateStartSession(frame: Iap2Csm.Frame) {
+        val config =
+            wifi ?: run {
+                log("iap2 rx=0x4301（晚到）——尚未收到 0x5703 热点凭据，无法解析 SSID，忽略")
+                return
+            }
+        logStartSessionRaw(frame)
+        val endpoint = parseStartSession(frame, config)
+        // 车机可能周期性重发同一份 0x4301：详情只在端点变化时打，避免刷日志。
+        if (endpoint.hashCode() != lastLateStartSessionSignature) {
+            lastLateStartSessionSignature = endpoint.hashCode()
+            log(
+                "iap2 rx=0x4301（晚到，Phase 1 之后）airPlayPort=${endpoint.airPlayPort} " +
+                    "device=${endpoint.deviceIdentifier} publicKey=${endpoint.publicKey?.take(16)}… " +
+                    "srcvers=${endpoint.sourceVersion} ips=${endpoint.ipAddresses}" +
+                    "——交给主控热更新端点/重试配对",
+            )
+        }
+        onEndpointUpdate?.invoke(endpoint)
+    }
+
+    /** 0x4301 原始体只记一次：车机间端点字段差异（有无 IPv4/端口/公钥）只能靠它定谳。 */
+    private fun logStartSessionRaw(frame: Iap2Csm.Frame) {
+        if (startSessionRawLogged) return
+        startSessionRawLogged = true
+        val body = frame.body
+        val shown = if (body.size <= START_SESSION_RAW_LOG_BYTES) body else body.copyOf(START_SESSION_RAW_LOG_BYTES)
+        val truncated = if (body.size > shown.size) "（前 ${shown.size}/${body.size} 字节）" else ""
+        log("iap2 0x4301 原始体$truncated=" + shown.joinToString("") { "%02x".format(it) })
     }
 
     // ---- 帧收发 ----

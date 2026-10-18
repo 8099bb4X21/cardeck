@@ -209,6 +209,13 @@ object SessionController {
     /** 会话建立互斥（端点交接 → 配对 → 推流全程只允许一条）。 */
     val sessionStarting = AtomicBoolean(false)
 
+    /**
+     * 交接流程已在跑、但 AirPlayClient 尚未创建时收到的晚到端点（0x4301）。
+     * 配对线程起步时取用一次后清空——此刻没有 client 可更新，丢了就白等到下一轮。
+     */
+    @Volatile
+    private var pendingEndpointUpdate: Iap2SenderSession.CarPlayEndpoint? = null
+
     /** 用户取消连接：配对线程在关键检查点看到后中止（mDNS/配对等待无法中途打断，粒度秒级）。 */
     @Volatile
     var connectCancelled: Boolean = false
@@ -279,6 +286,7 @@ object SessionController {
                     log = { line -> appendLog(line) },
                     onEndpoint = { endpoint -> onCarPlayEndpoint(endpoint, "车机回连") },
                     onWifiCredentials = wifiCredentialHook,
+                    onEndpointUpdate = { endpoint -> onLateEndpoint(endpoint, "车机回连") },
                     targetProvider = targetProvider,
                 )
             bluetoothClient =
@@ -287,6 +295,7 @@ object SessionController {
                     log = { line -> appendLog(line) },
                     onEndpoint = { endpoint -> onCarPlayEndpoint(endpoint, "主动连车机") },
                     onWifiCredentials = wifiCredentialHook,
+                    onEndpointUpdate = { endpoint -> onLateEndpoint(endpoint, "主动连车机") },
                     targetProvider = targetProvider,
                 )
             ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
@@ -371,6 +380,7 @@ object SessionController {
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
     fun disconnect(context: Context) {
         val hadProjection = CarPlayService.mediaProjection != null
+        pendingEndpointUpdate = null
         retireSession()
         // BT 控制会话只在这里（用户终态）退役，socket close 让保活读循环立刻退出：
         // 否则它阻塞到对端超时（实测 ~24s）才结束，用户取消后英雄卡持续转圈。
@@ -959,6 +969,130 @@ object SessionController {
         return result
     }
 
+    /**
+     * Phase 1 之后车机补发 0x4301（CarPlay 窗口晚开）时的热更新入口。
+     *
+     * 三种归属：
+     *  - 正在推流：冗余端点，忽略（与 [onCarPlayEndpoint] 同一防护，避免拆掉健康会话）；
+     *  - 交接/配对进行中：热更新当前 AirPlayClient 的端点，配对循环下一轮即用新地址；
+     *    若 client 尚未创建（还在绑网/等邀请）先暂存，配对线程起步时并入；
+     *  - 上一轮已失败（无会话在跑）：按新端点重走一轮完整交接——Audi MMI 9310
+     *    实测 0x4301 在 120s 配对窗口耗尽后 28s 才到，旧实现把它当日志垃圾丢掉，
+     *    车机等 15s 无人连入即拆链，表现为「连上后自动断开」。
+     */
+    private fun onLateEndpoint(
+        endpoint: Iap2SenderSession.CarPlayEndpoint,
+        source: String,
+    ) {
+        if (connectCancelled) {
+            appendLog(">>> [$source] 0x4301 晚到（已取消连接）——忽略")
+            return
+        }
+        if (videoSender?.isRunning == true) {
+            appendLog(">>> [$source] 0x4301 晚到（推流中）——忽略冗余端点")
+            return
+        }
+        val client = currentClient
+        if (sessionStarting.get()) {
+            if (client != null && client.pairingInProgress) {
+                // 合并而非替换：0x4301 可能不带 IPv4（Audi MMI 9310 实测端点解析依赖
+                // mDNS/网关），直接替换会把已解析到的地址抹掉，配对循环反而连不上。
+                val merged = preferEndpoint(endpoint, client.currentEndpoint)
+                val changed = client.updateEndpoint(merged, "0x4301 晚到")
+                appendLog(
+                    if (changed) {
+                        ">>> [$source] 0x4301 晚到（配对进行中）——端点已热更新，下一轮重试用新地址"
+                    } else {
+                        ">>> [$source] 0x4301 晚到（配对进行中）——端点无变化，忽略"
+                    },
+                )
+            } else {
+                pendingEndpointUpdate = endpoint
+                appendLog(">>> [$source] 0x4301 晚到（交接尚未创建配对客户端）——暂存，配对起步时采用")
+            }
+            return
+        }
+        // 用户已断开（BT 组件已停）时不得用晚到消息复活会话
+        if (bluetoothClient?.isRunning != true && bluetoothServer?.isRunning != true) {
+            appendLog(">>> [$source] 0x4301 晚到（蓝牙链路已退役）——忽略")
+            return
+        }
+        appendLog(">>> [$source] 0x4301 晚到（上一轮已结束）——按新端点重走一轮连接")
+        onCarPlayEndpoint(endpoint, "$source/0x4301 晚到")
+    }
+
+    /** 把交接期间暂存的晚到端点并入新建的客户端（建 client 与收到 0x4301 的竞态窗口）。 */
+    private fun drainPendingEndpoint(client: AirPlayClient) {
+        val late = pendingEndpointUpdate ?: return
+        pendingEndpointUpdate = null
+        if (client.updateEndpoint(preferEndpoint(late, client.currentEndpoint), "交接期间晚到 0x4301")) {
+            appendLog("AIRPLAY: 交界窗口的 0x4301 端点已并入配对客户端")
+        }
+    }
+
+    /**
+     * 配对循环的端点刷新器（非阻塞）：只读浏览器缓存的 `_airplay._tcp`，
+     * 有则并入 IP/端口/公钥等字段。返回 null = 无新信息（配对循环继续用当前端点）。
+     */
+    private fun enrichEndpointFromBrowser(
+        endpoint: Iap2SenderSession.CarPlayEndpoint,
+        source: String,
+    ): Iap2SenderSession.CarPlayEndpoint? {
+        val info = endpointBrowser?.awaitEndpoint(0) ?: return null
+        var result = endpoint
+        val address = info.host?.hostAddress
+        if (address != null &&
+            address.contains('.') &&
+            !address.contains(':') &&
+            result.ipAddresses.none { it == address }
+        ) {
+            result = result.copy(ipAddresses = listOf(address) + result.ipAddresses)
+        }
+        if (result.airPlayPort <= 0 && info.port > 0) {
+            result = result.copy(airPlayPort = info.port)
+        }
+        if (result.publicKey == null) {
+            txtValue(info, "pk")?.let { result = result.copy(publicKey = it) }
+        }
+        if (result.deviceIdentifier == null) {
+            txtValue(info, "deviceid")?.let { result = result.copy(deviceIdentifier = it) }
+        }
+        if (result.sourceVersion == null) {
+            txtValue(info, "srcvers")?.let { result = result.copy(sourceVersion = it) }
+        }
+        if (result == endpoint) return null
+        appendLog(
+            ">>> [$source] 配对期间 mDNS 刷新端点 → " +
+                "${result.ipAddresses.firstOrNull()}:${result.airPlayPort}",
+        )
+        return result
+    }
+
+    private fun txtValue(
+        info: android.net.nsd.NsdServiceInfo,
+        key: String,
+    ): String? =
+        info.attributes[key]
+            ?.toString(Charsets.UTF_8)
+            ?.trimEnd { it.code == 0 }
+            ?.takeIf { it.isNotEmpty() }
+
+    /**
+     * 晚到端点优先：车机明确告知的端口/公钥优先于 mDNS 合成值，
+     * 但 IP 列表取并集（0x4301 可能不带 IPv4，Audi MMI 9310 实测即如此）。
+     */
+    private fun preferEndpoint(
+        late: Iap2SenderSession.CarPlayEndpoint,
+        fallback: Iap2SenderSession.CarPlayEndpoint,
+    ): Iap2SenderSession.CarPlayEndpoint =
+        late.copy(
+            airPlayPort = if (late.airPlayPort > 0) late.airPlayPort else fallback.airPlayPort,
+            ipAddresses = (late.ipAddresses + fallback.ipAddresses).distinct(),
+            publicKey = late.publicKey ?: fallback.publicKey,
+            deviceIdentifier = late.deviceIdentifier ?: fallback.deviceIdentifier,
+            sourceVersion = late.sourceVersion ?: fallback.sourceVersion,
+        )
+
     /** BT 会话交接点：拿到 0x5703/0x4301 后两条路径流程一致——绑 WiFi → AirPlay 配对 → SETUP → 推流。 */
     private fun onCarPlayEndpoint(
         endpoint: Iap2SenderSession.CarPlayEndpoint,
@@ -977,6 +1111,9 @@ object SessionController {
             appendLog(">>> [$source] 已有会话在处理中，忽略本次端点（等待上一轮结束）")
             return
         }
+        // 新一轮交接开始：清掉上一轮（可能中途失败）遗留的晚到端点暂存，
+        // 否则它会在本轮的 drain 阶段覆盖掉本会话刚解析出的端点。
+        pendingEndpointUpdate = null
         appendLog(
             ">>> [$source] 拿到接收端热点：SSID=${endpoint.ssid}；" +
                 "密码=${if (endpoint.passphrase.isEmpty()) "(空)" else "已获取"}",
@@ -1020,7 +1157,16 @@ object SessionController {
                     }
                     // 端点解析放在邀请之后：车机的 `_airplay._tcp` 常在受邀后才上线，
                     // 且这一步最长 3s——必须在后台线程做，不能占住网络回调线程。
-                    val effectiveEndpoint = resolveEndpointHost(endpoint, source)
+                    var effectiveEndpoint = resolveEndpointHost(endpoint, source)
+                    // 交接流程起步期间车机补发的 0x4301（比 mDNS 合成更权威）在此并入。
+                    pendingEndpointUpdate?.let { late ->
+                        pendingEndpointUpdate = null
+                        effectiveEndpoint = preferEndpoint(late, effectiveEndpoint)
+                        appendLog(
+                            "AIRPLAY: 并入交接期间晚到的 0x4301 端点 → " +
+                                "${effectiveEndpoint.ipAddresses.firstOrNull()}:${effectiveEndpoint.airPlayPort}",
+                        )
+                    }
                     if (connectCancelled) {
                         appendLog("AIRPLAY: 用户已取消——中止配对")
                         sessionStarting.set(false)
@@ -1032,6 +1178,7 @@ object SessionController {
                             effectiveEndpoint,
                             log = { line -> appendLog(line) },
                             context = context.applicationContext,
+                            endpointRefresher = { current -> enrichEndpointFromBrowser(current, source) },
                         )
                     retireSession()
                     // 会话静默降噪（2026-10-10）：从交接点起暂停其它接收端的出站连接探测
@@ -1041,6 +1188,7 @@ object SessionController {
                     phaseHint = "AirPlay 配对中…"
                     var client = newClient()
                     currentClient = client
+                    drainPendingEndpoint(client)
                     var keys = client.runPairing()
                     if (connectCancelled) {
                         retireSession()
@@ -1058,6 +1206,7 @@ object SessionController {
                         detachActiveBtSessions()
                         client = newClient()
                         currentClient = client
+                        drainPendingEndpoint(client)
                         keys = client.runPairing()
                         if (connectCancelled) {
                             retireSession()
@@ -1354,6 +1503,17 @@ object SessionController {
                     // 推流活跃时保持关闭，由 VideoSender.onEnded（推流终止）负责解除。
                     if (videoSender?.isRunning != true) {
                         BtSessionGate.sessionActive = false
+                        // 收尾竞态：晚到 0x4301 若恰好在「配对已失败、互斥尚未释放」的
+                        // 窗口内到达，会被暂存但没人消费。此处补投一次——车机等 15s
+                        // 无人连入就拆链，错过这一投就是整轮失败（2026-10-18 分析）。
+                        val pending = pendingEndpointUpdate
+                        if (pending != null && !connectCancelled) {
+                            pendingEndpointUpdate = null
+                            appendLog(">>> 收尾时发现暂存的晚到 0x4301——立即按新端点重走一轮")
+                            Bg.run("late-endpoint-retry") {
+                                onCarPlayEndpoint(pending, "0x4301 晚到（本轮收尾补投）")
+                            }
+                        }
                     }
                 }
             }

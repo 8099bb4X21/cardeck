@@ -16,6 +16,7 @@ internal fun Iap2LinkChannel.runSenderSession(
     log: (String) -> Unit,
     onEndpoint: (Iap2SenderSession.CarPlayEndpoint) -> Unit,
     onWifiCredentials: (Iap2SenderSession.WifiConfiguration) -> Unit,
+    onEndpointUpdate: (Iap2SenderSession.CarPlayEndpoint) -> Unit,
 ) {
     val session =
         Iap2SenderSession(
@@ -24,6 +25,7 @@ internal fun Iap2LinkChannel.runSenderSession(
             DeviceIdentity.bluetoothMac(context),
             DeviceIdentity.deviceName(context),
             onWifiCredentials,
+            onEndpointUpdate,
         )
     val endpoint = session.run(timeoutMillis)
     onEndpoint(endpoint)

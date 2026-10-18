@@ -29,6 +29,8 @@ class Iap2BluetoothServer(
     private val onEndpoint: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
     /** 0x5703 一到即触发（绑 WiFi + 广播 _carplay-ctrl），真车 0x4301 的前置条件。 */
     private val onWifiCredentials: (Iap2SenderSession.WifiConfiguration) -> Unit = {},
+    /** Phase 1 之后车机补发 0x4301（CarPlay 窗口晚开）时交给主控热更新端点。 */
+    private val onEndpointUpdate: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
     /** 目标车机（动态读取：拒绝非目标设备的连入；null=来者不拒）。 */
     private val targetProvider: () -> TargetDevicePrefs.Target? = { null },
 ) {
@@ -139,7 +141,7 @@ class Iap2BluetoothServer(
         activeChannel = channel
         BtSessionGate.inboundActive = true
         try {
-            channel.runSenderSession(context, SESSION_TIMEOUT_MILLIS, log, onEndpoint, onWifiCredentials)
+            channel.runSenderSession(context, SESSION_TIMEOUT_MILLIS, log, onEndpoint, onWifiCredentials, onEndpointUpdate)
         } catch (error: IOException) {
             log("SESSION 失败: ${error.message}")
         } finally {

@@ -21,10 +21,27 @@ import java.util.UUID
  * 后续在此叠加 SETUP/RECORD 流媒体会话。
  */
 class AirPlayClient(
-    private val endpoint: Iap2SenderSession.CarPlayEndpoint,
+    initialEndpoint: Iap2SenderSession.CarPlayEndpoint,
     private val log: (String) -> Unit,
     private val context: Context? = null,
+    /**
+     * 配对窗口内的端点刷新器（每轮重试前调用，必须非阻塞）：返回并入 mDNS 新结果后的
+     * 端点，null = 无新信息。Audi MIB3 的 `_airplay._tcp` 常在首次解析之后才上线，
+     * 早期实现只在配对前查一次，失败后只能对着网关兜底地址空转到 120s 窗口耗尽。
+     */
+    private val endpointRefresher: ((Iap2SenderSession.CarPlayEndpoint) -> Iap2SenderSession.CarPlayEndpoint?)? = null,
 ) {
+    /**
+     * 当前使用的接收端端点。0x4301 晚到 / mDNS 后上线时由主控热更新；
+     * 配对循环每轮重试都重新读取，改动在下一轮即生效。
+     */
+    @Volatile
+    private var endpoint: Iap2SenderSession.CarPlayEndpoint = initialEndpoint
+
+    /** 端点代数：ensureConnected 用它检测「连接途中端点被换掉」，避免把新端点的请求发到旧地址。 */
+    @Volatile
+    private var endpointGeneration = 0
+
     private var socket: Socket? = null
     private var cSeq = 0
 
@@ -67,7 +84,53 @@ class AirPlayClient(
     @Volatile
     var cancelled: Boolean = false
 
+    /** 配对重试循环是否仍在跑（主控据此判断「晚到端点」应热更新还是忽略）。 */
+    @Volatile
+    var pairingInProgress: Boolean = false
+        private set
+
+    /** 当前端点（主控合并晚到端点时用作兜底，避免 0x4301 不带 IP 时把可用地址抹掉）。 */
+    val currentEndpoint: Iap2SenderSession.CarPlayEndpoint get() = endpoint
+
+    /**
+     * 热更新接收端端点（0x4301 晚到 / 配对期间 mDNS 新结果）。
+     * 地址或端口变化时关闭当前 TCP，让配对循环下一轮按新地址重连。
+     *
+     * @return true = 端点确有变化（已切换）；false = 与当前一致，未做任何事
+     */
+    fun updateEndpoint(
+        newEndpoint: Iap2SenderSession.CarPlayEndpoint,
+        reason: String,
+    ): Boolean {
+        val old = endpoint
+        val unchanged =
+            old.ipAddresses == newEndpoint.ipAddresses &&
+                old.airPlayPort == newEndpoint.airPlayPort &&
+                old.publicKey == newEndpoint.publicKey &&
+                old.deviceIdentifier == newEndpoint.deviceIdentifier
+        if (unchanged) return false
+        endpoint = newEndpoint
+        endpointGeneration++
+        log(
+            "AIRPLAY: 端点更新（$reason）" +
+                "${old.ipAddresses.firstOrNull()}:${old.airPlayPort} → " +
+                "${newEndpoint.ipAddresses.firstOrNull()}:${newEndpoint.airPlayPort}" +
+                "（配对循环下一轮使用新地址）",
+        )
+        close()
+        return true
+    }
+
     fun runPairing(): PairVerifyClient.ControlKeys? {
+        pairingInProgress = true
+        try {
+            return runPairingLoop()
+        } finally {
+            pairingInProgress = false
+        }
+    }
+
+    private fun runPairingLoop(): PairVerifyClient.ControlKeys? {
         val identity = loadOrCreateIdentity()
         log("AIRPLAY: 控制器身份 pairingId=${identity.pairingId}")
         // 车机 AirPlay 窗口是「用户点车机上的手机图标 / 收到 ctrl 邀请后才开」的
@@ -77,6 +140,11 @@ class AirPlayClient(
         var attempt = 0
         while (System.currentTimeMillis() < deadline && !cancelled) {
             attempt++
+            // 每轮重试前吸收一次 mDNS 新结果：网关兜底地址连不通时，车机的
+            // _airplay._tcp 可能已经在后台发现到，及时换过去比空转 120s 强。
+            endpointRefresher?.invoke(endpoint)?.let { refreshed ->
+                updateEndpoint(refreshed, "配对期间 mDNS 刷新")
+            }
             close()
             if (!ensureConnected(2_000)) {
                 if (attempt == 1 || attempt % 5 == 0) {
@@ -1731,24 +1799,34 @@ class AirPlayClient(
 
     private fun ensureConnected(timeoutMillis: Int = 5_000): Boolean {
         if (socket?.isConnected == true && socket?.isClosed == false) return true
+        // 快照端点与代数：连接期间主控可能换端点（0x4301 晚到），
+        // 若用旧地址建好连接再被请求，会一直连错机器到本轮超时。
+        val target = endpoint
+        val generation = endpointGeneration
         val host =
-            ipv4Host() ?: run {
-                log("AIRPLAY: 0x4301 未携带 IPv4 地址，无法连接")
-                return false
-            }
+            target.ipAddresses.firstOrNull { address -> address.contains('.') && !address.contains(':') }
+                ?: run {
+                    log("AIRPLAY: 0x4301 未携带 IPv4 地址，无法连接")
+                    return false
+                }
         return try {
             val newSocket = Socket()
-            newSocket.connect(InetSocketAddress(host, endpoint.airPlayPort), timeoutMillis)
+            newSocket.connect(InetSocketAddress(host, target.airPlayPort), timeoutMillis)
+            if (generation != endpointGeneration) {
+                // 连接途中端点已更新：丢弃这条旧连接，下一轮按新地址重连
+                runCatching { newSocket.close() }
+                return false
+            }
             // 读由独立读线程负责（阻塞等数据），请求超时由待响应表的 poll 控制；
             // 这里若留 soTimeout，读线程会周期性收到 SocketTimeoutException 而退出
             newSocket.soTimeout = 0
             socket = newSocket
-            log("AIRPLAY: TCP 已连通 $host:${endpoint.airPlayPort}（本机 ${newSocket.localAddress.hostAddress}）")
+            log("AIRPLAY: TCP 已连通 $host:${target.airPlayPort}（本机 ${newSocket.localAddress.hostAddress}）")
             true
         } catch (error: IOException) {
             log(
                 "AIRPLAY: 连接失败 - ${error.message}\n" +
-                    "  ↳ 若反复失败：确认手机当前连的是接收端热点 \"${endpoint.ssid}\"，" +
+                    "  ↳ 若反复失败：确认手机当前连的是接收端热点 \"${target.ssid}\"，" +
                     "而不是家里/公司 WiFi（绑定到的网络不对时到达不了车机网段）",
             )
             false

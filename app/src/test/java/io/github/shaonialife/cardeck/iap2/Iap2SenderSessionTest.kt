@@ -4,7 +4,11 @@ import io.github.shaonialife.cardeck.transport.Iap2LinkChannel
 import io.github.shaonialife.cardeck.transport.InMemoryStreamPair
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 发送端会话对 mock 配件端的端到端回环测试：
@@ -44,9 +48,65 @@ class Iap2SenderSessionTest {
         accessoryChannel.close()
     }
 
+    /**
+     * 奥迪 MMI 9310 形态：识别帧只声明发 0x5703/0xea03（不发 0x4301），Phase 1
+     * 因此不等待；车机在保活期间（Phase 1 之后）才补发 0x4301。
+     * 旧实现把这条消息当 keep-alive 只记长度，配对永远不会重启——本用例锁住
+     * 「晚到 0x4301 必须解析成端点并回调」这一行为。
+     */
+    @Test
+    fun lateStartSessionAfterPhaseOneTriggersEndpointUpdate() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory = MockAccessory(accessoryChannel, audiDeclarations = true, lateStartSession = true)
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val updates = AtomicReference<Iap2SenderSession.CarPlayEndpoint?>()
+        val updateLatch = CountDownLatch(1)
+        val session =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "34:86:DA:86:BB:96",
+                deviceName = "test-device",
+                onEndpointUpdate = {
+                    updates.set(it)
+                    updateLatch.countDown()
+                },
+            )
+
+        val phaseOne = session.run(timeoutMillis = 10_000L)
+        // 车机声明不发 0x4301：Phase 1 必须立即返回空端点，而不是白等 3s 窗口
+        assertTrue(phaseOne.ipAddresses.isEmpty())
+
+        val pump = Thread({ session.pumpIncomingForever() }, "phone-pump")
+        pump.isDaemon = true
+        pump.start()
+
+        assertTrue("晚到 0x4301 未触发端点回调", updateLatch.await(5, TimeUnit.SECONDS))
+        val late = updates.get()
+        assertNotNull(late)
+        assertEquals("MockAP", late!!.ssid)
+        assertEquals(49152, late.airPlayPort)
+        assertEquals(listOf("192.168.49.1", "fd00::1"), late.ipAddresses)
+        assertEquals("mock-device-id", late.deviceIdentifier)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+        pump.join(2_000)
+    }
+
     /** 按 DiPlay Iap2WirelessControlClient 的时序脚本化应答。 */
     private class MockAccessory(
         private val channel: Iap2LinkChannel,
+        /** 奥迪形态：识别帧声明只发 0x5703/0xea03（不发 StartHID/0x4301）。 */
+        private val audiDeclarations: Boolean = false,
+        /** Phase 1 结束后再补发 0x4301（车机窗口晚开的真实时序）。 */
+        private val lateStartSession: Boolean = false,
     ) {
         private val parser = Iap2Csm.Parser()
         private val pending = ArrayDeque<Iap2Csm.Frame>()
@@ -60,6 +120,11 @@ class Iap2SenderSessionTest {
                 Iap2Csm.string(0, "MockCarPlay"),
                 Iap2Csm.string(1, "MU-1"),
                 Iap2Csm.string(2, "Mock Manufacturer"),
+                if (audiDeclarations) {
+                    Iap2Csm.u16List(6, intArrayOf(0x5703, 0xea03))
+                } else {
+                    ByteArray(0)
+                },
             )
             expect(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
 
@@ -69,17 +134,19 @@ class Iap2SenderSessionTest {
             send(Iap2MessageIds.MFI_RESPONSE, Iap2Csm.param(0, ByteArray(70) { (it * 7).toByte() }))
             expect(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
 
-            // 订阅 + StartHID
-            send(Iap2MessageIds.START_NOW_PLAYING_UPDATES)
-            send(Iap2MessageIds.START_POWER_UPDATES)
-            send(
-                Iap2MessageIds.START_HID,
-                Iap2Csm.u16(0, 0),
-                Iap2Csm.u16(1, 2),
-                Iap2Csm.u16(2, 1),
-                Iap2Csm.param(4, byteArrayOf(0x05, 0x0c)),
-            )
-            expect(Iap2MessageIds.DEVICE_HID_REPORT)
+            // 订阅 + StartHID（奥迪形态不发，发送端应直接跳过等待）
+            if (!audiDeclarations) {
+                send(Iap2MessageIds.START_NOW_PLAYING_UPDATES)
+                send(Iap2MessageIds.START_POWER_UPDATES)
+                send(
+                    Iap2MessageIds.START_HID,
+                    Iap2Csm.u16(0, 0),
+                    Iap2Csm.u16(1, 2),
+                    Iap2Csm.u16(2, 1),
+                    Iap2Csm.param(4, byteArrayOf(0x05, 0x0c)),
+                )
+                expect(Iap2MessageIds.DEVICE_HID_REPORT)
+            }
 
             // WiFi 配置
             expect(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
@@ -104,6 +171,19 @@ class Iap2SenderSessionTest {
 
             // CarPlay 启动
             expect(Iap2MessageIds.CARPLAY_AVAILABILITY)
+            if (!lateStartSession) {
+                sendStartSession()
+            }
+
+            expect(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER)
+            if (lateStartSession) {
+                // 车机打开 CarPlay 窗口后补发（Phase 1 早已结束）
+                Thread.sleep(150)
+                sendStartSession()
+            }
+        }
+
+        private fun sendStartSession() {
             send(
                 Iap2MessageIds.CARPLAY_START_SESSION,
                 Iap2Csm.group(
@@ -120,8 +200,6 @@ class Iap2SenderSessionTest {
                 Iap2Csm.string(4, "a".repeat(64) + "publickeyhex"),
                 Iap2Csm.string(5, "560.20"),
             )
-
-            expect(Iap2MessageIds.DEVICE_TRANSPORT_IDENTIFIER)
         }
 
         private fun send(
