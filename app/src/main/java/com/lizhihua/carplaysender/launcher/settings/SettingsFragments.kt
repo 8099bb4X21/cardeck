@@ -18,6 +18,7 @@ import com.lizhihua.carplaysender.launcher.DockPrefs
 import com.lizhihua.carplaysender.launcher.SupersamplePrefs
 import com.lizhihua.carplaysender.launcher.VirtualLauncher
 import com.lizhihua.carplaysender.launcher.settings.AppRowsAdapter.AppHolder
+import com.lizhihua.carplaysender.ui.DarkMessageDialog
 import com.lizhihua.carplaysender.util.Bg
 
 /**
@@ -255,27 +256,32 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                 if (orphans.size > 3) " 等 ${orphans.size} 个" else ""
         banner.text = "另有 ${orphans.size} 个列表外的横屏残留：$summary\n点击清除"
         banner.setOnClickListener {
-            androidx.appcompat.app.AlertDialog
-                .Builder(requireContext())
-                .setTitle("清除横屏残留")
-                .setMessage(
+            val host = activity ?: return@setOnClickListener
+            DarkMessageDialog.show(
+                activity = host,
+                title = "清除横屏残留",
+                message =
                     "以下条目已不在应用列表，但系统侧横屏覆盖仍开着：\n" +
                         orphans.joinToString("\n") { "· $it" } +
                         "\n\n清除会立即重启在运行的这些应用（未保存的界面状态会丢失）；" +
                         "已卸载的条目不受影响。是否继续？",
-                ).setPositiveButton("清除") { _, _ ->
-                    Bg.run("orientation-orphan-clear") {
-                        val cleared = orphans.count { AppOrientationCompat.clearSystemOnly(it) }
-                        activity?.runOnUiThread {
-                            if (!isAdded || isDetached) return@runOnUiThread
-                            hostToast("已清除 $cleared/${orphans.size} 个横屏残留")
-                            systemOn = systemOn - orphans.toSet()
-                            listAdapter.notifyDataSetChanged()
-                            updateOrphanBanner()
-                        }
-                    }
-                }.setNegativeButton("取消", null)
-                .show()
+                actions =
+                    listOf(
+                        DarkMessageDialog.Action("取消") {},
+                        DarkMessageDialog.Action("清除", DarkMessageDialog.Emphasis.DANGER) {
+                            Bg.run("orientation-orphan-clear") {
+                                val cleared = orphans.count { AppOrientationCompat.clearSystemOnly(it) }
+                                activity?.runOnUiThread {
+                                    if (!isAdded || isDetached) return@runOnUiThread
+                                    hostToast("已清除 $cleared/${orphans.size} 个横屏残留")
+                                    systemOn = systemOn - orphans.toSet()
+                                    listAdapter.notifyDataSetChanged()
+                                    updateOrphanBanner()
+                                }
+                            }
+                        },
+                    ),
+            )
         }
     }
 
@@ -380,28 +386,33 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                     hint.isClickable = true
                     // 只清系统侧覆盖、不动偏好（偏好本来就是关的）；弹窗提示会重启应用
                     hint.setOnClickListener {
-                        androidx.appcompat.app.AlertDialog
-                            .Builder(requireContext())
-                            .setTitle("清除横屏残留")
-                            .setMessage(
+                        val host = activity ?: return@setOnClickListener
+                        DarkMessageDialog.show(
+                            activity = host,
+                            title = "清除横屏残留",
+                            message =
                                 "「${entry.label}」的系统侧横屏覆盖仍在生效（可能是卸载前的残留）。" +
                                     "\n\n清除会立即重启该应用（正在运行的应用会丢失未保存的界面状态）。是否继续？",
-                            ).setPositiveButton("清除") { _, _ ->
-                                Bg.run("orientation-row-clear") {
-                                    val ok = AppOrientationCompat.clearSystemOnly(pkg())
-                                    activity?.runOnUiThread {
-                                        if (!isAdded || isDetached) return@runOnUiThread
-                                        if (ok) {
-                                            systemOn = systemOn - pkg()
-                                            refresh(shown)
-                                            hostToast("「${entry.label}」横屏残留已清除——应用将重启")
-                                        } else {
-                                            hostToast("清除失败（Shizuku 异常）")
+                            actions =
+                                listOf(
+                                    DarkMessageDialog.Action("取消") {},
+                                    DarkMessageDialog.Action("清除", DarkMessageDialog.Emphasis.DANGER) {
+                                        Bg.run("orientation-row-clear") {
+                                            val ok = AppOrientationCompat.clearSystemOnly(pkg())
+                                            activity?.runOnUiThread {
+                                                if (!isAdded || isDetached) return@runOnUiThread
+                                                if (ok) {
+                                                    systemOn = systemOn - pkg()
+                                                    refresh(shown)
+                                                    hostToast("「${entry.label}」横屏残留已清除——应用将重启")
+                                                } else {
+                                                    hostToast("清除失败（Shizuku 异常）")
+                                                }
+                                            }
                                         }
-                                    }
-                                }
-                            }.setNegativeButton("取消", null)
-                            .show()
+                                    },
+                                ),
+                        )
                     }
                 }
 

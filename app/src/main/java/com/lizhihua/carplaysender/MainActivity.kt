@@ -39,6 +39,7 @@ import com.lizhihua.carplaysender.service.CarPlayService
 import com.lizhihua.carplaysender.shizuku.CarInputClient
 import com.lizhihua.carplaysender.shizuku.Shell
 import com.lizhihua.carplaysender.shizuku.ShizukuGate
+import com.lizhihua.carplaysender.ui.DarkMessageDialog
 import com.lizhihua.carplaysender.ui.ScreenDimmer
 import com.lizhihua.carplaysender.ui.SignalWavesView
 import com.lizhihua.carplaysender.ui.WallpaperStore
@@ -62,6 +63,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var deviceSubtitle: TextView
     private lateinit var shizukuChip: TextView
+    private lateinit var shizukuDesc: TextView
+    private lateinit var shizukuBadge: TextView
     private lateinit var signalWaves: SignalWavesView
     private lateinit var hubPlate: FrameLayout
     private lateinit var hubCar: ImageView
@@ -110,6 +113,13 @@ class MainActivity : AppCompatActivity() {
 
     private var activeDisclaimer: androidx.appcompat.app.AlertDialog? = null
 
+    /** Shizuku 授权结果监听（onDestroy 必须注销，否则跨 Activity 泄漏）。 */
+    private var shizukuPermissionListener:
+        rikka.shizuku.Shizuku.OnRequestPermissionResultListener? = null
+
+    /** 用户在「请求授权」引导里点了主操作：授权成功后自动继续连接流程。 */
+    private var pendingShizukuThenConnect = false
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val heroTick: Runnable =
         object : Runnable {
@@ -144,7 +154,8 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             log("BLUETOOTH_CONNECT 授权: $granted")
             if (granted && pendingStartAfterBtPermission.compareAndSet(true, false)) {
-                ensureBluetoothReady { showAudioChoiceDialog() }
+                // 授权期间 Shizuku 可能被停掉：这里同样走前置检查
+                ensureShizukuReady { showAudioChoiceDialog() }
             }
         }
 
@@ -215,36 +226,50 @@ class MainActivity : AppCompatActivity() {
      * 「启动连接」前的音频选择弹窗：
      * 音频与视频同时推流会显著增加负载（实测 48k 立体声 PCM ≈1.5Mbps + 视频 ≈4Mbps），
      * 测试台出现画面卡顿与断连；真车链路能力未知。因此默认不推音频，需用户显式开启。
+     *
+     * 三个选项竖排（横排会挤爆窄屏）：推荐项「仅视频」放第一位并用实心强调
+     * ——与正文「以看视频为主时建议暂不开启」一致；取消在最下。
      */
     private fun showAudioChoiceDialog() {
-        androidx.appcompat.app.AlertDialog
-            .Builder(this)
-            .setTitle("是否在车机侧播放声音？")
-            .setMessage(
-                "开启后：手机媒体/导航声音将投到车机播放，手机本机静音（不开启则车上无声音）。\n\n" +
+        DarkMessageDialog.show(
+            activity = this,
+            title = "是否在车机侧播放声音？",
+            message =
+                "开启后：手机媒体/导航声音将投到车机播放，手机本机静音" +
+                    "（不开启则车上无声音）。\n\n" +
                     "注意：声音与画面同时传输会明显增加负载，可能出现画面卡顿或连接不稳；" +
                     "以看视频为主时建议暂不开启。\n\n" +
                     "开启声音需要「投屏」权限，选择后会一并申请。",
-            ).setPositiveButton("开启声音") { _, _ -> beginWithAudio(enabled = true) }
-            .setNegativeButton("仅视频（更流畅）") { _, _ -> beginWithAudio(enabled = false) }
-            .setNeutralButton("取消", null)
-            .show()
+            actions =
+                listOf(
+                    DarkMessageDialog.Action(
+                        "仅视频（更流畅）",
+                        DarkMessageDialog.Emphasis.PRIMARY,
+                    ) { beginWithAudio(enabled = false) },
+                    DarkMessageDialog.Action("开启声音") { beginWithAudio(enabled = true) },
+                    DarkMessageDialog.Action("取消") {},
+                ),
+        )
     }
 
     /** 「取消连接」确认弹窗（防误触）：中止当前连接尝试并断开蓝牙/WiFi 链路。 */
     private fun promptCancelConnecting() {
-        androidx.appcompat.app.AlertDialog
-            .Builder(this)
-            .setTitle("取消连接？")
-            .setMessage("将停止当前连接尝试：蓝牙与 WiFi 链路都会断开，需重新点「启动连接」。")
-            .setPositiveButton("取消连接") { _, _ ->
-                // 关闭仍在等待的「加入热点」确认弹窗（其 onChoice(null) 会与
-                // connectCancelled 一起让 autoJoin 流程立即中止）
-                wifiJoinDialog?.cancel()
-                wifiJoinDialog = null
-                SessionController.cancelConnecting(this)
-            }.setNegativeButton("继续连接", null)
-            .show()
+        DarkMessageDialog.show(
+            activity = this,
+            title = "取消连接？",
+            message = "将停止当前连接尝试：蓝牙与 WiFi 链路都会断开，需重新点「启动连接」。",
+            actions =
+                listOf(
+                    DarkMessageDialog.Action("继续连接") {},
+                    DarkMessageDialog.Action("取消连接", DarkMessageDialog.Emphasis.DANGER) {
+                        // 关闭仍在等待的「加入热点」确认弹窗（其 onChoice(null) 会与
+                        // connectCancelled 一起让 autoJoin 流程立即中止）
+                        wifiJoinDialog?.cancel()
+                        wifiJoinDialog = null
+                        SessionController.cancelConnecting(this)
+                    },
+                ),
+        )
     }
 
     /**
@@ -269,18 +294,22 @@ class MainActivity : AppCompatActivity() {
                 true
             }
         if (!on) {
-            androidx.appcompat.app.AlertDialog
-                .Builder(this)
-                .setTitle("蓝牙未开启")
-                .setMessage("与车机的无线配对通信依赖蓝牙。请先开启手机蓝牙，并确认已与车机配对。")
-                .setPositiveButton("去开启蓝牙") { _, _ ->
-                    runCatching {
-                        startActivity(
-                            android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS),
-                        )
-                    }.onFailure { log("BT: 无法打开蓝牙设置，请手动开启") }
-                }.setNegativeButton("取消", null)
-                .show()
+            DarkMessageDialog.show(
+                activity = this,
+                title = "蓝牙未开启",
+                message = "与车机的无线配对通信依赖蓝牙。请先开启手机蓝牙，并确认已与车机配对。",
+                actions =
+                    listOf(
+                        DarkMessageDialog.Action("取消") {},
+                        DarkMessageDialog.Action("去开启蓝牙", DarkMessageDialog.Emphasis.PRIMARY) {
+                            runCatching {
+                                startActivity(
+                                    android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS),
+                                )
+                            }.onFailure { log("BT: 无法打开蓝牙设置，请手动开启") }
+                        },
+                    ),
+            )
             log("BT: 蓝牙未开启——本次连接未发起")
             return
         }
@@ -292,15 +321,81 @@ class MainActivity : AppCompatActivity() {
      * 且投屏授权随保活服务停止而失效（下次要车机侧声音需重新授权）。
      */
     private fun promptDisconnect() {
-        androidx.appcompat.app.AlertDialog
-            .Builder(this)
-            .setTitle("断开连接？")
-            .setMessage(
+        DarkMessageDialog.show(
+            activity = this,
+            title = "断开连接？",
+            message =
                 "将停止车机推流并关闭保活服务，车机画面会立即中断。\n\n" +
                     "注意：投屏授权会随服务停止失效，下次如需车机侧声音请重新授权。",
-            ).setPositiveButton("断开") { _, _ -> SessionController.disconnect(this) }
-            .setNegativeButton("取消", null)
-            .show()
+            actions =
+                listOf(
+                    DarkMessageDialog.Action("取消") {},
+                    DarkMessageDialog.Action("断开", DarkMessageDialog.Emphasis.DANGER) {
+                        SessionController.disconnect(this)
+                    },
+                ),
+        )
+    }
+
+    /**
+     * 「启动连接」的硬性前置：Shizuku 必须就绪。
+     *
+     * 隐形屏模式的虚拟屏创建、触摸注入、窗口/显示状态读取**全部经 Shizuku shell**；
+     * 未就绪时连接会走到「蓝牙已连、车机黑屏 + 触摸全丢」的半残状态，比直接拦住更糟。
+     * 未就绪时按三态给出对应的可操作引导（装 / 启动 / 授权）。
+     */
+    private fun ensureShizukuReady(onReady: () -> Unit) {
+        val state = ShizukuGate.state(this)
+        if (state == ShizukuGate.State.READY) {
+            onReady()
+            return
+        }
+        log("SHIZUKU: 未就绪（$state）——已阻止本次连接")
+        promptShizukuNotReady(state)
+    }
+
+    /**
+     * Shizuku 未就绪引导弹窗：主操作随状态变化，附「重试检查」与「取消」。
+     * 走 [DarkMessageDialog] 自绘面板——系统 AlertDialog 是浅色主题，与深色 UI 割裂。
+     */
+    private fun promptShizukuNotReady(state: ShizukuGate.State) {
+        val guidance = ShizukuGate.guidanceOf(state)
+        val actions = mutableListOf<DarkMessageDialog.Action>()
+        actions += DarkMessageDialog.Action("取消") {}
+        actions +=
+            DarkMessageDialog.Action("重试检查") {
+                ensureShizukuReady { showAudioChoiceDialog() }
+            }
+        when (state) {
+            ShizukuGate.State.NOT_RUNNING ->
+                actions +=
+                    DarkMessageDialog.Action("打开 Shizuku", DarkMessageDialog.Emphasis.PRIMARY) {
+                        val intent = packageManager.getLaunchIntentForPackage(ShizukuGate.PACKAGE_NAME)
+                        if (intent == null) {
+                            snack("无法打开 Shizuku App——请手动打开")
+                        } else {
+                            runCatching { startActivity(intent) }
+                                .onFailure { snack("无法打开 Shizuku App——请手动打开") }
+                        }
+                    }
+
+            ShizukuGate.State.UNAUTHORIZED ->
+                actions +=
+                    DarkMessageDialog.Action("请求授权", DarkMessageDialog.Emphasis.PRIMARY) {
+                        pendingShizukuThenConnect = true
+                        ShizukuGate.requestPermission()
+                        snack("请在 Shizuku 的授权窗口点「允许」——允许后会自动继续")
+                    }
+
+            // 未安装：没有可执行的主操作（不给编造的安装链接）
+            ShizukuGate.State.NOT_INSTALLED, ShizukuGate.State.READY -> Unit
+        }
+        DarkMessageDialog.show(
+            activity = this,
+            title = guidance.title,
+            message = guidance.message,
+            actions = actions,
+        )
     }
 
     private fun beginWithAudio(enabled: Boolean) {
@@ -330,6 +425,13 @@ class MainActivity : AppCompatActivity() {
     /** 「启动连接」主体（权限检查留在这里；会话启动交给 [SessionController]，幂等不双开）。 */
     private fun startConnectionNow() {
         runOnUiThread {
+            // 兜底守卫：授权回调等延迟路径也可能走到这里，Shizuku 中途停掉时同样要拦住
+            val gate = ShizukuGate.state(this)
+            if (gate != ShizukuGate.State.READY) {
+                log("SHIZUKU: 未就绪（$gate）——已阻止本次连接")
+                promptShizukuNotReady(gate)
+                return@runOnUiThread
+            }
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
                 PackageManager.PERMISSION_GRANTED
             ) {
@@ -354,6 +456,8 @@ class MainActivity : AppCompatActivity() {
 
         deviceSubtitle = findViewById(R.id.deviceSubtitle)
         shizukuChip = findViewById(R.id.shizukuChip)
+        shizukuDesc = findViewById(R.id.shizukuDesc)
+        shizukuBadge = findViewById(R.id.shizukuBadge)
         signalWaves = findViewById(R.id.signalWaves)
         hubPlate = findViewById(R.id.hubPlate)
         hubCar = findViewById(R.id.hubCar)
@@ -421,6 +525,29 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Shizuku 授权结果：状态行与英雄卡副标题立即刷新；若用户是被「请求授权」引导
+        // 过来的（pendingShizukuThenConnect），授权成功后直接接着走音频选择，不用再点一次。
+        shizukuPermissionListener =
+            rikka.shizuku.Shizuku
+                .OnRequestPermissionResultListener { requestCode, grantResult ->
+                    if (requestCode != ShizukuGate.PERMISSION_REQUEST_CODE) return@OnRequestPermissionResultListener
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        val granted = grantResult == PackageManager.PERMISSION_GRANTED
+                        log("SHIZUKU: 授权结果 granted=$granted")
+                        updateReadyRow()
+                        updateShizukuChip()
+                        if (granted && pendingShizukuThenConnect) {
+                            pendingShizukuThenConnect = false
+                            ensureShizukuReady { showAudioChoiceDialog() }
+                        } else if (!granted) {
+                            snack("未获得 Shizuku 授权——连接仍不可用")
+                        }
+                    }
+                }.also {
+                    runCatching { rikka.shizuku.Shizuku.addRequestPermissionResultListener(it) }
+                }
+
         // 会话中枢（进程级）：登记 applicationContext + 创建会话对象；
         // 挂屏注册：日志续显 + SSID 回填
         SessionController.ensure(this)
@@ -436,26 +563,35 @@ class MainActivity : AppCompatActivity() {
                     return@runOnUiThread
                 }
                 var answered = false
+                // 取消（返回键/点外部/被 cancelConnecting 联动关闭）= null，流程据此中止；
+                // 「打开 WLAN」除了回调 false，还要把用户送到系统 WLAN 页手动连。
                 val dialog =
-                    androidx.appcompat.app.AlertDialog
-                        .Builder(this)
-                        .setTitle(spec.title)
-                        .setMessage(spec.message)
-                        .setPositiveButton(spec.positive) { _, _ ->
-                            answered = true
-                            onChoice(true)
-                        }.setNegativeButton(spec.negative) { _, _ ->
-                            answered = true
-                            runCatching {
-                                startActivity(
-                                    android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS),
-                                )
-                            }
-                            onChoice(false)
-                        }.setOnCancelListener { if (!answered) onChoice(null) }
-                        .create()
+                    DarkMessageDialog.show(
+                        activity = this,
+                        title = spec.title,
+                        message = spec.message,
+                        actions =
+                            listOf(
+                                DarkMessageDialog.Action(spec.negative) {
+                                    answered = true
+                                    runCatching {
+                                        startActivity(
+                                            android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS),
+                                        )
+                                    }
+                                    onChoice(false)
+                                },
+                                DarkMessageDialog.Action(
+                                    spec.positive,
+                                    DarkMessageDialog.Emphasis.PRIMARY,
+                                ) {
+                                    answered = true
+                                    onChoice(true)
+                                },
+                            ),
+                        onCancel = { if (!answered) onChoice(null) },
+                    )
                 wifiJoinDialog = dialog
-                dialog.show()
             }
         }
         SessionController.ssidSink = ssidSink
@@ -510,6 +646,16 @@ class MainActivity : AppCompatActivity() {
             showDisclaimer(requireAcceptance = false)
         }
 
+        // ---- Shizuku 状态行：未就绪时点它直接看引导（与「启动连接」被拦下同一套文案）----
+        findViewById<LinearLayout>(R.id.rowShizuku).setOnClickListener {
+            val state = ShizukuGate.state(this)
+            if (state == ShizukuGate.State.READY) {
+                snack("Shizuku 已就绪——虚拟屏与触摸注入可用")
+            } else {
+                promptShizukuNotReady(state)
+            }
+        }
+
         // ---- 常亮+暗幕 ----
         ScreenDimmer.enabled =
             preferences.getBoolean("alwaysOn", true)
@@ -541,8 +687,8 @@ class MainActivity : AppCompatActivity() {
         ctaButton.setOnClickListener {
             when (heroState) {
                 HeroState.CONNECTED -> promptDisconnect()
-                // 前置检查：蓝牙权限/开关，静默失败 zero-tolerance
-                HeroState.IDLE -> ensureBluetoothReady { showAudioChoiceDialog() }
+                // 前置检查：Shizuku（硬性依赖）→ 蓝牙权限/开关 → 音频选择
+                HeroState.IDLE -> ensureShizukuReady { ensureBluetoothReady { showAudioChoiceDialog() } }
                 // 连接中可取消：卡在错误网络/等待回连时用户主动脱身（弹窗防误触）
                 HeroState.CONNECTING -> promptCancelConnecting()
                 null -> {}
@@ -747,6 +893,15 @@ class MainActivity : AppCompatActivity() {
             heroSubline.text = "正在检查残留屏…"
             heroProgress.visibility = View.VISIBLE
         }
+        // 空闲但 Shizuku 未就绪：副标题直接说明「点了也连不上」，避免用户反复点
+        if (s == HeroState.IDLE && !startupCheckRunning) {
+            val gate = ShizukuGate.state(this)
+            if (gate != ShizukuGate.State.READY) {
+                heroSubline.text =
+                    "Shizuku 未就绪（${ShizukuGate.guidanceOf(gate).title}）——" +
+                    "无法连接，点下方「Shizuku」查看怎么处理"
+            }
+        }
         updateConnectedSubline()
         updateHeroStats()
         updateAudioTag()
@@ -883,9 +1038,17 @@ class MainActivity : AppCompatActivity() {
         audioTag.text = if (on) "车机侧声音 · 开启" else "车机侧声音 · 关闭"
     }
 
-    /** 连接准备计数：热点 SSID / 蓝牙配对 / 投屏权限。 */
+    /**
+     * 连接准备计数：Shizuku / 热点 SSID / 蓝牙配对 / 投屏权限。
+     *
+     * Shizuku 是**硬性前置**（未就绪时连接会被拦下），所以计入总数并单独渲染状态行。
+     */
     private fun updateReadyRow() {
         var ready = 0
+        val shizukuState = ShizukuGate.state(this)
+        val shizukuReady = shizukuState == ShizukuGate.State.READY
+        if (shizukuReady) ready++
+        updateShizukuRow(shizukuState)
         if (ssidInput.text
                 .toString()
                 .trim()
@@ -963,7 +1126,27 @@ class MainActivity : AppCompatActivity() {
             btnAudio.setTextColor(getColor(R.color.m3_primary))
             audioDesc.text = "需要「投屏」权限，可选 · 关闭时车机无声音"
         }
-        readyCount.text = "$ready/3"
+        readyCount.text = "$ready/4"
+    }
+
+    /**
+     * 「连接准备」里的 Shizuku 状态行：状态即事实源（每次对账时读一次）。
+     * 未就绪时点整行直接给引导弹窗——与点「启动连接」被拦下时看到的是同一套文案。
+     */
+    private fun updateShizukuRow(state: ShizukuGate.State) {
+        val ready = state == ShizukuGate.State.READY
+        shizukuBadge.background.mutate().setTint(
+            getColor(if (ready) R.color.m3_ok_dot else R.color.m3_amber),
+        )
+        shizukuBadge.setTextColor(getColor(if (ready) R.color.m3_ok else R.color.m3_on_sec_container))
+        shizukuBadge.text = if (ready) "就绪" else "未就绪"
+        shizukuDesc.text =
+            when (state) {
+                ShizukuGate.State.READY -> "shell 权限已就绪 · 虚拟屏与触摸可用"
+                ShizukuGate.State.NOT_RUNNING -> "服务未运行——点此查看怎么启动"
+                ShizukuGate.State.UNAUTHORIZED -> "未授权本应用——点此请求授权"
+                ShizukuGate.State.NOT_INSTALLED -> "未安装 Shizuku——点此查看说明"
+            }
     }
 
     // ---- 目标车机选择弹窗（扫描/配对状态）----
@@ -1721,29 +1904,34 @@ class MainActivity : AppCompatActivity() {
     private fun promptResidualDisplays(residual: List<Pair<Int, String>>) {
         if (isFinishing || isDestroyed) return
         val names = residual.joinToString("\n") { "· ${it.second}（displayId=${it.first}）" }
-        androidx.appcompat.app.AlertDialog
-            .Builder(this)
-            .setTitle("检测到残留虚拟屏")
-            .setMessage(
+        DarkMessageDialog.show(
+            activity = this,
+            title = "检测到残留虚拟屏",
+            message =
                 "发现 ${residual.size} 个上次会话遗留的 CarPlay 虚拟屏：\n$names\n\n" +
                     "残留屏会持续占用显示资源，并可能影响下次连接。是否立即清理？",
-            ).setPositiveButton("清理") { _, _ ->
-                pendingResidualDisplays = null
-                updateResidualChip()
-                if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
-                Bg.run("residual-cleanup") {
-                    val released = releaseDisplays(residual.map { it.first })
-                    log("SHELL: 残留虚拟屏清理完成（释放 $released/${residual.size}）")
-                    runOnUiThread {
-                        snack("已释放 $released/${residual.size} 个残留屏")
-                        refreshShellState()
-                    }
-                }
-            }.setNegativeButton("暂不", null)
-            .setOnCancelListener {
+            actions =
+                listOf(
+                    DarkMessageDialog.Action("暂不") {},
+                    DarkMessageDialog.Action("清理", DarkMessageDialog.Emphasis.PRIMARY) {
+                        pendingResidualDisplays = null
+                        updateResidualChip()
+                        if (heroState == HeroState.IDLE) applyHeroState(HeroState.IDLE)
+                        Bg.run("residual-cleanup") {
+                            val released = releaseDisplays(residual.map { it.first })
+                            log("SHELL: 残留虚拟屏清理完成（释放 $released/${residual.size}）")
+                            runOnUiThread {
+                                snack("已释放 $released/${residual.size} 个残留屏")
+                                refreshShellState()
+                            }
+                        }
+                    },
+                ),
+            onCancel = {
                 // 返回键/点外部关闭 = 暂不：保留英雄卡的「清理残留屏」入口
                 updateResidualChip()
-            }.show()
+            },
+        )
     }
 
     /** 英雄卡状态旁的「清理残留屏」按钮显隐（有待清理残留时出现）。 */
@@ -1829,27 +2017,32 @@ class MainActivity : AppCompatActivity() {
     /** 悬浮窗权限请求：先弹说明弹窗，用户确认后再跳系统设置。 */
     private fun promptOverlayPermission(reason: String) {
         if (android.provider.Settings.canDrawOverlays(this)) return
-        androidx.appcompat.app.AlertDialog
-            .Builder(this)
-            .setTitle("需要「显示在其他应用上层」权限")
-            .setMessage(
+        DarkMessageDialog.show(
+            activity = this,
+            title = "需要「显示在其他应用上层」权限",
+            message =
                 "$reason\n\n" +
                     "用途：无操作时在屏幕上盖一层暗幕（替代息屏，防止手机锁屏后车机触摸失效）。" +
                     "不会读取或遮挡其他应用内容，点击屏幕立即消失。",
-            ).setPositiveButton("去授权") { _, _ ->
-                try {
-                    startActivity(
-                        android.content.Intent(
-                            android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            android.net.Uri.parse("package:$packageName"),
-                        ),
-                    )
-                } catch (_: Exception) {
-                    log("DIMMER: 无法打开授权页，请手动前往 设置>应用>特殊权限>显示在其他应用上层")
-                }
-            }.setNegativeButton("暂不") { _, _ ->
-                log("DIMMER: 用户暂未授权悬浮窗（暗幕不可用，常亮仍生效）")
-            }.show()
+            actions =
+                listOf(
+                    DarkMessageDialog.Action("暂不") {
+                        log("DIMMER: 用户暂未授权悬浮窗（暗幕不可用，常亮仍生效）")
+                    },
+                    DarkMessageDialog.Action("去授权", DarkMessageDialog.Emphasis.PRIMARY) {
+                        try {
+                            startActivity(
+                                android.content.Intent(
+                                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    android.net.Uri.parse("package:$packageName"),
+                                ),
+                            )
+                        } catch (_: Exception) {
+                            log("DIMMER: 无法打开授权页，请手动前往 设置>应用>特殊权限>显示在其他应用上层")
+                        }
+                    },
+                ),
+        )
     }
 
     override fun onResume() {
@@ -1881,6 +2074,11 @@ class MainActivity : AppCompatActivity() {
         // 强制声明不得随 Activity 销毁残留窗口（旋转时 Activity 重建，onResume 会续弹）
         runCatching { activeDisclaimer?.dismiss() }
         activeDisclaimer = null
+        shizukuPermissionListener?.let {
+            runCatching { rikka.shizuku.Shizuku.removeRequestPermissionResultListener(it) }
+        }
+        shizukuPermissionListener = null
+        pendingShizukuThenConnect = false
         // 蓝牙扫描/配对监听随界面销毁收尾：Activity 退出后不再需要（也避免广播泄漏）
         runCatching { stopTargetScan() }
         targetPicker = null

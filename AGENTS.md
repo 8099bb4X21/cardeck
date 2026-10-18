@@ -78,6 +78,23 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   另注意 `BtProfiles.proxy()` 用 `getProfileProxy`，其**回调经主线程 Handler 投递**——
   在主线程调用必然等满 1.2s 超时并返回 null（已加显式主线程守卫与告警日志），
   这类「阻塞等主线程回调」的 API 一律只能在后台调用。
+- **Shizuku 未就绪必须硬拦连接**（2026-10-18 用户实测：手动停掉 Shizuku 后仍能点
+  「启动连接」）：隐形屏模式的虚拟屏创建、触摸注入、窗口/显示状态读取全部经 Shizuku
+  shell，未就绪时放行只会走到「蓝牙已连、车机黑屏 + 触摸全丢」的半残态。
+  拦截点在两条路径上都设了：`ensureShizukuReady`（CTA 前置，排在蓝牙之前）与
+  `startConnectionNow` 开头（授权回调等延迟路径的兜底）。三态引导文案由
+  `ShizukuGate.guidanceOf` 给出**互不相同**的动作（未装=无跳转只说明；未运行=打开
+  Shizuku App；未授权=请求授权并自动续连），因为「未就绪」一句话无法指导用户。
+  **连接准备清单把 Shizuku 计为第 1 项**（`readyCount` 现在 x/4），状态行本身可点开引导。
+  授权结果经 `Shizuku.OnRequestPermissionResultListener` 驱动：granted 时刷新状态并
+  在 `pendingShizukuThenConnect` 置位时自动继续，Activity 销毁必须注销监听。
+  提示弹窗统一走 `ui/DarkMessageDialog`——裸 `AlertDialog.Builder.setMessage` 在
+  `Theme.AppCompat.DayNight` 下是**浅色**的，与全深色 UI 割裂（同日真机截图暴露）。
+  该组件支持 1~2 个操作横排靠右、3 个及以上**竖排等宽**（窄屏横排会挤爆；竖排时次要
+  按钮也要上胶囊底，否则只有主按钮是实心整宽、权重失衡）；`Emphasis` 区分主操作
+  （实心青）/ 正文按钮 / 危险操作（暗红）；`dismissOnClick=false` 可保留弹窗重试。
+  已统一：Shizuku 引导、音频选择、取消连接、断开连接、蓝牙未开启、加入热点、
+  残留虚拟屏、悬浮窗权限、横屏残留（列表外横幅 + 行内清除）。
 - **三套坐标系**：车机触摸 = 通告视图坐标系（如 1160×540）；流/虚拟屏 = 缩放后尺寸
   （如 1450×674）。`TouchRouter.setCoordinateScale` 在会话建立时换算，改动触摸路由
   时不要破坏这层映射。地图屏坐标 = 显示内容本身（动态 resize 后）。

@@ -19,9 +19,15 @@ import java.util.concurrent.TimeUnit
 object ShizukuGate {
     enum class State { NOT_INSTALLED, NOT_RUNNING, UNAUTHORIZED, READY }
 
+    /** Shizuku 授权请求码（授权结果回调按它过滤）。 */
+    const val PERMISSION_REQUEST_CODE = 101
+
+    /** Shizuku App 包名（打开/检测共用）。 */
+    const val PACKAGE_NAME = "moe.shizuku.privileged.api"
+
     fun state(context: Context): State {
         return try {
-            context.packageManager.getPackageInfo("moe.shizuku.privileged.api", 0)
+            context.packageManager.getPackageInfo(PACKAGE_NAME, 0)
         } catch (_: PackageManager.NameNotFoundException) {
             return State.NOT_INSTALLED
         }.let {
@@ -40,11 +46,63 @@ object ShizukuGate {
 
     fun requestPermission() {
         try {
-            rikka.shizuku.Shizuku.requestPermission(101)
+            rikka.shizuku.Shizuku.requestPermission(PERMISSION_REQUEST_CODE)
         } catch (_: Throwable) {
         }
     }
+
+    /**
+     * 未就绪时的引导文案（纯函数，可单测）。
+     *
+     * 三种未就绪状态的**处置方式完全不同**（装/启动/授权），混成一句
+     * 「Shizuku 未就绪」用户无从下手——这是共享给朋友后最容易被问住的地方。
+     */
+    internal fun guidanceOf(state: State): ShizukuGuidance =
+        when (state) {
+            State.NOT_INSTALLED ->
+                ShizukuGuidance(
+                    title = "需要先安装 Shizuku",
+                    message =
+                        "连接车机依赖 Shizuku 提供的 shell 权限：创建虚拟屏、注入触摸、" +
+                            "读取窗口状态都要经过它。\n\n" +
+                            "请先安装 Shizuku App 并按官方说明启动服务（无线调试激活，免 root），" +
+                            "完成后回到这里点「重试检查」。",
+                    primaryLabel = null,
+                )
+
+            State.NOT_RUNNING ->
+                ShizukuGuidance(
+                    title = "Shizuku 服务未运行",
+                    message =
+                        "Shizuku 已安装，但服务当前没有运行，此时连接会失败" +
+                            "（车机没有画面、触摸也不可用）。\n\n" +
+                            "请打开 Shizuku App 点「启动」启动服务（手机重启后需要重新启动一次），" +
+                            "然后回来点「重试检查」。",
+                    primaryLabel = "打开 Shizuku",
+                )
+
+            State.UNAUTHORIZED ->
+                ShizukuGuidance(
+                    title = "未授权本应用使用 Shizuku",
+                    message =
+                        "Shizuku 服务已在运行，但本应用还没有获得授权，此时连接会失败" +
+                            "（车机没有画面、触摸也不可用）。\n\n" +
+                            "点「请求授权」并在弹出的窗口中点「允许」；若之前拒绝过，" +
+                            "请到 Shizuku App →「授权应用」里手动允许本应用。",
+                    primaryLabel = "请求授权",
+                )
+
+            State.READY -> ShizukuGuidance("Shizuku 就绪", "", null)
+        }
 }
+
+/** Shizuku 未就绪时的引导内容（见 [ShizukuGate.guidanceOf]）。 */
+internal data class ShizukuGuidance(
+    val title: String,
+    val message: String,
+    /** null = 本机没有可执行的主操作（未安装时无处可跳）。 */
+    val primaryLabel: String?,
+)
 
 /** 以 shell 身份执行命令（等同 adb shell）。Shizuku api 13 需经 IShizukuService binder 调 newProcess。 */
 object Shell {
