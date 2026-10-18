@@ -404,6 +404,21 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   **新增生命周期消息（0x5702/0x6800/0x4301 等）时，先判断「它晚到会怎样」**——保活泵里
   必须按消息 ID 分流，不能只当日志。另：`resolveEndpointHost` 的等待窗口只有 3s，
   不能在超时日志里断言车机「不发」（MMI 9310 就是声明会发但晚到）。
+- **0x4301 的地址字段是「定长 + NUL 填充」，解析必须去掉全部尾部 NUL**（2026-10-18，
+  Audi MMI 3315 日志定谳）：车机把 IPv6 填充到 47 字节（`fe80::…` 后跟 **22 个 NUL**）、
+  IPv4 填充到 17 字节（`10.174.189.1` 后跟 **5 个 NUL**）。`asStringOrEmpty()` 原先只
+  `copyOf(size - 1)` 去掉一个，得到 `"10.174.189.1\0\0\0\0\0"`——这个字符串
+  `contains('.')=true`、`contains(':')=false`，能通过所有「是不是 IPv4」的判断，
+  但 Android 的 getaddrinfo 解不了（iOS/桌面 Java 反而容忍，极易误判为「不是这个原因」），
+  日志表现为 `Unable to resolve host "10.174.189.1": No address associated with hostname`。
+  典型症状链：SRP 配对靠 mDNS 刷新后的干净地址**侥幸成功** → 视频数据端口与 keepAlive
+  仍用带 NUL 的旧地址 → 双双失败 → 车机 ~10s 后拆会话（用户看到「连上就断」）。
+  教训：**协议字段里的 NUL 填充一律 `rstrip(0)`**，不要假设只有一个终止符。
+  另外两处配套收口：① `SessionController.appendLog` 把 `\u0000` 换成可见的 `␀` 再写
+  文件——否则导出的日志是二进制文件，用户反馈时打不开（本次日志 216 个 NUL，直接
+  无法读取）；② 视频/音频/keepAlive 的 host 一律取 `client.currentEndpoint`（配对期间
+  mDNS 刷新过的真实连接地址），不要用解析阶段的 `effectiveEndpoint` 旧值。
+  单测 `nulPaddedAddressesAreStrippedCompletely` 用真实填充宽度锁住这一行为。
 - **UserService 虚拟屏跨版本残留：三层收口**（2026-10-16 定谳，「重启后检测到残留屏、
   点清理却释放 0/N」根因）：Shizuku 按「组件+进程名+版本(APK lastUpdateTime)」复用常驻
   shell 进程——重装 APK 起新进程，旧进程 `am force-stop` 杀不掉（实测）、Shizuku 也不

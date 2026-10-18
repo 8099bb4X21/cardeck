@@ -739,12 +739,22 @@ class Iap2SenderSession(
             .toString()
             .uppercase()
 
-    private fun ByteArray.asStringOrEmpty(): String? =
-        if (isNotEmpty() && last() == 0.toByte()) {
-            copyOf(size - 1).decodeToString()
-        } else {
-            null
-        }
+    /**
+     * NUL 结尾的 CSM 字符串。**必须去掉全部尾部 NUL，不能只去一个**：
+     * Audi MMI 3315 实测把无线组里的地址字段填充到定长（IPv6 后跟 22 个 NUL、
+     * IPv4 后跟 4 个），只去一个会得到 `"10.174.189.1\u0000\u0000\u0000\u0000"`。
+     * 这种字符串 `contains('.')` 为真、`contains(':')` 为假，能通过所有「是不是
+     * IPv4」的判断，但交给 `InetSocketAddress` 就成了
+     * `Unable to resolve host "10.174.189.1"`（NUL 在日志里不可见，极难看出）——
+     * 2026-10-18 实测：AirPlay 配对靠 mDNS 刷新端点侥幸成功，但视频数据端口与
+     * keepAlive 仍用带 NUL 的地址，双双失败，会话 10 秒后被车机拆掉。
+     */
+    private fun ByteArray.asStringOrEmpty(): String? {
+        if (isEmpty() || last() != 0.toByte()) return null
+        var end = size
+        while (end > 0 && this[end - 1] == 0.toByte()) end--
+        return copyOf(end).decodeToString()
+    }
 
     private fun ByteArray.asU32(): Int =
         if (size == 4) {

@@ -112,15 +112,20 @@ object SessionController {
 
     /** 追加一行日志：logcat + 文件 + 进程级缓冲 + 挂屏渲染（增量行直送）。任意线程可调。 */
     fun appendLog(message: String) {
-        android.util.Log.i("CarPlaySender", message)
+        // NUL 会写进日志文件：文本编辑器/文件管理器打不开（Read 工具也会判为二进制），
+        // 用户反馈日志时等于白导。0x4301 的定长地址字段曾原样打印出多个 NUL
+        // （2026-10-18 实测 216 个），这里替换成可见占位符——顺带让「字符串里有脏字节」
+        // 在日志上直接可见，而不是隐形成 InetSocketAddress 的解析失败。
+        val clean = if (message.indexOf('\u0000') >= 0) message.replace("\u0000", "␀") else message
+        android.util.Log.i("CarPlaySender", clean)
         appContext?.let {
             DebugFileLog
-                .append(it, message)
+                .append(it, clean)
         }
         if (!logEnabled) return
         val line =
             synchronized(logLock) {
-                val stamped = '[' + timestamp.format(Date()) + "] " + message + '\n'
+                val stamped = '[' + timestamp.format(Date()) + "] " + clean + '\n'
                 logBuilder.append(stamped)
                 if (logBuilder.length > 40_000) logBuilder.delete(0, logBuilder.length - 20_000)
                 stamped
@@ -1421,9 +1426,13 @@ object SessionController {
                         )
                         val setup = client.runSetup()
                         if (setup != null) {
-                            // 记录会话凭据：投影授权晚于连接时用于动态补启音频
+                            // 记录会话凭据：投影授权晚于连接时用于动态补启音频。
+                            // 用 client.currentEndpoint 而非 effectiveEndpoint：配对期间
+                            // mDNS 刷新过端点时，真正连上的是 client 里的地址（2026-10-18：
+                            // 0x4301 的定长 IP 字段带 NUL，mDNS 给的是干净地址，取旧值
+                            // 会让视频端口/keepAlive 用脏地址 → 一律解析失败）。
                             currentSharedSecret = keys.sharedSecret
-                            currentAudioHost = effectiveEndpoint.ipAddresses.firstOrNull { it.contains('.') }
+                            currentAudioHost = client.currentEndpoint.ipAddresses.firstOrNull { it.contains('.') }
                             client.connectEventChannel(keys.sharedSecret, setup) { command ->
                                 when (command["type"]) {
                                     "hidSendReport" -> {
@@ -1538,7 +1547,10 @@ object SessionController {
                             }
                             val screen = client.runScreenStream(keys.sharedSecret, setup.displayUuid)
                             if (screen != null) {
-                                val host = effectiveEndpoint.ipAddresses.firstOrNull { it.contains('.') }
+                                // 地址取 client 的当前端点（配对期间可能被 mDNS 刷新过）：
+                                // 视频数据端口与 keepAlive 都按它建 socket，用陈旧地址会
+                                // 直接解析失败（2026-10-18 实测「TCP 已连通」但视频端口挂掉）。
+                                val host = client.currentEndpoint.ipAddresses.firstOrNull { it.contains('.') }
                                 // 心跳双保险（缺失任一都会被车机 ~10s 看门狗拆会话，2026-10-11 实测）：
                                 //   keepAlive UDP ping（车机 SETUP 返回的 keepAlivePort，10s 周期）
                                 //   + RTSP POST /feedback（1s 周期，catplay FEEDBACK_INTERVAL）

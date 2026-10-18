@@ -100,6 +100,45 @@ class Iap2SenderSessionTest {
         pump.join(2_000)
     }
 
+    /**
+     * Audi MMI 3315 形态：0x4301 的地址字段按定长 NUL 填充（IPv6 后 22 个、IPv4 后 5 个）。
+     * 旧实现只去掉**一个**尾部 NUL，得到 `"10.174.189.1\0\0\0\0\0"`——它 contains('.')=true、
+     * contains(':')=false，能骗过所有「是不是 IPv4」的判断，但 Android 的 getaddrinfo 解不了，
+     * 表现为 `Unable to resolve host "10.174.189.1"`（2026-10-18 实测：配对成功后视频端口
+     * 与 keepAlive 全挂、会话 10 秒被拆）。
+     */
+    @Test
+    fun nulPaddedAddressesAreStrippedCompletely() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory = MockAccessory(accessoryChannel, padAddresses = true)
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val endpoint =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "34:86:DA:86:BB:96",
+                deviceName = "test-device",
+            ).run(timeoutMillis = 10_000L)
+
+        // 每个地址都必须干净：没有 NUL、没有空白
+        endpoint.ipAddresses.forEach { address ->
+            check(address.none { it == '\u0000' }) { "地址含 NUL：${address.toByteArray().toList()}" }
+            check(address.trim() == address) { "地址含首尾空白：'$address'" }
+        }
+        assertEquals(listOf("192.168.49.1", "fd00::1"), endpoint.ipAddresses)
+        // 端口解析不受填充影响（同一帧里的 u32 参数）
+        assertEquals(49152, endpoint.airPlayPort)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+    }
+
     /** 按 DiPlay Iap2WirelessControlClient 的时序脚本化应答。 */
     private class MockAccessory(
         private val channel: Iap2LinkChannel,
@@ -107,6 +146,11 @@ class Iap2SenderSessionTest {
         private val audiDeclarations: Boolean = false,
         /** Phase 1 结束后再补发 0x4301（车机窗口晚开的真实时序）。 */
         private val lateStartSession: Boolean = false,
+        /**
+         * 地址字段按真实车机的定长填充（Audi MMI 3315 实测：IPv6 后跟 22 个 NUL、
+         * IPv4 后跟 5 个）。用于锁定「必须去掉全部尾部 NUL」这一行为。
+         */
+        private val padAddresses: Boolean = false,
     ) {
         private val parser = Iap2Csm.Parser()
         private val pending = ArrayDeque<Iap2Csm.Frame>()
@@ -191,8 +235,8 @@ class Iap2SenderSessionTest {
                     Iap2Csm.string(0, "MockAP"),
                     Iap2Csm.string(1, "secret-passphrase"),
                     Iap2Csm.u8(2, 36),
-                    Iap2Csm.string(3, "192.168.49.1"),
-                    Iap2Csm.string(3, "fd00::1"),
+                    addressParam(3, "192.168.49.1", padTo = 17),
+                    addressParam(3, "fd00::1", padTo = 47),
                     Iap2Csm.u8(4, 2),
                 ),
                 Iap2Csm.u32(2, 49152L),
@@ -200,6 +244,20 @@ class Iap2SenderSessionTest {
                 Iap2Csm.string(4, "a".repeat(64) + "publickeyhex"),
                 Iap2Csm.string(5, "560.20"),
             )
+        }
+
+        /** 地址参数：真实车机按定长 NUL 填充；默认（不填充）与之前行为一致。 */
+        private fun addressParam(
+            id: Int,
+            value: String,
+            padTo: Int,
+        ): ByteArray {
+            val raw = value.encodeToByteArray()
+            if (!padAddresses) return Iap2Csm.param(id, raw + byteArrayOf(0))
+            // 至少保留一个 NUL 结尾（CSM 字符串语义），其余补到固定宽度
+            val width = maxOf(padTo, raw.size + 1)
+            val padded = raw + ByteArray(width - raw.size)
+            return Iap2Csm.param(id, padded)
         }
 
         private fun send(
