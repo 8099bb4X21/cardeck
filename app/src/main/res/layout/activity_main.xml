@@ -35,7 +35,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="CarPlay 发送端"
+                        android:text="CarDeck"
                         android:textColor="#EDF3F3"
                         android:textSize="21sp"
                         android:textStyle="bold" />
@@ -150,7 +150,7 @@
                         android:layout_gravity="center_horizontal|bottom"
                         android:layout_marginBottom="10dp"
                         android:letterSpacing="0.22"
-                        android:text="CARPLAY"
+                        android:text="CARDECK"
                         android:textColor="#5C6B6B"
                         android:textSize="10sp"
                         android:textStyle="bold" />

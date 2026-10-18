@@ -1,7 +1,15 @@
-# android-carplay — 让荣耀手机扮演 iPhone 直连 CarPlay 车机
+# CarDeck — 让 Android 手机扮演 iPhone 直连车机
 
 让一台普通 Android 手机（未 root）扮演 **CarPlay 发送端（iPhone 角色）**，
-把 app 自绘界面投到奥迪车机的 CarPlay 上。
+把 app 自绘界面投到支持 CarPlay 的车机上。
+
+> **非官方项目**：本项目为个人实验性作品，与 Apple Inc. 及任何汽车制造商均无关联，
+> 未获授权或认证，**不是 MFi 产品**。CarPlay / AirPlay 是 Apple Inc. 的商标，
+> 文中出现仅用于说明兼容目标。
+>
+> **驾驶安全**：仅限停车时配置与操作；行驶中断连可能导致导航中断，请以原厂导航为安全冗余。
+>
+> 完整条款见 [DISCLAIMER.md](DISCLAIMER.md)（与应用内首次启动的免责声明同源）。
 
 ## 结论先行（可行性）
 
@@ -170,9 +178,20 @@ reference/                          # 参考仓库（gitignore，不入库不分
 
 - **产品形态是隐形屏启动器**（受信虚拟屏跑手机应用 + dock 常驻），不是整机镜像；
   车机触摸经 Shizuku 直注虚拟屏（2026-10-10 起桌面/镜像两种模式已移除）。
-- **许可证**：`reference/` 下 xcertplay/DiPlay 为 GPL-3.0、catplay 各 crate许可证见其仓库；
-  本项目为独立实现，仅参考公开协议格式；勿闭源分发对 GPL 代码的衍生品，勿分发固件提取的密钥。
+- **许可证**：本项目源码以 [MIT](LICENSE) 发布。`reference/` 下参考项目
+  （xcertplay/DiPlay 为 GPL-3.0、catplay 各 crate 见其仓库）**已被 `.gitignore` 排除、
+  不随本仓库分发**，其许可义务不适用于本仓库；本项目为独立实现，仅参考公开协议格式。
+  勿分发固件提取的密钥或证书。
 - 真车验证前请先用可借到的 iPhone 与车机做一次正常无线配对留作对照。
+
+## 名称与商标
+
+- 应用名为 **CarDeck**，**不含**任何第三方商标。早期版本曾用「CarPlay 车机投屏」，
+  该名称已弃用——把商标用作产品名属商标性使用，容易被误认为官方产品。
+- 「CarPlay」「AirPlay」是 Apple Inc. 的商标；文中出现仅用于**说明兼容目标**
+  （描述性引用），不表示关联、赞助或认可。
+- 本项目**不使用** Apple 或任何车厂的图形标识、认证标（含 MFi）。
+- 改名不涉及包名（`com.lizhihua.carplaysender`）与仓库名，二者属内部标识/描述性用途。
 
 ## 已知风险（详单见 PROTOCOL-NOTES.md §9）
 

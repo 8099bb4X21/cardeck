@@ -27,11 +27,12 @@ internal object DisclaimerContent {
             Section(
                 title = "这是什么",
                 body =
-                    "本应用是一个非官方的实验性项目：让一台未 root 的 Android 手机扮演 " +
+                    "CarDeck 是一个非官方的实验性项目：让一台未 root 的 Android 手机扮演 " +
                         "CarPlay 发送端（iPhone 角色），把手机上的车机桌面与第三方应用投到" +
                         "支持的接收端上显示，并把接收端触摸回注到手机侧的虚拟屏。\n\n" +
-                        "本项目与 Apple Inc.、任何汽车厂商均无关联，未获得任何授权或认证。" +
-                        "「CarPlay」是 Apple Inc. 的商标，此处仅用于说明兼容目标。",
+                        "本项目与 Apple Inc.、任何汽车厂商均无关联，未获得任何授权或认证，" +
+                        "也不是 MFi 认证产品。「CarPlay」「AirPlay」是 Apple Inc. 的商标，" +
+                        "此处仅用于说明兼容目标，不表示任何关联或背书。",
             ),
             Section(
                 title = "开发中，可能随时出问题",
@@ -88,8 +89,10 @@ internal object DisclaimerContent {
             Section(
                 title = "开源与反馈",
                 body =
-                    "本项目为个人实验性作品，欢迎反馈问题，但不承诺修复时限。由于涉及协议实现" +
-                        "与第三方 ROM 差异，部分问题可能无法解决。",
+                    "本项目为个人实验性作品，以 MIT 许可证开源，欢迎反馈问题，但不承诺修复时限。" +
+                        "由于涉及协议实现与第三方 ROM 差异，部分问题可能无法解决。\n\n" +
+                        "完整条款（非官方声明、商标归属、安全警告、已测试范围）见仓库根目录的 " +
+                        "DISCLAIMER.md，与本页内容同源。",
             ),
         )
 }

@@ -804,7 +804,7 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("CarPlay Sender 日志", text))
+            clipboard.setPrimaryClip(ClipData.newPlainText("CarDeck 日志", text))
             snack("已复制 ${text.length} 字符日志")
         }
 
@@ -858,7 +858,7 @@ class MainActivity : AppCompatActivity() {
         VirtualLauncher.logSink = { line -> log(line) }
         CarInputClient.logSink = { line -> log(line) }
 
-        log("CarPlay Sender Phase 0 就绪")
+        log("CarDeck Phase 0 就绪")
         log("真车：与车机蓝牙配对 + 手机加入车机热点 -> 点「启动连接」（自动主动连入车机）")
         log("测试台：两台手机蓝牙配对 -> 备用机跑 xcertplay 无线模式 -> 点「启动连接」等待回连")
     }
