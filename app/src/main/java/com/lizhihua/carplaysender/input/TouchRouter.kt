@@ -2,7 +2,10 @@ package com.lizhihua.carplaysender.input
 
 import android.content.Context
 import com.lizhihua.carplaysender.input.TouchReports.Contact
+import com.lizhihua.carplaysender.launcher.CardGesture
+import com.lizhihua.carplaysender.launcher.LetterboxHintController
 import com.lizhihua.carplaysender.launcher.VirtualLauncher
+import com.lizhihua.carplaysender.launcher.resolveCardGesture
 import com.lizhihua.carplaysender.launcher.settings.DisplayPrefs
 import com.lizhihua.carplaysender.render.CARD_MARGIN_PX
 import com.lizhihua.carplaysender.shizuku.CarInputClient
@@ -33,6 +36,9 @@ object TouchRouter {
     private var pressed = false
     private var pressedDisplay = -1
     private var failStreak = 0
+
+    /** 叠加卡片手势状态（卡片命中后独占触摸，不再注入应用）。 */
+    private var overlayPressed = false
 
     /**
      * MOVE 注入节流：0 = 关闭；>0 时距上次注入不足该毫秒数的 move
@@ -76,6 +82,25 @@ object TouchRouter {
         if (!contact.down && contact.xPixels == 0 && contact.yPixels == 0) return
         val px = (contact.xPixels * coordScaleX).toInt().coerceAtLeast(0)
         val py = (contact.yPixels * coordScaleY).toInt().coerceAtLeast(0)
+
+        // 叠加卡片（「强制横屏未生效」提示）优先消费触摸：它画在应用区的黑边上，
+        // 必须先于注入判定命中，否则触摸会穿透到下面的应用。
+        run {
+            val visible = LetterboxHintController.isVisible()
+            val hit = visible && LetterboxHintController.contains(px.toFloat(), py.toFloat())
+            when (resolveCardGesture(visible, overlayPressed, contact.down, hit, appGestureActive = pressed)) {
+                CardGesture.NOT_HANDLED -> overlayPressed = false
+                CardGesture.CONSUME -> {
+                    overlayPressed = contact.down
+                    return
+                }
+                CardGesture.TAP -> {
+                    overlayPressed = false
+                    LetterboxHintController.onTap()
+                    return
+                }
+            }
+        }
 
         val launcher = VirtualLauncher
         val dockW = launcher.dockWidthPx
@@ -242,6 +267,7 @@ object TouchRouter {
     fun reset() {
         pressed = false
         pressedDisplay = -1
+        overlayPressed = false
         cancelMapTileTap()
         tapDragSlot = -1
         coordScaleX = 1f

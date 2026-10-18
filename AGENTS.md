@@ -337,6 +337,24 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   **查证方法教训**：gitiles 的 `?format=TEXT` 单文件抓取失败时会返回空/错误页，
   grep 不到不代表不存在——要校验字节数，或直接下 `+archive/.../<dir>.tar.gz`
   整目录再搜（本结论最初就是被一次静默失败的抓取误导成「OEM 定制项」）。
+- **应用先运行、后写入覆盖 → 旧窗口仍 letterbox（需手动重启）**（2026-10-18 真机定谳）：
+  `am compat enable` 确实杀掉进程，但系统恢复任务时 ActivityRecord 可能仍按**旧配置**
+  重建（`displayChangedWithoutRestart=true`），表现为 `overrideOrientation=PORTRAIT`、
+  `isLetterboxRunning=true`、`letterboxReason=FIXED_ORIENTATION`，而
+  `platform_compat` 里该包明明是 `true`。只有 force-stop 后重新 `am start` 才生效
+  （实测重启后同一屏变 `NOSENSOR`、`areBoundsLetterboxed=false`）。
+  **确定性复现（不用跟任务时序碰运气）**：`am compat enable/disable --no-kill ...`
+  写覆盖但不杀进程，此时把应用拉到虚拟屏就是纯净的「旧窗口 + 新覆盖」态。
+  `--no-kill` 走 `setOverridesForTest`，只用于复现/排查，产品路径仍用常规写入。
+  现行处理在 `LetterboxHintController`：事件驱动探测（连接建立/应用启动/地图全屏/重启后）
+  → 解析 `dumpsys activity activities` 的 `bounds=`（内窗）与 `mMaxBounds=`（外框）
+  算黑边 → 黑边够宽才在**左侧**画提示卡（`OverlayCard` 走合成器 2D 纹理层，
+  左侧不够宽退右侧，两侧都放不下就不显示）→ 「强制重启」按钮 force-stop + 原屏重启。
+  **补写自愈**：偏好开着但系统侧覆盖缺失时（会话写入失败/被外部清掉），先补写覆盖
+  并自动把应用拉回原屏（`am compat` 会杀进程，补写后不重启就是把用户打回桌面还不给
+  提示——2026-10-18 头条实测踩到）；重启后仍竖屏才给「仍然竖屏」终态卡。
+  探测必须传 `displayIdHint`（launchApp/地图启动确知的目标屏）：不传时按合成器活动屏
+  推断，而切屏要等目标屏出首帧（最长 2s），探测早于切换完成会看错屏、读空结果。
 - **媒体卡片**：元数据切歌是分阶段的（歌名先到、封面/时长滞后），空结果需短退避重试
   而非固化缓存；播放位置用「锚点 + 速度」外推，UI 每秒自刷新。
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战

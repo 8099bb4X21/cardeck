@@ -3,6 +3,7 @@ package com.lizhihua.carplaysender.launcher
 import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Context
+import android.graphics.RectF
 import android.graphics.drawable.Drawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -200,6 +201,20 @@ object VirtualLauncher {
     @Volatile
     private var mapDisplayH = 0
 
+    /** 原生应用屏逻辑尺寸（letterbox 黑边换算的屏尺寸事实源；创建后不变）。 */
+    @Volatile
+    private var appDisplayW = 0
+
+    @Volatile
+    private var appDisplayH = 0
+
+    /** 超采样应用屏逻辑尺寸（同上）。 */
+    @Volatile
+    private var appHiDisplayW = 0
+
+    @Volatile
+    private var appHiDisplayH = 0
+
     /** 地图屏密度（创建时固定 200dpi，resize 不变——逻辑尺寸随像素缩放）。 */
     private const val MAP_DISPLAY_DPI = 200
 
@@ -277,6 +292,36 @@ object VirtualLauncher {
     /** 当前活动应用屏的坐标倍率（超采样屏=hiScale，原生屏=1）。 */
     fun activeAppScale(): Float = if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) hiScale else 1f
 
+    /** 应用区在输出画面中的矩形（顶部原点）——叠加卡片定位用。 */
+    fun appAreaRect(): RectF? {
+        if (streamWidthPx <= 0 || streamHeightPx <= 0) return null
+        return if (dockAtBottom) {
+            RectF(0f, 0f, streamWidthPx.toFloat(), appHeightPx.toFloat())
+        } else {
+            RectF(dockWidthPx.toFloat(), 0f, streamWidthPx.toFloat(), streamHeightPx.toFloat())
+        }
+    }
+
+    /** 画布 UI 密度**缩放**（dpi/160；与 dock 屏同一基准：420dpi @ 540 短边）。 */
+    fun uiDensity(): Float = ((420f * minOf(streamWidthPx, streamHeightPx) / 540f).coerceIn(120f, 1680f)) / 160f
+
+    /** 指定虚拟屏的逻辑像素尺寸（letterbox 探测缺 mMaxBounds 时的兜底事实源）。 */
+    fun hintDisplaySize(displayId: Int): Pair<Int, Int>? =
+        when (displayId) {
+            appDisplayId -> if (appDisplayW > 0) appDisplayW to appDisplayH else null
+            appHiDisplayId -> if (appHiDisplayW > 0) appHiDisplayW to appHiDisplayH else null
+            mapDisplayId -> if (mapDisplayW > 0) mapDisplayW to mapDisplayH else null
+            else -> null
+        }
+
+    /** 挂/摘合成器上的叠加卡片。 */
+    fun setOverlayCard(card: com.lizhihua.carplaysender.render.OverlayCard?) {
+        composer?.overlayCard = card
+    }
+
+    /** 会话上下文（letterbox 重启后复探要用；未 attach 时为 null）。 */
+    fun appContext(): Context? = appContextRef
+
     /**
      * 挂载：建 GL 合成器 → 就绪回调里建两块虚拟屏 → 拉起 Dock/Grid。
      * [encoderSurface] 为编码器输入 Surface；返回是否全部成功。
@@ -291,6 +336,8 @@ object VirtualLauncher {
         log: (String) -> Unit,
     ): Boolean {
         detach()
+        // 新会话：「本次会话不再提示」等用户级决定作废
+        LetterboxHintController.resetSession()
         val density = densityDpi / 160f
         // dock 条物理宽度 = 48dp × 密度（密度随画布短边等比，见 DOCK_WIDTH_DP 注释）
         val thicknessPx = (DOCK_WIDTH_DP * density).toInt().coerceAtLeast(80)
@@ -459,8 +506,12 @@ object VirtualLauncher {
                     if (dockId >= 0 && appId >= 0) {
                         dockDisplayId = dockId
                         appDisplayId = appId
+                        appDisplayW = appWidth
+                        appDisplayH = appHeightPx
                         if (appHiId >= 0) {
                             appHiDisplayId = appHiId
+                            appHiDisplayW = appHiWidth
+                            appHiDisplayH = appHiHeight
                         } else if (appHiSurface != null) {
                             log("LAUNCHER: 超采样屏创建失败——本次会话全部走原生屏")
                         }
@@ -494,6 +545,9 @@ object VirtualLauncher {
                 // 异步：6 个应用 × 2 次 am compat ≈1.6s，此前同步跑在虚拟屏 attach 里，
                 // 直接推迟首帧（2026-10-18 实测）。
                 AppOrientationCompat.applyAllAsync(context, log)
+                // 覆盖写入是异步的（probe 内部会 awaitPending 等它排空）；
+                // 应用若已在运行且此前被当成竖窗恢复，这里就能发现并给出提示。
+                LetterboxHintController.scheduleProbe(context, "会话建立")
             } else {
                 // 回退：应用侧 PUBLIC 屏（应用内跳转任务会逃逸到手机主屏，尽量可用的降级形态）
                 val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -535,9 +589,13 @@ object VirtualLauncher {
                             null,
                         )
                     appHiDisplayId = appHiDisplay?.display?.displayId ?: -1
+                    appHiDisplayW = appHiWidth
+                    appHiDisplayH = appHiHeight
                 }
                 dockDisplayId = dockDisplay?.display?.displayId ?: -1
                 appDisplayId = appDisplay?.display?.displayId ?: -1
+                appDisplayW = appWidth
+                appDisplayH = appHeightPx
                 log(
                     "LAUNCHER: 三屏创建(回退) dock=$dockDisplayId(${dockWidthPx}px) " +
                         "app=$appDisplayId(${appWidth}x$appHeightPx @${appNativeDensity}dpi) " +
@@ -654,9 +712,15 @@ object VirtualLauncher {
         mapTileHeight = 0
         mapDisplayW = 0
         mapDisplayH = 0
+        appDisplayW = 0
+        appDisplayH = 0
+        appHiDisplayW = 0
+        appHiDisplayH = 0
         appAreaWidth = 0
         appAreaHeight = 0
         mapFullscreen = false
+        // 提示卡片属于会话状态：拆屏时一并清掉（合成器已停，卡片纹理随 GL 上下文销毁）
+        LetterboxHintController.clear()
         if (dashboardMode) {
             dashboardMode = false
             notifyDashboard()
@@ -688,6 +752,8 @@ object VirtualLauncher {
         val grid = if (gridDisplayId >= 0) gridDisplayId else appDisplayId
         val ok = startOn(grid, "com.lizhihua.carplaysender/.launcher.GridActivity")
         composer?.requestActiveApp(appHiDisplayId >= 0 && grid == appHiDisplayId)
+        // 桌面上的提示没有意义（顶层不是第三方应用），直接收起
+        LetterboxHintController.clear()
         if (!ok) Log.w(TAG, "回桌面失败")
         return ok
     }
@@ -779,6 +845,15 @@ object VirtualLauncher {
         )
         notifyMapLayout()
         logSink?.invoke("LAUNCHER: 地图屏 ${if (fullscreen) "全屏" else "分屏"}")
+        // 地图屏 resize 后 letterbox 内外框变了：全屏时重探，分屏 tile 太小不提示
+        if (fullscreen) {
+            appContextRef?.let {
+                // resize 已生效，目标就是地图屏（不必等合成器切布局）
+                LetterboxHintController.scheduleProbe(it, "地图全屏", displayIdHint = mapDisplayId)
+            }
+        } else {
+            LetterboxHintController.clear()
+        }
     }
 
     /**
@@ -843,6 +918,9 @@ object VirtualLauncher {
         if (ok) {
             synchronized(runningApps) { runningApps.add(component) }
             notifyRunningAppsChanged()
+            appContextRef?.let {
+                LetterboxHintController.scheduleProbe(it, "地图启动", displayIdHint = mapDisplayId)
+            }
         }
         return ok
     }
@@ -999,6 +1077,12 @@ object VirtualLauncher {
             }
             // 合成器切到目标屏（超采样屏等其出帧再切；原生屏即时切换）
             composer?.requestActiveApp(targetDisplay == appHiDisplayId)
+            // 应用已在运行、被系统按旧配置带回前台的情况：启动后探测一次是否仍
+            // letterbox（提示卡只对「应用横屏」名单内的应用生效，其它应用不计）
+            val ctx = appContextRef
+            if (ctx != null) {
+                LetterboxHintController.scheduleProbe(ctx, "应用启动", displayIdHint = targetDisplay)
+            }
         } else {
             Log.w(TAG, "启动失败：${result.output.take(120)}")
         }

@@ -348,6 +348,14 @@ object AppOrientationCompat {
     }
 
     /**
+     * 指定包的系统侧覆盖是否真的开着（letterbox 提示的触发前置条件）。
+     *
+     * 光看偏好不够：`am compat` 临时失败时偏好会保留（用户意愿），但系统侧没有覆盖，
+     * 此时提示「强制重启」注定无效。探测只在候选应用上跑一次，成本≈一次 grep。
+     */
+    fun isSystemEnabledFor(pkg: String): Boolean = pkg in systemEnabled()
+
+    /**
      * 清除单个「覆盖键」的系统侧覆盖（两个 ChangeId 都写 disable）。
      * 仅动系统覆盖、**不动偏好**——用于清理「偏好已不在（卸载残留）但覆盖还开着」的条目；
      * 名单内的应用请用 [setEnabled]（会同步偏好，避免 UI 与系统状态脱节）。
@@ -365,6 +373,9 @@ object AppOrientationCompat {
             .filterValues { it == true }
             .keys
             .map { it.removePrefix("force_") }
+
+    /** 「应用横屏」名单（包名集合）：letterbox 提示探测用，只读。 */
+    fun enabledPackages(context: Context): Set<String> = enabledPkgs(context).toSet()
 }
 
 /**

@@ -56,6 +56,27 @@ class DualDisplayComposer(
         private const val EGL_RECORDABLE_ANDROID = 0x3142
 
         private const val TILE_CORNER_RADIUS = 24f
+
+        /** 2D 纹理程序用的单位纹理矩阵（Bitmap 已按目标方向摆好顶点）。 */
+        private val IDENTITY_ST =
+            floatArrayOf(
+                1f,
+                0f,
+                0f,
+                0f,
+                0f,
+                1f,
+                0f,
+                0f,
+                0f,
+                0f,
+                1f,
+                0f,
+                0f,
+                0f,
+                0f,
+                1f,
+            )
     }
 
     private val running = AtomicBoolean(false)
@@ -86,6 +107,26 @@ class DualDisplayComposer(
 
     @Volatile
     private var pendingSince = 0L
+
+    /**
+     * 叠加卡片（输出画面坐标，顶部原点）。由调用方在后台线程生成位图后设置；
+     * GL 线程负责上传纹理并绘制在最上层。触控命中用同一坐标，见 [OverlayCard.contains]。
+     */
+    @Volatile
+    var overlayCard: OverlayCard? = null
+        set(value) {
+            field = value
+            overlayDirty = true
+        }
+
+    @Volatile
+    private var overlayDirty = false
+
+    /** 已上传纹理对应的卡片（仅 GL 线程访问）。 */
+    private var uploadedOverlay: OverlayCard? = null
+
+    /** 叠加卡片纹理（0 = 尚未创建，仅 GL 线程访问）。 */
+    private var overlayTexture = 0
 
     /** 超采样输入（GL 线程创建；start() 返回后对其他线程安全可读）。 */
     @Volatile
@@ -319,6 +360,85 @@ class DualDisplayComposer(
 
         val matrix = FloatArray(16)
 
+        // ---- 叠加卡片着色器（普通 2D 纹理；Bitmap 由 Canvas 预排版）----
+        val overlayProgram = buildProgram(oes = false)
+        val oaPos = GLES20.glGetAttribLocation(overlayProgram, "aPos")
+        val oaTexCoord = GLES20.glGetAttribLocation(overlayProgram, "aTexCoord")
+        val ouSTMatrix = GLES20.glGetUniformLocation(overlayProgram, "uSTMatrix")
+        val ouTexture = GLES20.glGetUniformLocation(overlayProgram, "uTexture")
+
+        /** 上传/更新叠加卡片纹理（仅 GL 线程；卡片引用变化时才重新上传）。 */
+        fun syncOverlayTexture(): OverlayCard? {
+            val card =
+                overlayCard ?: run {
+                    uploadedOverlay = null
+                    return null
+                }
+            if (card === uploadedOverlay && overlayTexture != 0) return card
+            if (overlayTexture == 0) {
+                val tex = IntArray(1)
+                GLES20.glGenTextures(1, tex, 0)
+                overlayTexture = tex[0]
+            }
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTexture)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+            android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, card.bitmap, 0)
+            uploadedOverlay = card
+            return card
+        }
+
+        /**
+         * 绘制叠加卡片。[left]/[top]/[right]/[bottom] 是输出画面坐标（顶部原点），
+         * 这里转成 GL 底部原点；Bitmap 首行在顶部，故纹理 v 轴与顶点方向相反。
+         */
+        fun drawOverlay(
+            card: OverlayCard,
+            left: Float,
+            top: Float,
+            right: Float,
+            bottom: Float,
+        ) {
+            GLES20.glUseProgram(overlayProgram)
+            GLES20.glUniform1i(ouTexture, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTexture)
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+            GLES20.glUniformMatrix4fv(ouSTMatrix, 1, false, IDENTITY_ST, 0)
+
+            fun px(v: Float) = v / outWidth * 2f - 1f
+
+            fun py(v: Float) = v / outHeight * 2f - 1f
+            val yTop = outHeight - top
+            val yBottom = outHeight - bottom
+            val positions =
+                floatBuffer(
+                    px(left),
+                    py(yBottom),
+                    px(right),
+                    py(yBottom),
+                    px(left),
+                    py(yTop),
+                    px(right),
+                    py(yTop),
+                )
+            // Bitmap v=0 在顶部：底部顶点取 v=1，顶部顶点取 v=0
+            val coords = floatBuffer(0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f)
+            GLES20.glVertexAttribPointer(oaPos, 2, GLES20.GL_FLOAT, false, 0, positions)
+            GLES20.glEnableVertexAttribArray(oaPos)
+            GLES20.glVertexAttribPointer(oaTexCoord, 2, GLES20.GL_FLOAT, false, 0, coords)
+            GLES20.glEnableVertexAttribArray(oaTexCoord)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glDisable(GLES20.GL_BLEND)
+            // 恢复主着色器状态（后续帧继续用 OES 程序）
+            GLES20.glUseProgram(program)
+            GLES20.glUniform1i(uTexture, 0)
+        }
+
         /** [u0]/[u1]：横向纹理采样区间（地图分屏时采样缓冲中央带区用）。 */
         fun drawInputUV(
             input: Input,
@@ -501,9 +621,20 @@ class DualDisplayComposer(
                 // dock 最后绘制（最上层）：tile 滑动经过 dock 区域时从其下方穿过
                 if (dock.hasContent) drawInput(dock, 0f, dockW.toFloat(), 0f, outHeight.toFloat())
             }
-            if (fullRedraw || dock.hasContent || app.hasContent || hi?.hasContent == true || map?.hasContent == true) {
+            // 叠加卡片最后绘制（最上层，不受分支影响）：卡片坐标为输出画面坐标（顶部原点）
+            syncOverlayTexture()?.let { card ->
+                drawOverlay(card, card.left, card.top, card.right, card.bottom)
+            }
+            if (fullRedraw ||
+                overlayDirty ||
+                dock.hasContent ||
+                app.hasContent ||
+                hi?.hasContent == true ||
+                map?.hasContent == true
+            ) {
                 EGL14.eglSwapBuffers(display, outputSurface)
             }
+            overlayDirty = false
         }
 
         // 初始黑帧（只清屏，不碰空纹理）+ 交付输入 Surface + 放行 start()
@@ -530,7 +661,8 @@ class DualDisplayComposer(
                 // 持续消费（纹理保持最新，避免 SurfaceTexture 队列积压卡住后台应用），
                 // 但不为看不见的内容白烧 GPU/带宽。
                 val hasNew =
-                    dock.hasNewFrame ||
+                    overlayDirty ||
+                        dock.hasNewFrame ||
                         (if (activeAppHi) appHi else app)?.hasNewFrame == true ||
                         (tileLayout != TileLayout.HIDDEN && mapInput?.hasNewFrame == true)
                 val now = System.currentTimeMillis()
@@ -544,6 +676,10 @@ class DualDisplayComposer(
             }
         } catch (_: InterruptedException) {
         } finally {
+            if (overlayTexture != 0) {
+                runCatching { GLES20.glDeleteTextures(1, intArrayOf(overlayTexture), 0) }
+                overlayTexture = 0
+            }
             runCatching { dock.surface.release() }
             runCatching { app.surface.release() }
             runCatching { dock.surfaceTexture.release() }
