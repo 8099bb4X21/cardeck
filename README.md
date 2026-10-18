@@ -196,7 +196,10 @@ reference/                          # 参考仓库（gitignore，不入库不分
 安装前请确认：
 
 - **Android 14+**（`应用横屏` 功能依赖 SDK 34 起的平台 ChangeId，13 及更早不可用）
-- 已安装并**启动** [Shizuku](https://shizuku.rikka.app/)（无线调试激活，免 root）
+- 已安装并**启动** **Shizuku**（无线调试激活，免 root）——本应用的虚拟屏、触摸注入、
+  窗口状态读取全部经它完成，未就绪时无法连接
+  - 官网（含分步骤激活指南）：https://shizuku.rikka.app/
+  - GitHub（版本与更新说明）：https://github.com/RikkaApps/Shizuku
 - 首次启动会显示免责声明，需滑到底并等待 10 秒后才能接受
 
 > 两个渠道提供的是同一个构建产物（官方 release 密钥签名）。网盘无法自动校验，
