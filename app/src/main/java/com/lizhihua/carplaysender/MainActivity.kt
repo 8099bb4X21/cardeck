@@ -31,6 +31,9 @@ import com.lizhihua.carplaysender.bt.TargetDevicePrefs
 import com.lizhihua.carplaysender.input.TouchRouter
 import com.lizhihua.carplaysender.launcher.VirtualLauncher
 import com.lizhihua.carplaysender.launcher.settings.AppOrientationCompat
+import com.lizhihua.carplaysender.legal.DisclaimerDialog
+import com.lizhihua.carplaysender.legal.DisclaimerPrefs
+import com.lizhihua.carplaysender.legal.needsDisclaimerAtLaunch
 import com.lizhihua.carplaysender.media.MediaListenerService
 import com.lizhihua.carplaysender.service.CarPlayService
 import com.lizhihua.carplaysender.shizuku.CarInputClient
@@ -54,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     /** 连接中的默认副标题（无阶段提示时）。 */
     private companion object {
         const val DEFAULT_CONNECTING_HINT = "蓝牙 iAP2 握手 → 加入车机热点 → 建立 CarPlay 会话"
+        const val KEY_DISCLAIMER_DEADLINE = "disclaimer_deadline"
     }
 
     private lateinit var deviceSubtitle: TextView
@@ -100,6 +104,11 @@ class MainActivity : AppCompatActivity() {
 
     // 英雄卡实时帧率：1s 轮询对 VideoSender 已发帧计数取差值
     private var lastSentFrames = 0L
+
+    /** 免责声明倒计时截止时刻（elapsedRealtime；旋转重建后透传，不重新计时）。 */
+    private var disclaimerDeadlineAt = 0L
+
+    private var activeDisclaimer: androidx.appcompat.app.AlertDialog? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val heroTick: Runnable =
@@ -340,6 +349,8 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        // 旋转/重建：沿用原倒计时截止时刻（onResume 据此续弹）
+        disclaimerDeadlineAt = savedInstanceState?.getLong(KEY_DISCLAIMER_DEADLINE, 0L) ?: 0L
 
         deviceSubtitle = findViewById(R.id.deviceSubtitle)
         shizukuChip = findViewById(R.id.shizukuChip)
@@ -451,6 +462,39 @@ class MainActivity : AppCompatActivity() {
         renderConsole(SessionController.logText())
 
         setUpUiControls()
+
+        // 免责声明：未接受当前版本时强制弹（不可取消、需倒计时 + 滑到底）。
+        // savedState 非空（旋转/重建）时复用原截止时刻，不重新计时。
+        if (savedInstanceState == null &&
+            needsDisclaimerAtLaunch(
+                DisclaimerPrefs.acceptedVersion(this),
+                DisclaimerPrefs.CURRENT_VERSION,
+            )
+        ) {
+            showDisclaimer(requireAcceptance = true)
+        }
+    }
+
+    /** 底部「免责声明」入口：只读重看（不限制时长、不要求滑到底）。 */
+    private fun showDisclaimer(requireAcceptance: Boolean) {
+        if (activeDisclaimer?.isShowing == true) return
+        if (requireAcceptance && disclaimerDeadlineAt == 0L) {
+            disclaimerDeadlineAt = SystemClock.elapsedRealtime() + DisclaimerDialog.COUNTDOWN_MS
+        }
+        activeDisclaimer =
+            DisclaimerDialog
+                .show(
+                    activity = this,
+                    requireAcceptance = requireAcceptance,
+                    deadlineAt = disclaimerDeadlineAt,
+                    onDecline = {
+                        // 放弃使用：结束本任务并退出（不用 System.exit，保留正常生命周期收尾）。
+                        // 若已有会话在跑，先正常断开，避免留下无人管理的推流与虚拟屏。
+                        runCatching { SessionController.disconnect(this) }
+                        finishAndRemoveTask()
+                    },
+                    onDismiss = { activeDisclaimer = null },
+                )
     }
 
     /** onCreate 的 UI 初始化尾部：开关/按钮/折叠卡（会话逻辑不变，仅挂新界面）。 */
@@ -459,6 +503,11 @@ class MainActivity : AppCompatActivity() {
         // 清理旧版本遗留的模式偏好（模式已固定为「隐形屏」启动器）
         if (preferences.contains("mode")) {
             preferences.edit().remove("mode").apply()
+        }
+
+        // ---- 免责声明（只读重看）----
+        findViewById<LinearLayout>(R.id.btnDisclaimer).setOnClickListener {
+            showDisclaimer(requireAcceptance = false)
         }
 
         // ---- 常亮+暗幕 ----
@@ -1806,6 +1855,20 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         mainHandler.post(heroTick)
+        // 旋转/重建后尚未接受：用原截止时刻续弹（不重新等 10 秒）
+        if (needsDisclaimerAtLaunch(
+                DisclaimerPrefs.acceptedVersion(this),
+                DisclaimerPrefs.CURRENT_VERSION,
+            ) &&
+            activeDisclaimer?.isShowing != true
+        ) {
+            showDisclaimer(requireAcceptance = true)
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putLong(KEY_DISCLAIMER_DEADLINE, disclaimerDeadlineAt)
     }
 
     override fun onPause() {
@@ -1815,6 +1878,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // 强制声明不得随 Activity 销毁残留窗口（旋转时 Activity 重建，onResume 会续弹）
+        runCatching { activeDisclaimer?.dismiss() }
+        activeDisclaimer = null
         // 蓝牙扫描/配对监听随界面销毁收尾：Activity 退出后不再需要（也避免广播泄漏）
         runCatching { stopTargetScan() }
         targetPicker = null

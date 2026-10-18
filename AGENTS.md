@@ -355,6 +355,16 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   提示——2026-10-18 头条实测踩到）；重启后仍竖屏才给「仍然竖屏」终态卡。
   探测必须传 `displayIdHint`（launchApp/地图启动确知的目标屏）：不传时按合成器活动屏
   推断，而切屏要等目标屏出首帧（最长 2s），探测早于切换完成会看错屏、读空结果。
+- **免责声明（对外分享的启动门）**：`legal/DisclaimerPrefs.CURRENT_VERSION` 用**版本号**
+  而非布尔记录接受状态——**改 `DisclaimerContent` 文案必须同步 +1**，否则老用户不会重新
+  确认；布尔值只能靠卸载重装才会再弹。强制形态三条约束同时成立才放行「接受」：
+  10 秒倒计时、内容需滚动时已滑到底、（由 UI 保证）未点「放弃使用」；三者是**并列**关系，
+  滑到底不能跳过倒计时。「放弃使用」立即可点（拒绝不该被阻拦）并 `finishAndRemoveTask()`。
+  判定「内容是否可滚动」必须等布局完成（`scroll.height > 0`）：布局未完成时
+  `canScrollVertically` 恒为 false，会被误判成「内容不足一屏」从而永久放行（真机踩到）。
+  倒计时存**绝对截止时刻**（`elapsedRealtime`）经 `onSaveInstanceState` 透传，旋转重建
+  后继续剩余时间而不是重新等 10 秒。强制弹窗 `setCancelable(false)` +
+  `setCanceledOnTouchOutside(false)`；底部菜单入口只读（无倒计时/无滚动要求）。
 - **媒体卡片**：元数据切歌是分阶段的（歌名先到、封面/时长滞后），空结果需短退避重试
   而非固化缓存；播放位置用「锚点 + 速度」外推，UI 每秒自刷新。
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
