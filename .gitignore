@@ -11,3 +11,7 @@ captures/
 reference/
 # ZCode 会话产物
 .zcode/
+# 发布签名（绝不入库：私钥泄露即等于任何人可签发你的更新）
+keystore.properties
+*.jks
+*.keystore

@@ -1,7 +1,36 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+/**
+ * 版本号约定：`MAJOR.MINOR.PATCH`（语义化版本）。
+ *
+ * `versionCode` 由 `versionName` **推导**而不是手填两处——两者不同步是更新失效的
+ * 经典原因（系统只看 versionCode，填小了用户装不上新包，且不会有任何提示）。
+ * 0.x 表示实验性阶段；发布前只需改这一行。
+ */
+val appVersionName = "0.1.0"
+val appVersionCode =
+    appVersionName
+        .split(".")
+        .let { (major, minor, patch) -> major.toInt() * 10_000 + minor.toInt() * 100 + patch.toInt() }
+
+/**
+ * 发布签名配置：从仓库外的 `keystore.properties` 读取（已在 .gitignore 排除）。
+ * 文件缺失时 release 退回 **debug 签名**——这样 fork 者与 CI 无需私钥也能
+ * `assembleRelease` 出可安装的包；正式发布务必配置真实签名。
+ *
+ * 密钥泄露 = 任何人可签发你的更新，因此 keystore 与密码**绝不入库**。
+ */
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps =
+    Properties().apply {
+        if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
+    }
+val hasReleaseKeystore = keystoreProps.getProperty("storeFile") != null
 
 android {
     namespace = "com.lizhihua.carplaysender"
@@ -11,13 +40,34 @@ android {
         applicationId = "com.lizhihua.carplaysender"
         minSdk = 31
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
+    }
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
         release {
+            // **不做代码混淆**：本项目依赖反射（SystemProperties、Shizuku API）与
+            // 自定义 AIDL，R8 需要额外 keep 规则；首版先保证可运行，混淆留待后续。
             isMinifyEnabled = false
+            isShrinkResources = false
+            signingConfig = signingConfigs.getByName(if (hasReleaseKeystore) "release" else "debug")
+        }
+        debug {
+            // **不要加 applicationIdSuffix**：本项目 debug 包就是日常使用的包——
+            // Shizuku 授权是按包名授予的，改包名会要求重新授权；AGENTS.md 里的
+            // `run-as com.lizhihua.carplaysender` 调试链路也会一起失效。
+            versionNameSuffix = "-debug"
         }
     }
 

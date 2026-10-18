@@ -134,21 +134,29 @@ hidSendReport 双槽报文解析（u16LE 像素坐标）→ UI 命中测试。�
 
 ```
 app/src/main/java/com/lizhihua/carplaysender/
-├── MainActivity.kt                 # 操作台 UI（连接/声音/暗幕/日志）
+├── MainActivity.kt                 # 手机侧操作台 UI（连接/声音/暗幕/日志/免责声明入口）
+├── SessionController.kt            # 会话总管（进程级单例）：链路生命周期、配对、WiFi、取消
+├── SenderApp.kt                    # Application（未捕获异常兜底、包变化失效缓存）
 ├── iap2/                           # iAP2 链路层 + CSM + 发送端会话
-├── airplay/                        # AirPlay 配对/控制通道/流协商/流加密
+├── airplay/                        # AirPlay 配对/控制通道/流协商/流加密/Timing
 ├── audio/AudioSender.kt            # 音频通道（播放捕获 → RTP/ChaCha20 over UDP）
 ├── video/VideoSender.kt            # H.264 编码推流
-├── bt/Iap2BluetoothServer.kt       # RFCOMM 监听（测试台等回连）
-├── bt/Iap2BluetoothClient.kt       # RFCOMM 主动连车机（真车路径）
-├── launcher/                       # 隐形屏启动器（dock + 应用网格双虚拟屏）
-├── render/DualDisplayComposer.kt   # EGL 双屏合成 → 编码 Surface
-├── input/TouchRouter.kt            # 触摸分流（dock/应用屏直注）
-├── capture/HiddenDisplaySource.kt  # 隐形屏画面源
-├── shizuku/                        # Shizuku 桥（shell 权限 / 触摸注入 / 受信虚拟屏）
-├── ui/ScreenDimmer.kt              # 常亮+暗幕（替代息屏）
-└── net/                            # WiFi 入网 / mDNS 发现与广播
+├── bt/                             # RFCOMM 双向（Server 等回连 / Client 真车主动连）+ 目标设备
+├── launcher/                       # 隐形屏启动器（dock + 应用网格 + 地图屏；含 letterbox 提示）
+│   └── settings/                   # 设置面板 Fragment（车机双栏与手机二级菜单共用）
+├── render/DualDisplayComposer.kt   # EGL 多屏合成 → 编码 Surface（含叠加卡片层）
+├── input/                          # 触摸分流（dock/应用屏/地图屏直注）+ 消费键
+├── capture/                        # 隐形屏画面源
+├── shizuku/                        # Shizuku 桥（shell 权限 / 触摸注入 / 受信虚拟屏 AIDL）
+├── net/                            # WiFi 入网 / mDNS 发现与 ctrl 广播
+├── media/                          # 通知使用权 → 媒体会话（音乐卡数据源）
+├── service/CarPlayService.kt       # 前台保活服务（连接/投屏 FGS 类型）
+├── transport/                      # 传输层封装
+├── ui/                             # 暗幕、波形图、壁纸、深色弹窗、面板窗口尺寸
+├── legal/                          # 免责声明（内容/接受状态/弹窗）
+└── util/                           # Bg（后台任务池）等工具
 docs/PROTOCOL-NOTES.md              # 协议知识库（分层格式/时序/参考索引）
+docs/CARLIFE-GATEWAY-FEASIBILITY.md # 另一条路线的可行性调研（CarLife 网关）
 reference/                          # 参考仓库（gitignore，不入库不分发）
 ```
 
@@ -173,6 +181,28 @@ reference/                          # 参考仓库（gitignore，不入库不分
 记录在 `app/lint-baseline.xml` 中豁免；**新代码再引入同类问题仍会被拦截**。
 问题实际修复后基线条目自动失效；确认为误报可单独关闭对应 issue id，或评审后重建基线。
 全新克隆后需执行一次 `git config core.hooksPath .githooks` 启用钩子。
+
+## 构建与发布
+
+```bash
+./gradlew :app:assembleDebug      # 日常调试包（app/build/outputs/apk/debug/）
+./gradlew :app:assembleRelease    # 发布包（app/build/outputs/apk/release/）
+./gradlew testDebugUnitTest       # 单元测试
+```
+
+**版本号**：`app/build.gradle.kts` 顶部 `appVersionName` 是唯一来源（语义化版本），
+`versionCode` 由它自动推导（`major*10000 + minor*100 + patch`），避免两处不同步导致
+用户装不上更新却没有任何提示。改版本只改这一行。
+
+**签名**：release 默认退回 **debug 签名**，fork 者无需私钥即可构建安装；
+正式对外分发前请配置真实签名：
+
+1. 复制 `keystore.properties.example` → `keystore.properties`（已 gitignore）；
+2. `keytool -genkeypair -v -keystore cardeck-release.jks -alias cardeck -keyalg RSA -keysize 4096 -validity 10000`；
+3. 填好密码后重新 `assembleRelease`，用 `apksigner verify --print-certs` 确认证书 CN 不是 `Android Debug`。
+
+> ⚠️ 私钥泄露 = 任何人可签发能覆盖安装的更新；私钥丢失 = 已安装用户再也收不到更新
+> （只能让所有人卸载重装）。keystore 与密码绝不入库、绝不外发。
 
 ## 边界
 
