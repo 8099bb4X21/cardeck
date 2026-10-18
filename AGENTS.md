@@ -21,6 +21,39 @@ adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk
 若仍被拒，先 `input keyevent KEYCODE_WAKEUP` 亮屏再装——**熄屏时确认弹窗无人应答会被
 系统自动拒绝**（2026-10-15 实测三次 INSTALL_FAILED_ABORTED，亮屏后即成）。
 
+**卸载应用不会释放虚拟屏**（2026-10-18 实测，比上面更隐蔽）：虚拟屏由 Shizuku 的
+UserService 子进程持有，**父应用卸载后该进程仍存活**，4 块屏（CarPlayDock/App/AppHi/Map）
+继续占位。此时再 `adb install`，确认弹窗仍会落到这些屏上，表现为「安装卡死」，
+而且因为应用已卸载、**无法靠「启动应用自动清理残留」补救**（那条路径需要应用存在）。
+更糟的是每次尝试安装都会新叠一个 `PackageInstallerActivity`（实测堆积 11 个）。
+处置（按顺序）：
+1. `adb shell ps -A -o PID,NAME | grep car_input` 找到 `:<包名后缀>` 的 UserService 进程
+   （名形如 `io.github.shaonialife.cardeck:car_input`，UID 为 shell）；
+2. `adb shell kill <PID>` —— 进程退出，虚拟屏立即全部释放（实测 kill 后
+   `dumpsys display | grep CarPlay` 为空）；
+3. `adb shell am force-stop com.android.packageinstaller` 清掉堆积的安装弹窗；
+4. 再 `adb install`。
+（`adb install --user 0` / `-g` 等参数**绕不过** Honor 的安装确认弹窗，别指望静默安装。）
+残留屏数量与是否为「上次会话遗留」可用 `dumpsys display | grep -oE '"CarPlay[A-Za-z]+", displayId [0-9]+'`
+快速核对。
+
+**发布（GitHub Release）**：
+```bash
+# 1) 改 app/build.gradle.kts 的 appVersionName（versionCode 自动推导）
+# 2) 用正式密钥构建（需仓库根目录有 keystore.properties + .jks，均已 gitignore）
+./gradlew :app:assembleRelease
+# 3) 验证签名的 CN 不是 "Android Debug"（必须是自己的证书，见下）
+$ANDROID_HOME/build-tools/<ver>/apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk
+# 4) 打 tag 并发布（APK 重命名成 CarDeck-<版本>.apk，备注里写 SHA-256 与签名指纹）
+git tag -a v0.1.0 -m "CarDeck 0.1.0"; git push origin v0.1.0
+gh release create v0.1.0 CarDeck-0.1.0.apk --title "..." --notes-file notes.md --latest
+```
+**签名是不可逆决定**：debug 证书签的包一经发出，以后换正式证书时已安装用户必须
+卸载重装（证书不同无法覆盖安装）。所以**首个公开版本就必须用正式 keystore**。
+keystore 与密码只存本地/密码管理器：私钥泄露 = 任何人可签发覆盖安装的更新；
+私钥丢失 = 已安装用户再也收不到更新。证书 SHA-256 指纹写进 Release 备注，
+便于用户核对下载完整性。
+
 **提交**：pre-commit 钩子（`.githooks/pre-commit`，经 `core.hooksPath` 启用；克隆后需
 执行一次 `git config core.hooksPath .githooks`）会自动格式化暂存的 kt/kts 并跑
 `lintDebug`，失败即拦截。存量 lint 问题豁免在 `app/lint-baseline.xml`——新代码引入
