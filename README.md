@@ -182,6 +182,28 @@ reference/                          # 参考仓库（gitignore，不入库不分
 问题实际修复后基线条目自动失效；确认为误报可单独关闭对应 issue id，或评审后重建基线。
 全新克隆后需执行一次 `git config core.hooksPath .githooks` 启用钩子。
 
+## 下载安装
+
+**推荐：GitHub Release**（可直接下载、附 SHA-256 与签名指纹）：
+[Releases](https://github.com/shaonialife/cardeck/releases/latest)
+
+**国内备用：百度网盘**（国内访问 GitHub 慢时用）
+
+> 通过网盘分享的文件：CarDeck
+> 链接: https://pan.baidu.com/s/1RQoDzFBermUobakZ0d0e3Q?pwd=xc5i
+> 提取码: xc5i
+
+安装前请确认：
+
+- **Android 14+**（`应用横屏` 功能依赖 SDK 34 起的平台 ChangeId，13 及更早不可用）
+- 已安装并**启动** [Shizuku](https://shizuku.rikka.app/)（无线调试激活，免 root）
+- 首次启动会显示免责声明，需滑到底并等待 10 秒后才能接受
+
+> 两个渠道提供的是同一个构建产物（官方 release 密钥签名）。网盘无法自动校验，
+> 建议下载后用 `apksigner verify --print-certs <apk>` 核对证书指纹是否与 Release
+> 备注里公布的一致（SHA-256 `9457d04d2709094404a534ba06d7ecbc53cb1406224ec7c53c05a9c67ccc4970`），
+> 不一致就不要安装。
+
 ## 构建与发布
 
 ```bash
