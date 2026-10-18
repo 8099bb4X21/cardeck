@@ -11,12 +11,48 @@ import io.github.shaonialife.cardeck.launcher.VirtualLauncher
  * 通知监听服务：借通知使用权枚举系统活跃媒体会话，向应用提供「正在播放」状态
  * （歌名/歌手/播放中）。音乐卡片（仪表盘）据此渲染与控制。
  *
+ * **为什么必须有通知使用权**：`MediaSessionManager.getActiveSessions()` 在未授权时
+ * 仍会返回会话（所以播放状态拿得到），但 `metadata` 恒为 null——表现为「播放状态在变、
+ * 歌名歌手却始终为空」。这个组合最容易误判成解析 bug，实际是权限没给（2026-10-18 实测）。
+ *
  * 授权路径：系统设置「通知使用权」，或 Shizuku（shell）执行
- * `cmd notification allow_listener <本组件>`（MainActivity 启动时自动尝试）。
+ * `cmd notification allow_listener <本组件>`（见 [NotificationAccess]）。
  */
 class MediaListenerService : NotificationListenerService() {
     companion object {
         fun componentName(context: android.content.Context): ComponentName = ComponentName(context, MediaListenerService::class.java)
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        // 已连上即代表系统认可本应用的通知使用权（此时 metadata 才会可读）。
+        // 两个状态都置位：NotificationAccess 供「是否要再试授权」判断，
+        // MediaSessionsState 供 UI 文案区分「没在播放」与「读不到信息」。
+        NotificationAccess.markGranted()
+        MediaSessionsState.accessGranted = true
+        try {
+            manager.addOnActiveSessionsChangedListener(
+                sessionListener,
+                componentName(this),
+            )
+            MediaSessionsState.resyncHook = { mainHandler.post { refresh() } }
+            update(manager.getActiveSessions(componentName(this)))
+            mainHandler.post(periodicRefresh)
+        } catch (_: SecurityException) {
+            // 通知使用权被撤销：静默（授权后系统会重新绑定本服务）
+            MediaSessionsState.accessGranted = false
+        }
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        MediaSessionsState.accessGranted = false
+    }
+
+    override fun onDestroy() {
+        mainHandler.removeCallbacks(periodicRefresh)
+        runCatching { manager.removeOnActiveSessionsChangedListener(sessionListener) }
+        super.onDestroy()
     }
 
     private val manager by lazy {
@@ -57,27 +93,6 @@ class MediaListenerService : NotificationListenerService() {
         java.util.concurrent.Executors.newSingleThreadExecutor { r ->
             Thread(r, "media-art").apply { isDaemon = true }
         }
-
-    override fun onListenerConnected() {
-        super.onListenerConnected()
-        try {
-            manager.addOnActiveSessionsChangedListener(
-                sessionListener,
-                componentName(this),
-            )
-            MediaSessionsState.resyncHook = { mainHandler.post { refresh() } }
-            update(manager.getActiveSessions(componentName(this)))
-            mainHandler.post(periodicRefresh)
-        } catch (_: SecurityException) {
-            // 通知使用权被撤销：静默（授权后系统会重新绑定本服务）
-        }
-    }
-
-    override fun onDestroy() {
-        mainHandler.removeCallbacks(periodicRefresh)
-        runCatching { manager.removeOnActiveSessionsChangedListener(sessionListener) }
-        super.onDestroy()
-    }
 
     private fun update(controllers: List<android.media.session.MediaController>) {
         controllers.forEach { controller ->
@@ -230,6 +245,16 @@ object MediaSessionsState {
     @Volatile
     var nowPlaying: NowPlaying? = null
         private set
+
+    /**
+     * 通知使用权是否已授予。
+     *
+     * **未授权时 `metadata` 恒为 null**（会话本身仍可见、播放状态照常变化），
+     * 卡片必须据此区分「真的没在播放」与「有播放但读不到信息」，
+     * 否则文案会误导成「媒体信息未连接」。
+     */
+    @Volatile
+    var accessGranted: Boolean = false
 
     private val listeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
 

@@ -404,6 +404,25 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   `setCanceledOnTouchOutside(false)`；底部菜单入口只读（无倒计时/无滚动要求）。
 - **媒体卡片**：元数据切歌是分阶段的（歌名先到、封面/时长滞后），空结果需短退避重试
   而非固化缓存；播放位置用「锚点 + 速度」外推，UI 每秒自刷新。
+- **「音乐在播但卡片显示媒体信息未连接」= 没拿到通知使用权**（2026-10-18 定谳）：
+  `MediaSessionManager.getActiveSessions()` 在**未授权时仍返回会话**——`PlaybackState`
+  正常（`playing=true` 照常翻转），但 `metadata` 恒为 null，于是歌名/歌手全空。
+  这个组合极易误判成 metadata 解析 bug，实际是权限问题（`dumpsys media_session`
+  里能看到完整 `metadata: description=歌名, 歌手`，我们却读到 null，就是判据）。
+  授权要点（`media/NotificationAccess`）：
+  - **不能只在 onCreate 试一次**：那次若 Shizuku 未就绪就永久跳过（手机重启后
+    Shizuku 未运行、或改包名后首次启动尚未授权 Shizuku），用户只会看到空卡片。
+    现在三个时机都补（幂等，已授权直接返回）：App 启动、Shizuku 授权成功、
+    **会话建立后**（`VirtualLauncher.attach`，此时 Shizuku 必然可用）。
+  - **`cmd notification allow_listener` 的 exitCode 不可作判据**，且**立即复核也不可靠**：
+    settings 写入有延迟，实测命令成功（结果=0）后马上读仍是旧值。必须短重试
+    （4 次 × 250ms）确认，否则会误报「未授予」。
+  - 判定「是否已授权」要**按条目精确比对** `enabled_notification_listeners`
+    的 `:` 分隔列表，不能用 `contains(包名)`——旧包名/同前缀应用的条目会造成误判。
+  - 改包名后 Shizuku 侧授权状态需要**重启 Shizuku 服务**才干净（实测：新包反复
+    点「请求授权」无响应，在 Shizuku 里「停止」再「启动」后一次成功）。
+  - 卡片文案要区分三种空：授权缺失（显示「未授予通知使用权」）、有会话但暂停、
+    完全无会话（后两者都是「未在播放」）。
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
   32B/20B、0x4301 有无、ctrl 邀请死锁等），细节见 `docs/PROTOCOL-NOTES.md` §9，
   改协议代码前先对照。

@@ -12,6 +12,7 @@ import android.util.Log
 import android.view.Surface
 import io.github.shaonialife.cardeck.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
+import io.github.shaonialife.cardeck.media.NotificationAccess
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.render.DualDisplayComposer
 import io.github.shaonialife.cardeck.render.OverlayCard
@@ -546,6 +547,12 @@ object VirtualLauncher {
                 // 异步：6 个应用 × 2 次 am compat ≈1.6s，此前同步跑在虚拟屏 attach 里，
                 // 直接推迟首帧（2026-10-18 实测）。
                 AppOrientationCompat.applyAllAsync(context, log)
+                // 音乐卡数据源前置：会话建立是「Shizuku 一定可用」的可靠时机，
+                // 补一次通知使用权（幂等；已授权直接返回）。
+                // 覆盖「App 启动时 Shizuku 未就绪、之后才就绪」的整条路径。
+                Bg.run("notification-access-session") {
+                    NotificationAccess.ensureGranted(context.applicationContext, log)
+                }
                 // 覆盖写入是异步的（probe 内部会 awaitPending 等它排空）；
                 // 应用若已在运行且此前被当成竖窗恢复，这里就能发现并给出提示。
                 LetterboxHintController.scheduleProbe(context, "会话建立")

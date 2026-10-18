@@ -194,14 +194,32 @@ class GridActivity : AppCompatActivity() {
         }
     }
 
-    /** 音乐卡渲染：封面/标题/歌手/进度/播放暂停按钮（播放中=暂停图标，暂停=播放图标）。 */
+    /**
+     * 音乐卡渲染：封面/标题/歌手/进度/播放暂停按钮（播放中=暂停图标，暂停=播放图标）。
+     *
+     * 文案要区分三种「没有歌名」的成因，否则会误导：
+     *  1. 有会话在播、但**没拿到通知使用权** → metadata 恒为 null（会话与播放状态
+     *     仍然可见）。此时显示「未授予通知使用权」并提示去哪里开；
+     *  2. 有会话但暂停/无元数据 → 「未在播放」；
+     *  3. 完全没有会话 → 同样「未在播放」。
+     */
     private fun renderMediaCard() {
         val panel = dashboardView ?: return
         val now = MediaSessionsState.nowPlaying
+        val title = now?.title?.takeIf { it.isNotBlank() }
+        val artist = now?.artist?.takeIf { it.isNotBlank() }
+        // 有会话但读不到任何元数据 + 未授权 → 权限问题，不是「没在播放」
+        val missingDueToPermission =
+            now != null && title == null && !MediaSessionsState.accessGranted
         panel.findViewById<TextView>(R.id.dashMediaTitle).text =
-            now?.title?.takeIf { it.isNotBlank() } ?: "未在播放"
+            title ?: if (missingDueToPermission) "无法读取播放信息" else "未在播放"
         panel.findViewById<TextView>(R.id.dashMediaArtist).text =
-            now?.artist?.takeIf { it.isNotBlank() } ?: "媒体信息未连接"
+            artist
+                ?: if (missingDueToPermission) {
+                    "未授予「通知使用权」——请在系统设置中开启"
+                } else {
+                    ""
+                }
         panel.findViewById<ImageView>(R.id.dashPlayPause).setImageResource(
             if (now?.playing == true) R.drawable.ic_media_pause else R.drawable.ic_media_play,
         )

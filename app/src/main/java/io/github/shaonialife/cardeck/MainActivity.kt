@@ -34,7 +34,7 @@ import io.github.shaonialife.cardeck.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.cardeck.legal.DisclaimerDialog
 import io.github.shaonialife.cardeck.legal.DisclaimerPrefs
 import io.github.shaonialife.cardeck.legal.needsDisclaimerAtLaunch
-import io.github.shaonialife.cardeck.media.MediaListenerService
+import io.github.shaonialife.cardeck.media.NotificationAccess
 import io.github.shaonialife.cardeck.service.CarPlayService
 import io.github.shaonialife.cardeck.shizuku.CarInputClient
 import io.github.shaonialife.cardeck.shizuku.Shell
@@ -345,9 +345,31 @@ class MainActivity : AppCompatActivity() {
      * 未就绪时连接会走到「蓝牙已连、车机黑屏 + 触摸全丢」的半残状态，比直接拦住更糟。
      * 未就绪时按三态给出对应的可操作引导（装 / 启动 / 授权）。
      */
+
+    /**
+     * 静默补授予通知使用权（幂等；后台线程）。
+     *
+     * **不能只在 onCreate 试一次**：那次如果 Shizuku 未就绪就会永久跳过，
+     * 用户看到的是「音乐在播、卡片却显示媒体信息未连接」——未授权时
+     * `getActiveSessions()` 仍返回会话（播放状态正常）但 `metadata` 恒为 null。
+     * 因此在每个「Shizuku 确认就绪」的时机都补调一次；已授权时内部直接返回，
+     * 不产生额外 shell 往返。
+     */
+    private fun ensureNotificationAccessAsync() {
+        Bg.run("notification-access") {
+            if (ShizukuGate.state(this) != ShizukuGate.State.READY) {
+                log("MEDIA: Shizuku 未就绪——暂无法自动授予通知使用权（就绪后会补）")
+                return@run
+            }
+            NotificationAccess.ensureGranted(this, ::log)
+        }
+    }
+
     private fun ensureShizukuReady(onReady: () -> Unit) {
         val state = ShizukuGate.state(this)
         if (state == ShizukuGate.State.READY) {
+            // Shizuku 就绪即可静默补授权（此前若因未就绪而跳过，这里补上）
+            ensureNotificationAccessAsync()
             onReady()
             return
         }
@@ -538,6 +560,11 @@ class MainActivity : AppCompatActivity() {
                         log("SHIZUKU: 授权结果 granted=$granted")
                         updateReadyRow()
                         updateShizukuChip()
+                        if (granted) {
+                            // Shizuku 刚就绪：补一次通知使用权（改包名/重启后首次授权
+                            // 的典型场景——onCreate 那次因未就绪已跳过）
+                            ensureNotificationAccessAsync()
+                        }
                         if (granted && pendingShizukuThenConnect) {
                             pendingShizukuThenConnect = false
                             ensureShizukuReady { showAudioChoiceDialog() }
@@ -814,29 +841,10 @@ class MainActivity : AppCompatActivity() {
             permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
         }
 
-        // 通知使用权（媒体会话枚举，音乐卡数据源）：Shizuku 在场时静默授权
-        Bg.run("notif-listener-grant") {
-            if (ShizukuGate
-                    .state(this) ==
-                ShizukuGate.State.READY
-            ) {
-                val result =
-                    Shell.exec(
-                        "cmd notification allow_listener " +
-                            MediaListenerService
-                                .componentName(this)
-                                .flattenToString(),
-                        timeoutMs = 4000,
-                    )
-                log(
-                    if (result.ok) {
-                        "MEDIA: 通知使用权已授予（音乐卡可显示歌名/播放状态）"
-                    } else {
-                        "MEDIA: 通知使用权授予失败——音乐卡无歌名，可在系统设置手动开「通知使用权」"
-                    },
-                )
-            }
-        }
+        // 通知使用权（媒体会话枚举，音乐卡数据源）：Shizuku 就绪时可静默授予。
+        // 幂等可重试——启动时不一定就绪（重启后 Shizuku 未运行、改包名后未授权），
+        // 所以 Shizuku 授权成功、连接建立等时机都会再调一次。
+        ensureNotificationAccessAsync()
 
         // ---- 车机设置（手机侧二级菜单：桌面/横屏/超采样/dock/默认地图） ----
         findViewById<LinearLayout>(R.id.btnCarSettings).setOnClickListener {
