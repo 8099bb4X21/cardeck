@@ -276,7 +276,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 启动连接的前置检查：蓝牙权限 → 蓝牙开关。
+     * 启动连接的前置检查：蓝牙权限 → 蓝牙开关 → WLAN 位置权限（仅 Android 12/12L）。
      * 任一不满足都弹窗引导（蓝牙关闭时可一键跳系统蓝牙设置），通过后回调继续。
      */
     private fun ensureBluetoothReady(onReady: () -> Unit) {
@@ -288,36 +288,102 @@ class MainActivity : AppCompatActivity() {
             permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
             return
         }
-        val on =
+        ensureWifiLocationReady {
+            val on =
+                try {
+                    (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
+                        .adapter
+                        ?.isEnabled == true
+                } catch (_: SecurityException) {
+                    true
+                }
+            if (!on) {
+                DarkMessageDialog.show(
+                    activity = this,
+                    title = "蓝牙未开启",
+                    message = "与车机的无线配对通信依赖蓝牙。请先开启手机蓝牙，并确认已与车机配对。",
+                    actions =
+                        listOf(
+                            DarkMessageDialog.Action("取消") {},
+                            DarkMessageDialog.Action("去开启蓝牙", DarkMessageDialog.Emphasis.PRIMARY) {
+                                runCatching {
+                                    startActivity(
+                                        android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS),
+                                    )
+                                }.onFailure { log("BT: 无法打开蓝牙设置，请手动开启") }
+                            },
+                        ),
+                )
+                log("BT: 蓝牙未开启——本次连接未发起")
+                return@ensureWifiLocationReady
+            }
+            onReady()
+        }
+    }
+
+    /**
+     * 应用专属网络（WifiNetworkSpecifier）在 Android 12/12L 需要位置权限与位置服务；
+     * 13+ 由 NEARBY_WIFI_DEVICES 接管、不再要求定位。缺权限时系统会直接
+     * `requestNetwork` 失败（表现为「未能加入车机热点」，很难自查），因此前置拦截。
+     */
+    private fun ensureWifiLocationReady(onReady: () -> Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            onReady()
+            return
+        }
+        val granted =
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            pendingStartAfterLocationPermission.set(true)
+            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+            return
+        }
+        val locationOn =
             try {
-                (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
-                    .adapter
-                    ?.isEnabled == true
-            } catch (_: SecurityException) {
+                androidx.core.location.LocationManagerCompat
+                    .isLocationEnabled(getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager)
+            } catch (_: Exception) {
                 true
             }
-        if (!on) {
+        if (!locationOn) {
             DarkMessageDialog.show(
                 activity = this,
-                title = "蓝牙未开启",
-                message = "与车机的无线配对通信依赖蓝牙。请先开启手机蓝牙，并确认已与车机配对。",
+                title = "需要开启位置服务",
+                message =
+                    "Android 12 加入车机热点（应用专属 WiFi）要求位置服务开启——系统用它判定" +
+                        "可连接的 WiFi，不会记录你的位置。\n\n请打开位置服务后重试；也可以到" +
+                        "WLAN 设置手动连接热点。",
                 actions =
                     listOf(
                         DarkMessageDialog.Action("取消") {},
-                        DarkMessageDialog.Action("去开启蓝牙", DarkMessageDialog.Emphasis.PRIMARY) {
+                        DarkMessageDialog.Action("去开启", DarkMessageDialog.Emphasis.PRIMARY) {
                             runCatching {
                                 startActivity(
-                                    android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS),
+                                    android.content.Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS),
                                 )
-                            }.onFailure { log("BT: 无法打开蓝牙设置，请手动开启") }
+                            }.onFailure { log("WIFI: 无法打开位置服务设置，请手动开启") }
                         },
                     ),
             )
-            log("BT: 蓝牙未开启——本次连接未发起")
+            log("WIFI: 位置服务未开启——Android 12 下应用专属网络不可用，本次连接未发起")
             return
         }
         onReady()
     }
+
+    /** 位置权限授权后自动继续启动连接（仅 Android 12/12L）。 */
+    private val pendingStartAfterLocationPermission =
+        java.util.concurrent.atomic
+            .AtomicBoolean(false)
+
+    private val locationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            log("ACCESS_FINE_LOCATION 授权: $granted")
+            if (granted && pendingStartAfterLocationPermission.compareAndSet(true, false)) {
+                ensureShizukuReady { showAudioChoiceDialog() }
+            }
+        }
 
     /**
      * 「断开连接」确认弹窗（防误触）：断开会立即中断车机画面，

@@ -20,6 +20,7 @@ import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
 import io.github.shaonialife.cardeck.net.CarPlayCtrlAdvertiser
 import io.github.shaonialife.cardeck.net.CarPlayServiceBrowser
 import io.github.shaonialife.cardeck.net.WifiCarPlayConnector
+import io.github.shaonialife.cardeck.net.WifiSavedNetworks
 import io.github.shaonialife.cardeck.service.CarPlayService
 import io.github.shaonialife.cardeck.shizuku.Shell
 import io.github.shaonialife.cardeck.shizuku.ShizukuGate
@@ -92,6 +93,12 @@ object SessionController {
      */
     private const val WIFI_BIND_WAIT_S = 15L
 
+    /**
+     * 等用户确认「连接车机热点」系统弹窗的上限（应用专属网络）。
+     * 系统确认框可能停留很久；用户取消连接时 [connectCancelled] 会即时退出。
+     */
+    private const val SPECIFIER_JOIN_TIMEOUT_MS = 120_000L
+
     /** Activity onCreate 时调用：登记 applicationContext 并创建会话对象（幂等）。 */
     fun ensure(context: Context) {
         appContext = context.applicationContext
@@ -157,6 +164,11 @@ object SessionController {
      */
     @Volatile
     private var boundCarSsid: String? = null
+
+    /** 本次进程内已就「是否清除系统保存热点」询问过的 SSID（避免重试时重复弹窗）。 */
+    private val forgetPromptHandled =
+        java.util.concurrent.ConcurrentHashMap
+            .newKeySet<String>()
 
     /** WiFi 绑定互斥：auto-join 与端点交接两条路径可能同时绑定同一热点。 */
     private val wifiBindLock = Any()
@@ -273,7 +285,17 @@ object SessionController {
         if (bluetoothServer != null) return
         synchronized(this) {
             if (bluetoothServer != null) return
-            wifiConnector = WifiCarPlayConnector(context) { line -> appendLog(line) }
+            wifiConnector =
+                WifiCarPlayConnector(context) { line -> appendLog(line) }.also { connector ->
+                    // 应用专属网络被系统断开（车机熄火/离开范围）：明确告知用户，
+                    // 而不是让英雄卡在「已连接」与失败之间静默摇摆
+                    connector.onNetworkLost = { ssid ->
+                        boundCarSsid = null
+                        phaseHint = "车机热点已断开（$ssid）"
+                        uiHintSink?.invoke("车机热点 \"$ssid\" 已断开——请重新启动连接")
+                        appendLog(">>> 车机热点 \"$ssid\" 已断开——本次会话需重新连接")
+                    }
+                }
             val wifiCredentialHook: (Iap2SenderSession.WifiConfiguration) -> Unit =
                 { wifi -> onWifiCredentials(wifi) }
             // 目标车机动态读取：选择后下一轮连接尝试/下一次连入即生效，无需重启链路
@@ -490,13 +512,260 @@ object SessionController {
      * Shizuku 未就绪/连接失败时回退「系统 WLAN 手动加入」指引（密码可经「去连接」复制）。
      */
     private fun autoJoinCarWifi(wifi: Iap2SenderSession.WifiConfiguration) {
-        val ctx = appContext
-        val shizukuReady =
-            ctx != null &&
-                ShizukuGate
-                    .state(ctx) ==
-                ShizukuGate.State.READY
-        if (!shizukuReady) {
+        Bg.run("wifi-auto-join") {
+            val shellReady =
+                appContext?.let { ShizukuGate.state(it) == ShizukuGate.State.READY } == true
+            // 1) WLAN 开关。shell 不可用时跳过检查——requestNetwork 会以 Unavailable 反馈。
+            if (shellReady && shellWifiDisabled() && !waitForWifiEnabled()) return@run
+            if (connectCancelled) return@run
+            // 2) 首选应用专属网络（不影响 4G/5G、不会被系统切回、不需要 Shizuku）
+            when (val result = joinCarWifiSpecifier(wifi, shellReady)) {
+                is WifiCarPlayConnector.JoinResult.Joined -> Unit
+
+                WifiCarPlayConnector.JoinResult.Unsupported -> {
+                    appendLog("WIFI: 热点安全类型 ${wifi.securityType} 无法用应用专属网络表达——退回系统级加入")
+                    legacyJoinCarWifi(wifi, shellReady)
+                }
+
+                WifiCarPlayConnector.JoinResult.Unavailable -> promptSpecifierFailed(wifi, shellReady)
+            }
+        }
+    }
+
+    /**
+     * 用应用专属网络（`WifiNetworkSpecifier`）加入车机热点，成功后进程网络已绑定。
+     *
+     * 先清掉系统里保存的同名热点：旧版本用 `cmd wifi connect-network` 存过它，
+     * 只要还在系统配置里，系统就会自动全局连接——无互联网热点于是被当成默认网络，
+     * 部分 ROM 连带断掉移动数据，正是本次要解决的场景。
+     */
+    private fun joinCarWifiSpecifier(
+        wifi: Iap2SenderSession.WifiConfiguration,
+        shellReady: Boolean,
+    ): WifiCarPlayConnector.JoinResult {
+        val connector = wifiConnector ?: return WifiCarPlayConnector.JoinResult.Unavailable
+        // 已保存到系统配置里才询问是否清除：不擅自删用户网络（有的场景就是要用
+        // 车机流量/互联网，或用户希望系统自动连）。选择保留不影响本轮连接。
+        if (shellReady) {
+            promptForgetSavedNetworkIfAny(wifi.ssid)
+            if (connectCancelled) return WifiCarPlayConnector.JoinResult.Unavailable
+        }
+        phaseHint = "正在加入车机热点 ${wifi.ssid}…（不影响移动数据）"
+        appendLog(
+            ">>> 以应用专属网络加入 \"${wifi.ssid}\"（不保存为系统 WiFi，其它应用继续走 4G/5G）",
+        )
+        val result =
+            synchronized(wifiBindLock) {
+                val existing = connector.currentNetwork
+                if (boundCarSsid == wifi.ssid && existing != null) {
+                    appendLog("WIFI: 应用专属网络已在位——跳过重复加入")
+                    WifiCarPlayConnector.JoinResult.Joined(existing)
+                } else {
+                    connector.joinCarPlayNetwork(
+                        ssid = wifi.ssid,
+                        passphrase = wifi.passphrase,
+                        securityType = wifi.securityType,
+                        timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
+                        isCancelled = { connectCancelled },
+                    )
+                }
+            }
+        if (result is WifiCarPlayConnector.JoinResult.Joined) {
+            boundCarSsid = wifi.ssid
+            phaseHint = "已加入车机热点"
+            // 关键时机：bindProcessToNetwork 完成后再注册，车机才能看到 ctrl 广播
+            ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true, network = connector.currentNetwork)
+            appendLog(">>> WiFi 已加入车机热点（应用专属网络），ctrl 广播已重新注册，等待车机 ctrl 邀请")
+        } else if (!connectCancelled) {
+            appendLog("WIFI: 应用专属网络加入未成功（${result.javaClass.simpleName}）")
+        }
+        return result
+    }
+
+    /**
+     * 系统里已保存同名热点时，询问用户是否清除（**不擅自删除**）。
+     *
+     * 为什么要问而不是直接删：保留也有正当用途——用户可能就想让系统自动连车机、
+     * 或车机热点确实带互联网（部分车型提供流量）。删除只影响「系统会不会全局
+     * 自动连它」，与本轮连接无关；选择「保留」时继续正常连接。
+     *
+     * 每个 SSID 每个进程只问一次：配对失败重试、端点交接重入都会再次走到这里，
+     * 重复弹窗会挡住连接（2026-10-18 实测）。用户的选择在本次进程内记忆。
+     *
+     * 阻塞直到用户选择（[JOIN_DIALOG_TIMEOUT_S] 超时按「保留」处理——不做破坏性动作）。
+     */
+    private fun promptForgetSavedNetworkIfAny(ssid: String) {
+        if (!forgetPromptHandled.add(ssid)) return
+        val ids = savedNetworkIds(ssid)
+        if (ids.isEmpty()) return
+        appendLog(
+            "WIFI: 系统里已保存热点 \"$ssid\"（netId=${ids.joinToString(",")}）" +
+                "——询问用户是否清除（保留也能正常连接）",
+        )
+        val forget =
+            askWifiJoinChoice(
+                DialogSpec(
+                    title = "已保存该车机热点",
+                    message =
+                        "系统里保存过 \"$ssid\"。保留会让手机在进入范围时自动连接它，" +
+                            "若该热点没有互联网，可能导致手机无法使用移动数据。\n\n" +
+                            "「清除」只是不再自动连接，不影响本次使用；" +
+                            "如果车机热点本身提供网络，选「保留」。",
+                    positive = "清除保存",
+                    negative = "保留",
+                ),
+            )
+        if (connectCancelled) return
+        when (forget) {
+            true -> {
+                ids.forEach { id ->
+                    val result = Shell.exec("cmd wifi forget-network $id", 5_000L)
+                    appendLog(
+                        "WIFI: 已按用户选择清除系统级保存的热点 \"$ssid\"（netId=$id ok=${result.ok}）",
+                    )
+                }
+            }
+
+            false -> appendLog("WIFI: 用户选择保留系统保存的 \"$ssid\"——继续以应用专属网络连接")
+
+            // 无人应答（UI 不在前台）：按「保留」处理，绝不在用户未确认时删网络
+            null -> appendLog("WIFI: 无人应答是否清除保存的网络——按保留处理（不改用户配置）")
+        }
+    }
+
+    /** 查系统已保存的、SSID 与目标完全一致的网络 id（`cmd wifi list-networks`）。 */
+    private fun savedNetworkIds(ssid: String): List<Int> {
+        val listing = Shell.exec("cmd wifi list-networks", 5_000L)
+        if (!listing.ok) {
+            appendLog("WIFI: 无法读取系统已保存网络（exit=${listing.exitCode}）——跳过检查")
+            return emptyList()
+        }
+        return WifiSavedNetworks.idsOf(listing.output, ssid)
+    }
+
+    /** WiFi 未开启时的引导与等待；true = 已开启可继续。 */
+    private fun waitForWifiEnabled(): Boolean {
+        val open =
+            askWifiJoinChoice(
+                DialogSpec(
+                    title = "WiFi 未开启",
+                    message = "连接车机热点需要打开手机 WLAN。是否打开 WLAN 设置？",
+                    positive = "打开 WLAN 设置",
+                    negative = "取消",
+                ),
+            )
+        if (connectCancelled) return false
+        when (open) {
+            true -> {
+                openWlanSettings()
+                uiHintSink?.invoke("请在 WLAN 设置中打开 WiFi 开关")
+            }
+
+            false -> {
+                phaseHint = "已取消——连接车机热点需要开启 WLAN"
+                appendLog("WIFI: 用户取消——自动加入中止（WiFi 未开启）")
+                return false
+            }
+
+            null -> {
+                phaseHint = "WiFi 未开启——连接车机热点需要开启 WLAN"
+                appendLog("WIFI: 弹窗无人应答——自动加入中止（WiFi 未开启）")
+                return false
+            }
+        }
+        var waited = 0
+        while (shellWifiDisabled() && waited < WLAN_WAIT_TIMEOUT_MS && !connectCancelled) {
+            if (waited == 0) {
+                phaseHint = "等待打开 WLAN（最长 120 秒，取消连接可中止）"
+                appendLog("WIFI: 等待用户打开 WLAN（最长 120 秒，取消连接可中止）")
+            }
+            Thread.sleep(2_000)
+            waited += 2_000
+        }
+        if (connectCancelled) {
+            phaseHint = "已取消连接"
+            return false
+        }
+        if (shellWifiDisabled()) {
+            phaseHint = "WiFi 未开启——无法连接车机热点"
+            appendLog("WIFI: 等待超时 WiFi 仍未开启——自动加入中止，请打开 WLAN 后重新连接")
+            return false
+        }
+        return true
+    }
+
+    /** 应用专属网络被系统拒绝/超时：让用户重试或转手动连接。 */
+    private fun promptSpecifierFailed(
+        wifi: Iap2SenderSession.WifiConfiguration,
+        shellReady: Boolean,
+    ) {
+        if (connectCancelled) return
+        val choice =
+            askWifiJoinChoice(
+                DialogSpec(
+                    title = "未能加入车机热点",
+                    message =
+                        "系统没有允许加入 \"${wifi.ssid}\"（可能点了拒绝，或热点不在范围内）。\n\n" +
+                            "「重试」会再次弹出系统确认框。也可以到 WLAN 设置手动连接——" +
+                            "手动连接会把热点保存为系统网络，可能影响移动数据。",
+                    positive = "重试",
+                    negative = "打开 WLAN 设置",
+                ),
+            )
+        if (connectCancelled) return
+        when (choice) {
+            true -> {
+                when (val retry = joinCarWifiSpecifier(wifi, shellReady)) {
+                    is WifiCarPlayConnector.JoinResult.Joined -> Unit
+                    WifiCarPlayConnector.JoinResult.Unsupported -> legacyJoinCarWifi(wifi, shellReady)
+                    WifiCarPlayConnector.JoinResult.Unavailable -> {
+                        phaseHint = "未能加入车机热点——请到 WLAN 设置手动连接"
+                        appendLog("WIFI: 重试仍未加入 \"${wifi.ssid}\"——请到系统 WLAN 手动连接")
+                    }
+                }
+            }
+
+            false -> manualJoinCarWifi(wifi)
+
+            null -> {
+                phaseHint = "未能加入车机热点——请重新连接"
+                appendLog("WIFI: 弹窗无人应答——自动加入中止")
+            }
+        }
+    }
+
+    /** 手动兜底：密码进剪贴板 + 跳 WLAN 设置，轮询用户是否连上。 */
+    private fun manualJoinCarWifi(wifi: Iap2SenderSession.WifiConfiguration) {
+        copyHotspotPsk(wifi.passphrase)
+        openWlanSettings()
+        phaseHint = "请在 WLAN 设置中连接 ${wifi.ssid}…"
+        appendLog(
+            "WIFI: 用户选择手动连接——等待 WLAN 连上 \"${wifi.ssid}\"（最长 120 秒）；" +
+                "注意：手动连接会把该热点保存为系统网络，若它没有互联网可能影响移动数据",
+        )
+        val manualDeadline = android.os.SystemClock.uptimeMillis() + WLAN_WAIT_TIMEOUT_MS
+        while (android.os.SystemClock.uptimeMillis() < manualDeadline) {
+            if (connectCancelled) return
+            Thread.sleep(5_000)
+            if (shellWifiStatus().second == wifi.ssid) {
+                bindCarWifiAndRegister(wifi.ssid)
+                return
+            }
+        }
+        phaseHint = "尚未连接 ${wifi.ssid}——自动加入已中止"
+        appendLog("WIFI: 手动连接等待超时——自动加入中止")
+    }
+
+    /**
+     * 旧路径（WEP 等 specifier 无法表达的安全类型）：`cmd wifi connect-network`
+     * 系统级保存并切换。注意这会保存热点为系统网络——无互联网时可能影响移动数据，
+     * 只作为兼容兜底。
+     */
+    private fun legacyJoinCarWifi(
+        wifi: Iap2SenderSession.WifiConfiguration,
+        shellReady: Boolean,
+    ) {
+        if (!shellReady) {
             phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${wifi.ssid}"
             appendLog(
                 ">>> 手机不在车机热点 \"${wifi.ssid}\" 且 Shizuku 未就绪（无法自动加入）——" +
@@ -504,152 +773,80 @@ object SessionController {
             )
             return
         }
-        Bg.run("wifi-auto-join") {
-            // WiFi 未开启：弹窗让用户「打开 WLAN 设置」（去系统页开开关）或「取消」；
-            // 选打开后等待开启（最长 120 秒，期间轮询开关状态，可取消）
-            if (shellWifiDisabled()) {
-                // 弹窗语义：positive「打开 WLAN 设置」→ 跳系统页开开关并等待；
-                // negative「取消」/无人应答 → 中止自动加入
-                val open =
-                    askWifiJoinChoice(
-                        DialogSpec(
-                            title = "WiFi 未开启",
-                            message = "连接车机热点需要打开手机 WLAN。是否打开 WLAN 设置？",
-                            positive = "打开 WLAN 设置",
-                            negative = "取消",
-                        ),
-                    )
-                if (connectCancelled) return@run
-                when (open) {
-                    true -> {
-                        openWlanSettings()
-                        uiHintSink?.invoke("请在 WLAN 设置中打开 WiFi 开关")
-                    }
-
-                    false -> {
-                        phaseHint = "已取消——连接车机热点需要开启 WLAN"
-                        appendLog("WIFI: 用户取消——自动加入中止（WiFi 未开启）")
-                        return@run
-                    }
-
-                    null -> {
-                        phaseHint = "WiFi 未开启——连接车机热点需要开启 WLAN"
-                        appendLog("WIFI: 弹窗无人应答——自动加入中止（WiFi 未开启）")
-                        return@run
-                    }
-                }
-                var waited = 0
-                while (shellWifiDisabled() && waited < WLAN_WAIT_TIMEOUT_MS && !connectCancelled) {
-                    if (waited == 0) {
-                        phaseHint = "等待打开 WLAN（最长 120 秒，取消连接可中止）"
-                        appendLog("WIFI: 等待用户打开 WLAN（最长 120 秒，取消连接可中止）")
-                    }
-                    Thread.sleep(2_000)
-                    waited += 2_000
-                }
-                if (connectCancelled) {
-                    phaseHint = "已取消连接"
-                    return@run
-                }
-                if (shellWifiDisabled()) {
-                    phaseHint = "WiFi 未开启——无法连接车机热点"
-                    appendLog("WIFI: 等待超时 WiFi 仍未开启——自动加入中止，请打开 WLAN 后重新连接")
-                    return@run
-                }
-            }
-
-            val current = shellWifiStatus().second
-            if (current == wifi.ssid) {
-                appendLog("WIFI: 手机已在车机热点 \"$current\"——直接绑定")
-                bindCarWifiAndRegister(wifi)
-                return@run
-            }
-            if (connectCancelled) return@run
-            // 确认弹窗：自动加入可能被系统切回原 WiFi（热点无互联网），让用户
-            // 显式选择「继续自动加入」或「直接去 WLAN 手动连接」
-            val choice =
-                askWifiJoinChoice(
-                    DialogSpec(
-                        title = "连接车机热点",
-                        message =
-                            "将自动加入 \"${wifi.ssid}\" 热点。由于系统限制（热点无互联网），" +
-                                "可能出现断连并自动切回原 WiFi。\n\n出现断连时，请到 WLAN 设置中主动连接 " +
-                                "\"${wifi.ssid}\"（手动连接不会被切回）。",
-                        positive = "继续自动加入",
-                        negative = "打开 WLAN 设置",
-                    ),
-                )
-            if (connectCancelled) return@run
-            if (choice == false) {
-                // 用户选手动：热点密码先进剪贴板（WLAN 页粘贴即可），再跳系统 WLAN
-                copyHotspotPsk(wifi.passphrase)
-                openWlanSettings()
-                phaseHint = "请在 WLAN 设置中连接 ${wifi.ssid}…"
-                appendLog("WIFI: 用户选择手动连接——等待 WLAN 连上 \"${wifi.ssid}\"（最长 120 秒）")
-                val manualDeadline = android.os.SystemClock.uptimeMillis() + WLAN_WAIT_TIMEOUT_MS
-                while (android.os.SystemClock.uptimeMillis() < manualDeadline) {
-                    if (connectCancelled) return@run
-                    Thread.sleep(5_000)
-                    if (shellWifiStatus().second == wifi.ssid) {
-                        bindCarWifiAndRegister(wifi)
-                        return@run
-                    }
-                }
-                phaseHint = "尚未连接 ${wifi.ssid}——自动加入已中止"
-                appendLog("WIFI: 手动连接等待超时——自动加入中止")
-                return@run
-            }
-            phaseHint = "正在自动加入车机热点 ${wifi.ssid}…"
-            appendLog(
-                ">>> 手机当前 WiFi: ${current ?: "未连接"}（非车机热点）——" +
-                    "经 Shizuku 自动切换到 \"${wifi.ssid}\"。注意：热点无互联网，系统可能自动切回原 WiFi；" +
-                    "若出现断连，请到 系统设置>WLAN 手动连接 \"${wifi.ssid}\"（手动连接不会被切回）",
-            )
-            if (connectCancelled) return@run
-            val security =
-                if (wifi.passphrase.isEmpty()) "open" else "wpa2 ${shellQuote(wifi.passphrase)}"
-            val result =
-                Shell
-                    .exec("cmd wifi connect-network ${shellQuote(wifi.ssid)} $security", 10_000L)
-            if (!result.ok) {
-                phaseHint = "自动加入热点失败——请到 WLAN 设置加入 ${wifi.ssid}"
-                appendLog(
-                    "WIFI: connect-network 失败（${result.output.take(80).ifEmpty { "exit=${result.exitCode}" }}）" +
-                        "——请到 系统设置>WLAN 手动加入（密码可点「去连接」复制）",
-                )
-                return@run
-            }
-            phaseHint = "正在加入车机热点 ${wifi.ssid}…若被切回原 WiFi，请在 WLAN 中手动连接"
-            appendLog("WIFI: connect-network 已发起（自动保存网络，等待切换…）")
-            // 系统切换是异步的（断开当前网/扫描/关联/DHCP，2-10 秒）：轮询 SSID 确认。
-            // 先查再睡（旧实现先睡 2.5s，每次都要白等一轮）；间隔 800ms 让绑定早发生。
-            repeat(20) {
-                if (connectCancelled) {
-                    appendLog("WIFI: 自动加入已取消（用户断开）")
-                    return@run
-                }
-                val ssid = shellWifiStatus().second
-                if (ssid == null) {
-                    // status 命令不可用（非 AOSP 系统）：退化为直接尝试绑定（无 SSID 校验）
-                    bindCarWifiAndRegister(wifi)
-                    return@run
-                }
-                if (ssid == wifi.ssid) {
-                    appendLog("WIFI: 已切到车机热点 ${wifi.ssid}")
-                    bindCarWifiAndRegister(wifi)
-                    return@run
-                }
-                Thread.sleep(800)
-            }
-            phaseHint = "未能在热点驻留——请到 WLAN 设置手动连接 ${wifi.ssid}"
-            uiHintSink?.invoke(
-                "未能在热点驻留——请到 WLAN 设置中主动连接 ${wifi.ssid}",
-            )
-            appendLog(
-                ">>> WiFi 自动加入超时（可能被系统切回原 WiFi）——" +
-                    "请到 系统设置>WLAN 手动连接 \"${wifi.ssid}\"（手动连接不会被自动切回）",
-            )
+        val current = shellWifiStatus().second
+        if (current == wifi.ssid) {
+            appendLog("WIFI: 手机已在车机热点 \"$current\"——直接绑定")
+            bindCarWifiAndRegister(wifi.ssid)
+            return
         }
+        if (connectCancelled) return
+        val choice =
+            askWifiJoinChoice(
+                DialogSpec(
+                    title = "连接车机热点",
+                    message =
+                        "将自动加入 \"${wifi.ssid}\" 热点。该热点无互联网，系统可能自动切回原 WiFi。" +
+                            "\n\n出现断连时，请到 WLAN 设置中主动连接 \"${wifi.ssid}\"（手动连接不会被切回）。",
+                    positive = "继续自动加入",
+                    negative = "打开 WLAN 设置",
+                ),
+            )
+        if (connectCancelled) return
+        if (choice == false) {
+            manualJoinCarWifi(wifi)
+            return
+        }
+        if (choice == null) {
+            phaseHint = "未能加入车机热点——请重新连接"
+            appendLog("WIFI: 弹窗无人应答——自动加入中止")
+            return
+        }
+        phaseHint = "正在自动加入车机热点 ${wifi.ssid}…"
+        appendLog(
+            ">>> 手机当前 WiFi: ${current ?: "未连接"}（非车机热点）——" +
+                "经 Shizuku 自动切换到 \"${wifi.ssid}\"",
+        )
+        if (connectCancelled) return
+        val security =
+            if (wifi.passphrase.isEmpty()) "open" else "wpa2 ${shellQuote(wifi.passphrase)}"
+        val result =
+            Shell
+                .exec("cmd wifi connect-network ${shellQuote(wifi.ssid)} $security", 10_000L)
+        if (!result.ok) {
+            phaseHint = "自动加入热点失败——请到 WLAN 设置加入 ${wifi.ssid}"
+            appendLog(
+                "WIFI: connect-network 失败（${result.output.take(80).ifEmpty { "exit=${result.exitCode}" }}）" +
+                    "——请到 系统设置>WLAN 手动加入（密码可点「去连接」复制）",
+            )
+            return
+        }
+        phaseHint = "正在加入车机热点 ${wifi.ssid}…若被切回原 WiFi，请在 WLAN 中手动连接"
+        appendLog("WIFI: connect-network 已发起（自动保存网络，等待切换…）")
+        // 系统切换是异步的（断开当前网/扫描/关联/DHCP，2-10 秒）：轮询 SSID 确认。
+        repeat(20) {
+            if (connectCancelled) {
+                appendLog("WIFI: 自动加入已取消（用户断开）")
+                return
+            }
+            val ssid = shellWifiStatus().second
+            if (ssid == null) {
+                // status 命令不可用（非 AOSP 系统）：退化为直接尝试绑定（无 SSID 校验）
+                bindCarWifiAndRegister(wifi.ssid)
+                return
+            }
+            if (ssid == wifi.ssid) {
+                appendLog("WIFI: 已切到车机热点 ${wifi.ssid}")
+                bindCarWifiAndRegister(wifi.ssid)
+                return
+            }
+            Thread.sleep(800)
+        }
+        phaseHint = "未能在热点驻留——请到 WLAN 设置手动连接 ${wifi.ssid}"
+        uiHintSink?.invoke("未能在热点驻留——请到 WLAN 设置中主动连接 ${wifi.ssid}")
+        appendLog(
+            ">>> WiFi 自动加入超时（可能被系统切回原 WiFi）——" +
+                "请到 系统设置>WLAN 手动连接 \"${wifi.ssid}\"（手动连接不会被自动切回）",
+        )
     }
 
     /**
@@ -666,11 +863,11 @@ object SessionController {
      *
      * @return 进程网络是否绑定成功
      */
-    private fun bindCarWifiAndRegister(wifi: Iap2SenderSession.WifiConfiguration): Boolean {
+    private fun bindCarWifiAndRegister(ssid: String): Boolean {
         var bound = false
         synchronized(wifiBindLock) {
             // 另一个路径已经绑定同一热点：别再走一遍 release+requestNetwork
-            if (boundCarSsid == wifi.ssid && wifiConnector?.currentNetwork != null) {
+            if (boundCarSsid == ssid && wifiConnector?.currentNetwork != null) {
                 bound = true
             } else {
                 val latch = java.util.concurrent.CountDownLatch(1)
@@ -686,18 +883,18 @@ object SessionController {
                 ) {
                     if (latch.await(200, java.util.concurrent.TimeUnit.MILLISECONDS)) break
                 }
-                if (bound) boundCarSsid = wifi.ssid
+                if (bound) boundCarSsid = ssid
             }
         }
         if (bound && !connectCancelled) {
             phaseHint = "已加入车机热点"
             // 关键时机：bindProcessToNetwork 完成后再注册，车机才能看到 ctrl 广播
-            ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true, network = wifiConnector?.currentNetwork)
+            ctrlAdvertiser?.ensureForNetwork(ssid, force = true, network = wifiConnector?.currentNetwork)
             appendLog(">>> WiFi 已绑定车机热点，ctrl 广播已重新注册，等待车机 ctrl 邀请（随后才回 0x4301）")
         } else if (!connectCancelled) {
-            phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${wifi.ssid}"
+            phaseHint = "手机不在车机热点——请到 WLAN 设置加入 $ssid"
             appendLog(
-                ">>> 等待 ${WIFI_BIND_WAIT_S}s 仍未绑定到 \"${wifi.ssid}\"——" +
+                ">>> 等待 ${WIFI_BIND_WAIT_S}s 仍未绑定到 \"$ssid\"——" +
                     "请在 系统设置>WLAN 手动加入该热点后重新连接",
             )
         }
@@ -1518,8 +1715,8 @@ object SessionController {
                 }
             }
         }
-        // 已绑定过网络（autoJoinCarWifi 的 bindCarWifiAndRegister 刚绑好并重注册过）
-        // 就不要再 bindCurrentWifi：它内部先 release() → bindProcessToNetwork(null)，
+        // 已绑定过网络（autoJoinCarWifi 刚绑好并重注册过）就不要再走一遍加入流程：
+        // WifiCarPlayConnector 内部先 release() → bindProcessToNetwork(null)，
         // 会把刚注册好的 ctrl mDNS 广播打断，再等系统重建绑定。
         val wifiConfig =
             Iap2SenderSession.WifiConfiguration(
@@ -1532,40 +1729,73 @@ object SessionController {
             appendLog(">>> [$source] 已绑定车机热点 ${endpoint.ssid}，跳过重复绑定")
             continueWithNetwork(true)
         } else {
-            // bindCurrentWifi 只按 TRANSPORT_WIFI 请求、**不校验 SSID**——切网途中会绑到
-            // 旧 WiFi 就继续（AirPlay 必然连不上、还白等一轮配对）。先等真实 SSID 变成
-            // 车机热点再绑；status 命令不可用（非 AOSP ROM）时才退化为原来的盲绑。
-            Bg.run("wifi-bind-wait") {
-                val deadline = android.os.SystemClock.uptimeMillis() + CAR_WIFI_BIND_WAIT_MS
-                var current = shellWifiStatus().second
-                var lastHintAt = android.os.SystemClock.uptimeMillis()
-                while (current != null &&
-                    current != endpoint.ssid &&
-                    android.os.SystemClock.uptimeMillis() < deadline &&
-                    !connectCancelled
-                ) {
-                    if (android.os.SystemClock.uptimeMillis() - lastHintAt > 5_000) {
-                        lastHintAt = android.os.SystemClock.uptimeMillis()
-                        phaseHint = "等待手机加入车机热点 ${endpoint.ssid}…"
-                        appendLog("WIFI: 等待切换到车机热点（当前 $current）…")
+            // 端点先于 0x5703 到达（或上一轮换网失败）：同样走应用专属网络。
+            // 不能再用「按 TRANSPORT_WIFI 盲绑当前任意 WiFi」——切网途中会绑到旧网络，
+            // AirPlay 必然连不上，且会把无互联网热点留在系统默认网络里。
+            Bg.run("wifi-join-on-endpoint") {
+                while (!connectCancelled) {
+                    val shellReady =
+                        appContext?.let { ShizukuGate.state(it) == ShizukuGate.State.READY } == true
+                    when (val result = joinCarWifiSpecifier(wifiConfig, shellReady)) {
+                        is WifiCarPlayConnector.JoinResult.Joined -> {
+                            continueWithNetwork(true)
+                            return@run
+                        }
+
+                        WifiCarPlayConnector.JoinResult.Unsupported -> {
+                            // WEP 等无法用 specifier 表达：等用户在系统 WLAN 里连上后绑定
+                            waitForManualWifiThenContinue(wifiConfig) { bound ->
+                                continueWithNetwork(bound)
+                            }
+                            return@run
+                        }
+
+                        WifiCarPlayConnector.JoinResult.Unavailable -> {
+                            promptSpecifierFailed(wifiConfig, shellReady)
+                            // promptSpecifierFailed 内部可能已重试/转手动；两者都会
+                            // 通过 joinCarWifiSpecifier → continueWithNetwork 续上流程，
+                            // 这里只在彻底失败时结束本轮
+                            if (boundCarSsid == wifiConfig.ssid && wifiConnector?.currentNetwork != null) {
+                                continueWithNetwork(true)
+                            } else {
+                                sessionStarting.set(false)
+                            }
+                            return@run
+                        }
                     }
-                    Thread.sleep(400)
-                    current = shellWifiStatus().second
                 }
-                if (connectCancelled) {
-                    sessionStarting.set(false)
-                    return@run
-                }
-                if (current != null && current != endpoint.ssid) {
-                    phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${endpoint.ssid}"
-                    appendLog(">>> [$source] 等待车机热点超时（当前 WiFi: $current）——请到 设置>WLAN 加入 \"${endpoint.ssid}\" 后重新连接")
-                    uiHintSink?.invoke("未连上车机热点 \"${endpoint.ssid}\"——请到 WLAN 设置中主动连接")
-                    sessionStarting.set(false)
-                    return@run
-                }
-                continueWithNetwork(bindCarWifiAndRegister(wifiConfig))
+                sessionStarting.set(false)
             }
         }
+    }
+
+    /** specifier 不可用时的手动兜底：轮询系统 WLAN 是否连上目标热点，而后绑定。 */
+    private fun waitForManualWifiThenContinue(
+        wifi: Iap2SenderSession.WifiConfiguration,
+        onBound: (Boolean) -> Unit,
+    ) {
+        val deadline = android.os.SystemClock.uptimeMillis() + CAR_WIFI_BIND_WAIT_MS
+        var lastHintAt = android.os.SystemClock.uptimeMillis()
+        while (android.os.SystemClock.uptimeMillis() < deadline && !connectCancelled) {
+            val current = shellWifiStatus().second
+            if (current == wifi.ssid) {
+                onBound(bindCarWifiAndRegister(wifi.ssid))
+                return
+            }
+            if (android.os.SystemClock.uptimeMillis() - lastHintAt > 5_000) {
+                lastHintAt = android.os.SystemClock.uptimeMillis()
+                phaseHint = "等待手机加入车机热点 ${wifi.ssid}…"
+                appendLog("WIFI: 等待用户在系统 WLAN 中加入车机热点（当前 ${current ?: "未连接"}）…")
+                openWlanSettings()
+            }
+            Thread.sleep(1_000)
+        }
+        if (!connectCancelled) {
+            phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${wifi.ssid}"
+            appendLog(">>> 等待车机热点超时——请到 设置>WLAN 加入 \"${wifi.ssid}\" 后重新连接")
+            uiHintSink?.invoke("未连上车机热点 \"${wifi.ssid}\"——请到 WLAN 设置中主动连接")
+        }
+        onBound(false)
     }
 
     /** 触摸/隧道事件低频计数（迁移自 MainActivity 字段，保持日志节流行为一致）。 */

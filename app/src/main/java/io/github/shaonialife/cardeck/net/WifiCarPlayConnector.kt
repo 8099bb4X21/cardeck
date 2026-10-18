@@ -5,25 +5,48 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.WifiNetworkSpecifier
+import android.os.SystemClock
 import io.github.shaonialife.cardeck.util.Bg
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 用 Wi-Fi Network Request API（app 专属网络）加入接收端热点。
+ * 用车机热点承载 CarPlay 流量。
+ *
+ * **两种入网方式，默认应用专属网络**：
+ *  - [joinCarPlayNetwork]：`WifiNetworkSpecifier` 请求「只对本进程可见」的 WiFi。
+ *    系统不会把它保存成普通网络、也不会设为默认网络——其它应用（微信/地图/导航）
+ *    继续走 4G/5G。这是无互联网车机热点的正确形态：否则系统会把它当成「已连接但
+ *    无网络」的默认 WiFi，部分 ROM 会连带关掉移动数据，用户一上车就断网。
+ *  - [bindCurrentWifi]：旧路径，绑定「任意已连接的 WiFi」。仅在用户手动到 WLAN
+ *    设置连了热点（系统级网络）时兜底用。
  *
  * 关键点：
- *  - 请求不带 NET_CAPABILITY_INTERNET，系统不会因「无互联网」拆连接；
- *  - 得到的网络只对本进程可见，必须 bindProcessToNetwork 后再建 socket；
- *  - 首次连接会弹系统确认框；SSID 必须精确匹配。
- *
- * 正式流程中 SSID/密码来自 iAP2 0x5703（0x5702 请求）。Phase 0 先手动输入。
- * 注意：WifiNetworkSpecifier 不支持传密码——密码在系统弹窗中由用户输入；
- * 真机 Phase 3 需要 root/系统权限或改用 WiFi 配网的其他路径（已列入风险）。
+ *  - 请求不带 `NET_CAPABILITY_INTERNET`，系统不会因「无互联网」拆连接；
+ *  - 应用专属网络必须 `bindProcessToNetwork` 后再建 socket / 注册 mDNS；
+ *  - 首次连接会弹系统确认框；SSID 必须精确匹配（热点名可能带空格/中文）。
  */
 class WifiCarPlayConnector(
     private val context: Context,
     private val log: (String) -> Unit,
 ) {
+    /** 应用专属网络的连接结果。 */
+    sealed interface JoinResult {
+        /** 已连接并绑定到本进程；[network] 可用于 NSD/端点判断。 */
+        data class Joined(
+            val network: Network,
+        ) : JoinResult
+
+        /** 系统未允许（用户拒绝/热点不在范围/超时）。可重试。 */
+        data object Unavailable : JoinResult
+
+        /** 该安全类型无法用 WifiNetworkSpecifier 表达（WEP）——调用方走旧路径。 */
+        data object Unsupported : JoinResult
+    }
+
     private val connectivityManager =
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
@@ -33,8 +56,15 @@ class WifiCarPlayConnector(
     private val boundNetwork = AtomicReference<Network?>(null)
 
     /**
+     * 应用专属网络被系统断开（热点关闭/离开范围）时回调。会话层据此提示用户；
+     * 空实现 = 不关心（例如手动绑定路径）。
+     */
+    @Volatile
+    var onNetworkLost: ((ssid: String) -> Unit)? = null
+
+    /**
      * 当前绑定网络的网关地址（车机热点场景 = 车机 IP）。
-     * mDNS 发现失败时的兜底路径：Audi 的 AirPlay 服务在网关 10.174.189.1:7000。
+     * mDNS 发现失败时的兜底路径。
      */
     fun gatewayAddress(): String? {
         val network = boundNetwork.get() ?: return null
@@ -70,7 +100,135 @@ class WifiCarPlayConnector(
     }
 
     /**
-     * 绑定到当前已连接的 WiFi 网络（用户经系统设置手动加入热点后调用）。
+     * 用应用专属网络（WifiNetworkSpecifier）加入车机热点。
+     *
+     * 阻塞直到连接成功/系统拒绝/超时（内部 200ms 分片，[isCancelled] 可即时退出）。
+     * 成功后进程网络已绑定，调用方可直接注册 mDNS / 建 socket。
+     *
+     * 安全类型映射按 0x5703（xcertplay Iap2WirelessSecurity）：
+     * 0=NONE 1=WEP 2=WPA/WPA2 3=WPA3 过渡 4=WPA3 仅。
+     * WEP 无对应 API（返回 [JoinResult.Unsupported]，调用方走旧路径）。
+     */
+    fun joinCarPlayNetwork(
+        ssid: String,
+        passphrase: String,
+        securityType: Int,
+        timeoutMillis: Long = 120_000L,
+        isCancelled: () -> Boolean = { false },
+    ): JoinResult {
+        val specifier =
+            buildSpecifier(ssid, passphrase, securityType)
+                ?: return JoinResult.Unsupported
+        release()
+        val request =
+            NetworkRequest
+                .Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .setNetworkSpecifier(specifier)
+                .build()
+        val latch = CountDownLatch(1)
+        val result = AtomicReference<Network?>(null)
+        val unavailable = AtomicBoolean(false)
+        val newCallback =
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    val bound = connectivityManager.bindProcessToNetwork(network)
+                    boundNetwork.set(network)
+                    result.set(network)
+                    log("WiFi: 已加入应用专属网络 \"$ssid\"（$network bindProcessToNetwork=$bound）——不影响其它应用联网")
+                    latch.countDown()
+                }
+
+                override fun onUnavailable() {
+                    unavailable.set(true)
+                    log("WiFi: 系统未允许加入 \"$ssid\"（用户拒绝或热点不在范围内）")
+                    latch.countDown()
+                }
+
+                override fun onLost(network: Network) {
+                    if (boundNetwork.compareAndSet(network, null)) {
+                        connectivityManager.bindProcessToNetwork(null)
+                        log("WiFi: 应用专属网络 \"$ssid\" 已断开（$network）")
+                        onNetworkLost?.invoke(ssid)
+                    }
+                }
+            }
+        callback.set(newCallback)
+        val accepted =
+            try {
+                connectivityManager.requestNetwork(request, newCallback)
+                true
+            } catch (error: Exception) {
+                log("WiFi: 发起应用专属网络请求失败（${error.message}）——可能需要位置权限或系统不支持")
+                false
+            }
+        if (!accepted) {
+            release()
+            return JoinResult.Unavailable
+        }
+        val deadline = SystemClock.uptimeMillis() + timeoutMillis
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (isCancelled()) {
+                release()
+                return JoinResult.Unavailable
+            }
+            try {
+                if (latch.await(200, TimeUnit.MILLISECONDS)) break
+            } catch (_: InterruptedException) {
+                release()
+                return JoinResult.Unavailable
+            }
+        }
+        val network = result.get()
+        if (network == null) {
+            log(
+                "WiFi: 等待加入 \"$ssid\" 超时（${timeoutMillis / 1000}s）" +
+                    if (unavailable.get()) "——系统已判定不可用" else "——系统确认框可能仍在前台",
+            )
+            release()
+            return JoinResult.Unavailable
+        }
+        return JoinResult.Joined(network)
+    }
+
+    /** 构造 specifier；WEP 或参数不合法返回 null（走旧路径）。 */
+    private fun buildSpecifier(
+        ssid: String,
+        passphrase: String,
+        securityType: Int,
+    ): WifiNetworkSpecifier? {
+        return try {
+            val builder = WifiNetworkSpecifier.Builder().setSsid(ssid)
+            when (securityType) {
+                // 开放热点：无密码
+                0 -> Unit
+                // WEP：WifiNetworkSpecifier 无对应 API（现代车机不再使用）
+                1 -> return null
+                // WPA/WPA2 与 WPA3 过渡模式：过渡模式 AP 同时接受 WPA2-PSK
+                2, 3 -> {
+                    if (passphrase.isEmpty()) return null
+                    builder.setWpa2Passphrase(passphrase)
+                }
+                // WPA3 仅
+                4 -> {
+                    if (passphrase.isEmpty()) return null
+                    builder.setWpa3Passphrase(passphrase)
+                }
+                // 未知类型：按有密码的 WPA2 尝试（比直接放弃更可能成功）
+                else -> {
+                    if (passphrase.isEmpty()) return null
+                    builder.setWpa2Passphrase(passphrase)
+                }
+            }
+            builder.build()
+        } catch (error: Exception) {
+            log("WiFi: 构造应用专属网络参数失败（${error.message}）")
+            null
+        }
+    }
+
+    /**
+     * 绑定「当前已连接的 WiFi」（用户手动在系统设置里加入热点后的兜底路径）。
      * 热点无互联网时系统可能不把它设为默认网络，必须显式 bindProcessToNetwork，
      * 我们的 socket 才会走 WiFi 而不是蜂窝。
      * 带看门狗：WiFi 未连接时 requestNetwork 会无限静默挂起——5 秒无果给出明确指引
@@ -100,6 +258,12 @@ class WifiCarPlayConnector(
                 override fun onUnavailable() {
                     log("WiFi: 没有可用的WiFi连接——请先在系统设置里加入接收端热点")
                     if (reported.compareAndSet(false, true)) onResult(false)
+                }
+
+                override fun onLost(network: Network) {
+                    if (boundNetwork.compareAndSet(network, null)) {
+                        log("WiFi: 绑定的 WiFi 网络已断开（$network）")
+                    }
                 }
             }
         callback.set(newCallback)

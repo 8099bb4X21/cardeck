@@ -344,15 +344,31 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   挪进 Shizuku UserService（曾试过，不可行）：UserService 里
   `BluetoothManager.getAdapter()` 返回 null（无主 Looper 的应用上下文），查询恒为
   「未连接」，反而掩盖真实状态。诊断日志：`BT-PROFILE: 连接前…的蓝牙配置文件状态=`。
-- **Shell 命令**：参数用 `shellQuote`（单引号转义）；WiFi 连接走
-  `cmd wifi connect-network`，查开关/当前 SSID 用一次 `cmd wifi status`
-  （勿用「任意 WiFi 即成功」的盲绑判定——手机连着别的 WiFi 时会误判）。
-  **无互联网热点的自动切回（已知限制，放弃侵入式抑制）**：shell 连接的配置没有
-  「用户选择」标记，系统 watchdog 会自动切回有网的原 WiFi 导致断连（手动连接不受
-  影响）。曾实现「会话期间 add-network -d 禁用原网/全部其它网络的自动加入」——放弃：
-  多已保存网络环境禁不完整、移动场景误伤、侵入用户配置。现行方案：connect-network
-  自动加入（best effort）+ 阶段提示告知「若被切回请到 WLAN 手动连接热点」+ WiFi 未
-  开启时等待提示（30s）+ 加入超时的手动兜底指引。
+- **Shell 命令**：参数用 `shellQuote`（单引号转义）；查 WiFi 开关/当前 SSID 用一次
+  `cmd wifi status`（勿用「任意 WiFi 即成功」的盲绑判定——手机连着别的 WiFi 时会误判）。
+  **无互联网热点：默认走应用专属网络，不再系统级入网**（2026-10-18 定谳）：
+  `WifiNetworkSpecifier`（`WifiCarPlayConnector.joinCarPlayNetwork`）加入车机热点——
+  网络只对本进程可见（系统侧 `Ephemeral: true` + `OwnerUid=本应用`），**不进系统已保存
+  网络、不成为默认网络**，其它应用继续走 4G/5G。实测（荣耀 + Redmi K40 + DiPlay）：
+  `cmd wifi list-networks` 无该 SSID（返回 0）、`Active default network` 仍是蜂窝、
+  推流期间 `ping baidu.com` 0 丢包。顺带解决三个老问题：系统 watchdog 不再切回原
+  WiFi；不需要 Shizuku 也能自动加入；不会因「已连接无互联网」被 ROM 连带关掉移动数据。
+  **迁移坑**：旧版本用 `cmd wifi connect-network` 存过热点，只要还在系统配置里系统就
+  会自动全局连接——加入前先 `cmd wifi list-networks` 查同 SSID，**命中则弹窗询问用户
+  是否清除，绝不擅自删除**（保留是正当需求：用户可能就想用系统自动连、或车机热点
+  本身带流量；删除只影响「会不会全局自动连」，与本轮连接无关）。选择保留 → 照常
+  以应用专属网络连接。每个 SSID 每进程只问一次（`forgetPromptHandled`），否则配对
+  重试/端点重入会反复弹窗挡住流程；无人应答按「保留」处理（不做破坏性动作）。
+  解析用 `WifiSavedNetworks.idsOf`（纯函数，有单测：SSID 含空格/非 ASCII/同网多行
+  同 netId/畸形行都覆盖；宁可漏判不误删）。手动兜底（`manualJoinCarWifi`）会把热点
+  存回系统网络，日志与弹窗都明确写出这个代价。
+  **WEP 无法用 specifier 表达**（无对应 Builder API）→ `JoinResult.Unsupported`，
+  走旧的 `connect-network` 兜底路径（`legacyJoinCarWifi`）。
+  specifier 在 **Android 12/12L 仍需位置权限 + 位置服务**（13+ 由 NEARBY_WIFI_DEVICES
+  接管）：缺权限时 `requestNetwork` 直接失败、现象只是「未能加入车机热点」，很难自查，
+  故在连接前置检查拦截（`ensureWifiLocationReady`）；manifest 里 FINE/COARSE 必须成对
+  声明，否则 lint `CoarseFineLocation` 直接失败。`onLost` 必须处理（热点消失/熄火），
+  否则英雄卡会在「已连接」与失败间静默摇摆（`WifiCarPlayConnector.onNetworkLost`）。
 - **目标车机选择（多台车机场景，2026-10-16）**：用户可能配对多台 CarPlay 车机
   （真车 Audi + 测试台 DiPlay）。未指定目标时出站客户端逐个尝试全部候选、入站
   服务端来者不拒——连到哪台取决于谁先应答；选定目标后**出站只连该设备、入站
