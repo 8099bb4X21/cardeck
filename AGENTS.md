@@ -27,6 +27,25 @@ adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk
 问题会直接失败；实际修复后条目自动失效，有意豁免经评审后 `./gradlew :app:updateLintBaseline`。
 协作约定：功能完成后**装机给用户验证，用户说「提交」才 git commit**。
 
+**作者邮箱（公开仓库，硬性要求）**：本仓库已公开（github.com/shaonialife/cardeck），
+提交里的作者/提交者邮箱**只允许 `*@users.noreply.github.com`**
+（`16135960+shaonialife@users.noreply.github.com`）。**绝不能出现公司/私人邮箱**——
+提交推送后无法真正撤回，GitHub 会永久索引，搜索引擎也能关联到你的雇主。
+四层防护（均已实测）：
+1. **仓库局部 `.git/config`** 已设 noreply 邮箱，覆盖全局 `~/.gitconfig` 里的公司邮箱
+   （根因就是全局配置是公司邮箱，任何新仓库都会默认带上）；
+2. **`pre-commit` 守门**：`user.email` 不在白名单直接拒绝提交；
+3. **`pre-push` 扫描**：检查**所有待推送提交**的 `%ae`/`%ce`，非白名单即拒绝推送。
+   这条覆盖 pre-commit 挡不住的情况——`--no-verify`、cherry-pick/rebase 沿用原提交
+   作者、从其它仓库 pull 进来的历史；
+4. 必要时 `git filter-branch --env-filter` 改写历史（已对全部提交执行过一次）。
+
+**踩坑记录**：`git reflog expire --expire=now --all` 会**连带清掉 stash 的 reflog**，
+使 `git stash list` 变空（`refs/stash` 引用与内容其实还在，只是列表读 reflog）。
+误清后可用 `git update-ref --create-reflog refs/stash <sha>` 或手工补
+`.git/logs/refs/stash` 恢复。另：shell 脚本里 `$var` 紧跟中文/全角字符
+（如 `$remote_ref（`）会被当成变量名的一部分，必须写成 `${remote_ref}`。
+
 **调试**：logcat 受限（HKS），运行日志走文件 `files/main_debug.log`（任意线程
 `SessionController.appendLog` 写入）：
 `adb shell "run-as io.github.shaonialife.cardeck grep/tail files/main_debug.log"`。
