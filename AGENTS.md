@@ -12,7 +12,7 @@ AirPlay（配对/控制/事件/流）→ 视频 + 音频推流。
 ./gradlew testDebugUnitTest             # 单元测试（协议层/编解码为主）
 ./gradlew :app:lintDebug                # Android Lint（存量问题在基线，新问题会失败）
 ./gradlew spotlessApply                 # 代码格式化（ktlint official 风格，规则在 .editorconfig）
-adb -s <serial> shell am force-stop com.lizhihua.carplaysender   # 安装前必须先杀应用
+adb -s <serial> shell am force-stop io.github.shaonialife.cardeck   # 安装前必须先杀应用
 adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
@@ -29,7 +29,7 @@ adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk
 
 **调试**：logcat 受限（HKS），运行日志走文件 `files/main_debug.log`（任意线程
 `SessionController.appendLog` 写入）：
-`adb shell "run-as com.lizhihua.carplaysender grep/tail files/main_debug.log"`。
+`adb shell "run-as io.github.shaonialife.cardeck grep/tail files/main_debug.log"`。
 接收端画面验证：`adb -s <测试台serial> exec-out screencap -p`。
 
 ## 架构速览

@@ -221,7 +221,10 @@ reference/                          # 参考仓库（gitignore，不入库不分
 - 「CarPlay」「AirPlay」是 Apple Inc. 的商标；文中出现仅用于**说明兼容目标**
   （描述性引用），不表示关联、赞助或认可。
 - 本项目**不使用** Apple 或任何车厂的图形标识、认证标（含 MFi）。
-- 改名不涉及包名（`com.lizhihua.carplaysender`）与仓库名，二者属内部标识/描述性用途。
+- 包名 `io.github.shaonialife.cardeck` 同样不含第三方商标（采用 GitHub 用户名的
+  标准倒写形式）。从旧的 `com.lizhihua.carplaysender` 迁移过来属于**不兼容变更**：
+  系统视为不同应用，需卸载重装，Shizuku 授权与本地设置（含 AirPlay 配对身份）
+  都会重置，车机端也需重新配对。
 
 ## 已知风险（详单见 PROTOCOL-NOTES.md §9）
 

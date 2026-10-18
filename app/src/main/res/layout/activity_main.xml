@@ -120,7 +120,7 @@
                     android:layout_width="210dp"
                     android:layout_height="176dp">
 
-                    <com.lizhihua.carplaysender.ui.SignalWavesView
+                    <io.github.shaonialife.cardeck.ui.SignalWavesView
                         android:id="@+id/signalWaves"
                         android:layout_width="210dp"
                         android:layout_height="176dp" />

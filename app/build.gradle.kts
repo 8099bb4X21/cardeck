@@ -33,11 +33,11 @@ val keystoreProps =
 val hasReleaseKeystore = keystoreProps.getProperty("storeFile") != null
 
 android {
-    namespace = "com.lizhihua.carplaysender"
+    namespace = "io.github.shaonialife.cardeck"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.lizhihua.carplaysender"
+        applicationId = "io.github.shaonialife.cardeck"
         minSdk = 31
         targetSdk = 34
         versionCode = appVersionCode
@@ -66,7 +66,7 @@ android {
         debug {
             // **不要加 applicationIdSuffix**：本项目 debug 包就是日常使用的包——
             // Shizuku 授权是按包名授予的，改包名会要求重新授权；AGENTS.md 里的
-            // `run-as com.lizhihua.carplaysender` 调试链路也会一起失效。
+            // `run-as io.github.shaonialife.cardeck` 调试链路也会一起失效。
             versionNameSuffix = "-debug"
         }
     }
