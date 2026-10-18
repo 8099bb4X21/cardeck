@@ -59,6 +59,26 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
 
 ## 关键约定与已踩过的坑（改代码前必读）
 
+- **首页旋转：声明 configChanges 不重建 + 横屏双栏**（2026-10-18）：手机侧首页是
+  有状态的操作台（滚动位置、折叠卡、已填 SSID、正在显示的弹窗），系统重建会全部丢掉，
+  所以 `MainActivity` 声明了 `orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden`。
+  **代价是 `layout-land/` 不会生效**，横屏排布只能在 `onConfigurationChanged` 里手工切：
+  `applyContentLayout(landscape)` 在横屏把英雄卡**移出 ScrollView**、挂到 `contentArea`
+  左缘固定（右栏 `mainScroll` 用左内边距让位），竖屏再移回 `contentRow`——
+  英雄卡若留在同一个 ScrollView 里，滑右栏会把它一起带走（用户实测反馈）。
+  移动父容器后 layoutParams 类型会变（LinearLayout ⇄ FrameLayout），必须整体重建；
+  横屏高度要 `WRAP_CONTENT`（FrameLayout 里 MATCH_PARENT 会把按钮顶到卡片底缘）。
+  **onCreate 也必须调一次**——以横屏启动不会触发 onConfigurationChanged。
+  横屏屏高只有 ~300dp，实测预算：顶部栏 60 + 波形框 70 + 状态 40 + 副标题 20 +
+  间距 18 + 按钮 52 + 内边距 24 ≈ 284dp 刚好放得下「未连接 + 启动连接」；波形框压矮后
+  圆盘要同步缩到 44dp（否则 74dp 圆盘撑满框、弧线被完全挤出可视区），CARPLAY 标签
+  在横屏隐藏。`SignalWavesView` 按 **min(宽比, 高比)** 缩放（原先只按宽度，压矮即溢出），
+  `hubPlate`/`hubCaption` 用 gravity 居中而非固定 marginTop（后者按 176dp 算死，压矮必错位）。
+  **英雄卡宽度不要读 `contentArea.width`**：旋转瞬间它还是旧方向的测量值（竖屏 1168 →
+  横屏里英雄卡只剩 537px、副标题挤成三行），要用 `屏幕宽 - 页面内边距` 推算。
+  弹窗尺寸统一走 `ui/PanelWindow`（宽度 92% 屏宽 + 可选高度比例），它维护「正在显示」
+  的弱引用清单，`onConfigurationChanged` 调 `resizeShowing(this)` 重算——不重算的话
+  弹窗会保持竖屏宽度、在横屏里只占中间一半。
 - **线程**：短命一次性任务用 `Bg.run("name") { }`（util/Bg.kt，cached 池）；长驻循环
   线程（GL 合成、链路 reader/pacer、accept 循环、看门狗等）保持独立 Thread——需要
   命名、interrupt 和生命周期持有，不要收进池。主线程禁止 IO/解码（封面等走专用执行器）。

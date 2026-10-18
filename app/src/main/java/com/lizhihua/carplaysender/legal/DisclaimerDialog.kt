@@ -13,6 +13,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import com.lizhihua.carplaysender.R
 import com.lizhihua.carplaysender.SessionController
+import com.lizhihua.carplaysender.ui.PanelWindow
 
 /**
  * 免责声明弹窗（两种形态）：
@@ -148,12 +149,8 @@ object DisclaimerDialog {
         }
 
         dialog.setOnShowListener {
-            // 面板自带圆角：窗口底色必须透明，否则四角露出方角
-            dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
-            val metrics = activity.resources.displayMetrics
-            val width = (metrics.widthPixels * 0.92f).toInt()
-            val height = (metrics.heightPixels * WINDOW_HEIGHT_FRACTION).toInt()
-            dialog.window?.setLayout(width, height)
+            // 宽度 92%、高度 78% 屏高；登记后旋转时由 Activity 调 resizeShowing 重算
+            PanelWindow.apply(dialog, activity, WINDOW_HEIGHT_FRACTION)
         }
         dialog.show()
         return dialog

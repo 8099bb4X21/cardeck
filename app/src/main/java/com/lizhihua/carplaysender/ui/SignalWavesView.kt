@@ -47,6 +47,7 @@ class SignalWavesView
 
         // 设计稿基准：圆心 (105,88)，三层弧半径 50/68/86，跨 -135°..-45°（12 点方向 ±45°）
         private val designWidth = 210f
+        private val designHeight = 176f
         private val cx = 105f
         private val cy = 88f
         private val radii = floatArrayOf(50f, 68f, 86f)
@@ -103,9 +104,12 @@ class SignalWavesView
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            val scale = width / designWidth
-            val centerX = cx * scale
-            val centerY = cy * scale
+            // 按**较短边**等比缩放：横屏下英雄卡被压矮时，只按宽度缩放会让弧线
+            // 溢出视图（高度只剩 70dp、宽度仍是半屏）。取 min 后图形始终内接视图。
+            val scale = minOf(width / designWidth, height / designHeight)
+            val centerX = width / 2f
+            // 竖直居中：设计稿圆心 88/176 恰为正中，缩放后同样居中
+            val centerY = height / 2f
 
             canvas.save()
             canvas.rotate(orbitRotation, centerX, centerY)

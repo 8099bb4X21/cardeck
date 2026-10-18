@@ -40,6 +40,7 @@ import com.lizhihua.carplaysender.shizuku.CarInputClient
 import com.lizhihua.carplaysender.shizuku.Shell
 import com.lizhihua.carplaysender.shizuku.ShizukuGate
 import com.lizhihua.carplaysender.ui.DarkMessageDialog
+import com.lizhihua.carplaysender.ui.PanelWindow
 import com.lizhihua.carplaysender.ui.ScreenDimmer
 import com.lizhihua.carplaysender.ui.SignalWavesView
 import com.lizhihua.carplaysender.ui.WallpaperStore
@@ -598,6 +599,16 @@ class MainActivity : AppCompatActivity() {
         renderConsole(SessionController.logText())
 
         setUpUiControls()
+        // 以横屏启动时不会触发 onConfigurationChanged，这里按当前方向定一次排布。
+        // 首次调用时 contentArea 未测量（width=0，只能退回屏宽估算），
+        // 布局完成后再精确重算一次，避免英雄卡宽度与右栏让位差几个像素。
+        val startLandscape =
+            resources.configuration.orientation ==
+                android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        applyContentLayout(startLandscape)
+        findViewById<android.widget.FrameLayout>(R.id.contentArea).post {
+            if (!isFinishing && !isDestroyed) applyContentLayout(startLandscape)
+        }
 
         // 免责声明：未接受当前版本时强制弹（不可取消、需倒计时 + 滑到底）。
         // savedState 非空（旋转/重建）时复用原截止时刻，不重新计时。
@@ -1230,7 +1241,7 @@ class MainActivity : AppCompatActivity() {
         dialog.setOnShowListener {
             // 面板自带圆角：窗口底色必须透明，否则四角露出方角
             dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
-            val width = (resources.displayMetrics.widthPixels * 0.92f).toInt()
+            val width = (resources.displayMetrics.widthPixels * PanelWindow.WIDTH_FRACTION).toInt()
             dialog.window?.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         dialog.show()
@@ -2062,6 +2073,128 @@ class MainActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putLong(KEY_DISCLAIMER_DEADLINE, disclaimerDeadlineAt)
+    }
+
+    /**
+     * 旋转（已声明 configChanges，Activity 不重建）：视图与所有内存状态原样保留。
+     * 需要处理两件事：
+     * 1. **内容区切成双栏**——横屏屏高只有 ~300dp，英雄卡单独就占满整屏，
+     *    其余内容全被挤到屏幕外（用户实测「要滑动才能看到」）；
+     * 2. **重算弹窗窗口**——它们按旧方向的屏宽算过（92%），不重算会只占中间一半。
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (isFinishing || isDestroyed) return
+        applyContentLayout(landscape = newConfig.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE)
+        PanelWindow.resizeShowing(this)
+        // 目标车机弹窗不走 DarkMessageDialog，单独重算
+        targetPicker?.window?.let {
+            val width = (resources.displayMetrics.widthPixels * PanelWindow.WIDTH_FRACTION).toInt()
+            it.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+    }
+
+    /**
+     * 内容区排布：竖屏单列（英雄卡与详情同在一个 ScrollView）⇄
+     * 横屏双栏（英雄卡**固定在左侧**，只有右侧详情列滚动）。
+     *
+     * 横屏为什么要把英雄卡移出 ScrollView：它和详情同属一个滚动容器时，
+     * 滑右栏会把英雄卡一起带走（用户实测反馈）。移入 [contentArea] 后它是固定层，
+     * 滚动只作用于 mainScroll；右侧内容通过 ScrollView 的左内边距让位。
+     *
+     * onCreate 也要调用一次——旋转不重建，但**以横屏启动**不会触发
+     * onConfigurationChanged。
+     */
+    private fun applyContentLayout(landscape: Boolean) {
+        val contentArea = findViewById<android.widget.FrameLayout>(R.id.contentArea)
+        val scroll = findViewById<android.widget.ScrollView>(R.id.mainScroll)
+        val row = findViewById<android.widget.LinearLayout>(R.id.contentRow)
+        val hero = findViewById<android.widget.LinearLayout>(R.id.heroCard)
+        val detail = findViewById<android.widget.LinearLayout>(R.id.detailColumn)
+        val density = resources.displayMetrics.density
+        val gap = (12 * density).toInt()
+        // 横屏屏高只有 ~300dp：波形区 176→70dp、内边距 24/20→12dp，
+        // 让「状态 + 副标题 + 启动连接」全部留在首屏。
+        // 预算：顶部栏 ~60 + 波形 70 + 状态 40 + 副标题 20 + 18 间距 + 按钮 52 + 内边距 24 ≈ 284dp
+        val waveHeight = ((if (landscape) 70 else 176) * density).toInt()
+        for (id in intArrayOf(R.id.heroWaveFrame, R.id.signalWaves)) {
+            findViewById<View>(id).layoutParams =
+                findViewById<View>(id).layoutParams.apply { height = waveHeight }
+        }
+        val padTop = ((if (landscape) 12 else 24) * density).toInt()
+        val padBottom = ((if (landscape) 12 else 20) * density).toInt()
+        hero.setPadding(hero.paddingStart, padTop, hero.paddingEnd, padBottom)
+        // 横屏波形框只有 70dp：圆盘同步缩到 44dp，让外圈轨道与弧线仍有空间
+        // （圆盘 74dp 会把波形框撑满、弧线被完全挤出可视区，真机截图暴露）
+        val plateSize = ((if (landscape) 44 else 74) * density).toInt()
+        val carSize = ((if (landscape) 24 else 38) * density).toInt()
+        findViewById<View>(R.id.hubPlate).layoutParams =
+            findViewById<View>(R.id.hubPlate).layoutParams.apply {
+                width = plateSize
+                height = plateSize
+            }
+        findViewById<View>(R.id.hubCar).layoutParams =
+            findViewById<View>(R.id.hubCar).layoutParams.apply {
+                width = carSize
+                height = carSize
+            }
+        // 横屏波形框只有 70dp：装不下 CARPLAY 标签，标签让位
+        // （圆盘是视觉主体，品牌字在顶部标题里已有）
+        findViewById<View>(R.id.hubCaption).visibility =
+            if (landscape) View.GONE else View.VISIBLE
+
+        row.orientation = android.widget.LinearLayout.VERTICAL
+        if (landscape) {
+            if (hero.parent === row) {
+                row.removeView(hero)
+                contentArea.addView(hero)
+            }
+            // 宽度用**屏幕宽减页面内边距**推算，不读 contentArea.width：
+            // 旋转瞬间后者还是旧方向的测量值（竖屏 1168 → 英雄卡只有 537px，
+            // 副标题被挤成三行，真机截图暴露）。
+            val pagePadding =
+                (16 * resources.displayMetrics.density * 2).toInt()
+            val available =
+                (resources.displayMetrics.widthPixels - pagePadding).coerceAtLeast(1)
+            val heroWidth = (available * 0.46f).toInt().coerceAtLeast(1)
+            // 高度必须 WRAP_CONTENT：FrameLayout 会把 MATCH_PARENT/WRAP 视作铺满，
+            // 铺满会把按钮顶到卡片底缘、副标题挤成三行（真机截图暴露）
+            hero.layoutParams =
+                android.widget.FrameLayout
+                    .LayoutParams(
+                        heroWidth,
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { gravity = android.view.Gravity.START or android.view.Gravity.TOP }
+            // 右侧内容让出英雄卡宽度（含间距）：滚动条仍在屏幕右缘
+            scroll.setPadding(heroWidth + gap, scroll.paddingTop, scroll.paddingEnd, scroll.paddingBottom)
+            (detail.layoutParams as android.widget.LinearLayout.LayoutParams).apply {
+                width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                weight = 0f
+            }
+        } else {
+            if (hero.parent === contentArea) {
+                contentArea.removeView(hero)
+                row.addView(
+                    hero,
+                    0,
+                    android.widget.LinearLayout.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+            }
+            (hero.layoutParams as android.widget.LinearLayout.LayoutParams).apply {
+                width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                weight = 0f
+                topMargin = gap
+                marginEnd = 0
+            }
+            scroll.setPadding(0, scroll.paddingTop, scroll.paddingEnd, scroll.paddingBottom)
+            (detail.layoutParams as android.widget.LinearLayout.LayoutParams).apply {
+                width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                weight = 0f
+            }
+        }
     }
 
     override fun onPause() {

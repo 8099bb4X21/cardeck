@@ -91,19 +91,26 @@ object DarkMessageDialog {
             dialog.setOnCancelListener { onCancel?.invoke() }
         }
         dialog.setOnShowListener {
-            // 面板自带圆角：窗口底色必须透明，否则四角露出方角
-            dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
-            val metrics = activity.resources.displayMetrics
-            dialog.window?.setLayout((metrics.widthPixels * 0.92f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
-            // 正文按内容自适应，只有超长时才限高滚动：固定成 46% 屏高会让短文案
-            // 下方留出大片空白（2026-10-18 真机截图暴露）
-            val maxBodyHeight = (metrics.heightPixels * 0.46f).toInt()
-            bodyView.post {
-                if (bodyView.height > maxBodyHeight) {
-                    scroll.layoutParams =
-                        scroll.layoutParams.apply { height = maxBodyHeight }
+            // 正文超长时夹到屏高 46% 并内部滚动；短文案贴合内容（固定高度会留大片空白）。
+            // clampBody 同时作为旋转回调：横屏屏高变小后要重新夹紧，否则会撑出屏幕。
+            val clampBody: (Activity) -> Unit = { ctx ->
+                val maxBodyHeight = (ctx.resources.displayMetrics.heightPixels * 0.46f).toInt()
+                bodyView.post {
+                    val target =
+                        if (bodyView.height > maxBodyHeight) {
+                            maxBodyHeight
+                        } else {
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        }
+                    if (scroll.layoutParams.height != target) {
+                        scroll.layoutParams =
+                            scroll.layoutParams.apply { height = target }
+                    }
                 }
             }
+            // 宽度 92%、高度按内容自适应；旋转时 PanelWindow 会回调 clampBody 重算
+            PanelWindow.apply(dialog, activity, onResize = clampBody)
+            clampBody(activity)
         }
         dialog.show()
         return dialog

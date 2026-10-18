@@ -7,20 +7,16 @@
     android:layout_height="match_parent"
     android:background="@color/m3_surface">
 
-    <ScrollView
+    <!-- 页面竖向容器：顶部栏固定，内容区（contentArea）占满剩余高度。
+         横屏时英雄卡会被移入 contentArea 左缘固定显示，滚动只作用于右栏
+         （见 MainActivity.applyContentLayout）——英雄卡不随右侧列表滚走。 -->
+    <LinearLayout
+        android:id="@+id/pageColumn"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:clipToPadding="false"
-        android:fillViewport="true"
-        android:paddingBottom="28dp"
-        android:scrollbars="none">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:paddingStart="16dp"
-            android:paddingEnd="16dp">
+        android:orientation="vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp">
 
             <!-- ==================== 顶部应用栏 ==================== -->
             <LinearLayout
@@ -73,13 +69,46 @@
                     android:textStyle="bold" />
             </LinearLayout>
 
-            <!-- ==================== 英雄卡：连接状态 ==================== -->
+            <!-- 内容区容器：竖屏时 ScrollView 包住英雄卡与详情；
+                 横屏时英雄卡被移到本 FrameLayout 左缘固定，详情仍随 ScrollView 滚动 -->
+            <FrameLayout
+                android:id="@+id/contentArea"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1">
+
+                <ScrollView
+                    android:id="@+id/mainScroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:clipToPadding="false"
+                    android:fillViewport="true"
+                    android:paddingBottom="28dp"
+                    android:scrollbars="none">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical">
+
+            <!-- ==================== 内容区：竖屏单列 / 横屏双栏 ====================
+                 横屏屏高只有 ~300dp，英雄卡（176dp 波形 + 状态 + 主按钮）单独就占满，
+                 其余内容全被挤到屏幕外（用户实测「要滑动才能看到」）。
+                 onConfigurationChanged 里把本行切成横向：左英雄卡、右详情列。 -->
             <LinearLayout
+                android:id="@+id/contentRow"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:background="@drawable/bg_hero"
-                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <!-- ==================== 英雄卡：连接状态 ==================== -->
+                <LinearLayout
+                    android:id="@+id/heroCard"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/bg_hero"
+                    android:gravity="center_horizontal"
                 android:orientation="vertical"
                 android:paddingStart="20dp"
                 android:paddingTop="24dp"
@@ -87,6 +116,7 @@
                 android:paddingBottom="20dp">
 
                 <FrameLayout
+                    android:id="@+id/heroWaveFrame"
                     android:layout_width="210dp"
                     android:layout_height="176dp">
 
@@ -95,12 +125,13 @@
                         android:layout_width="210dp"
                         android:layout_height="176dp" />
 
+                    <!-- 圆盘与标签：相对波形框**居中**定位（原固定 marginTop=51/134dp
+                         是按 176dp 高算死的，横屏把波形框压到 70dp 后圆盘被裁成半月） -->
                     <FrameLayout
                         android:id="@+id/hubPlate"
                         android:layout_width="74dp"
                         android:layout_height="74dp"
-                        android:layout_gravity="center_horizontal"
-                        android:layout_marginTop="51dp"
+                        android:layout_gravity="center"
                         android:background="@drawable/bg_plate">
 
                         <ImageView
@@ -116,8 +147,8 @@
                         android:id="@+id/hubCaption"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_gravity="center_horizontal"
-                        android:layout_marginTop="134dp"
+                        android:layout_gravity="center_horizontal|bottom"
+                        android:layout_marginBottom="10dp"
                         android:letterSpacing="0.22"
                         android:text="CARPLAY"
                         android:textColor="#5C6B6B"
@@ -239,6 +270,13 @@
                     android:textStyle="bold"
                     android:visibility="gone" />
             </LinearLayout>
+
+            <!-- ==================== 详情列（横屏时成为右栏） ==================== -->
+            <LinearLayout
+                android:id="@+id/detailColumn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
 
             <!-- ==================== 连接准备 ==================== -->
             <LinearLayout
@@ -1274,8 +1312,12 @@
                 android:text="连接由前台服务保活 · 退出本界面不影响会话"
                 android:textColor="#576767"
                 android:textSize="11sp" />
+            </LinearLayout>
+            </LinearLayout>
         </LinearLayout>
     </ScrollView>
+            </FrameLayout>
+        </LinearLayout>
 
     <!-- Snackbar（自绘 M3 反色胶囊） -->
     <TextView

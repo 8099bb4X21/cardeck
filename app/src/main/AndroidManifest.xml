@@ -51,8 +51,13 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.CarPlaySender">
 
+        <!-- 手机侧操作台自行处理旋转：它是有状态的工具界面（滚动位置、折叠卡、
+             已填热点 SSID、正在显示的弹窗），系统重建会把它们全部丢掉。
+             声明 configChanges 后 Activity 不重建、视图状态原样保留；
+             依赖屏幕尺寸的弹窗窗口在 onConfigurationChanged 里重算。 -->
         <activity
             android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="true"
             android:launchMode="singleTask">
             <intent-filter>
@@ -61,7 +66,9 @@
             </intent-filter>
         </activity>
 
-        <!-- 车机设置（手机侧）：二级菜单页 + 内容 Fragment 宿主（与车机双栏共用面板） -->
+        <!-- 车机设置（手机侧）：二级菜单页 + 内容 Fragment 宿主（与车机双栏共用面板）。
+             不声明 configChanges：这两页是短暂的工具页，旋转重建无状态损失；
+             首页才是要保留滚动/折叠/已填内容的长驻操作台。 -->
         <activity
             android:name=".PhoneSettingsActivity"
             android:exported="false" />
