@@ -626,7 +626,24 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   `keepAliveSendStatsAsBody=true` 时 opcode=5 带 bplist 统计体），1s，**视频持续
   推流时也照发**——它不是视频流量的备份。只有 ①② 时现象是「推流正常、RECORD 后
   10.2s 整轮 reset」，日志里视频/feedback/事件通道全都健康，极易误判为网络问题。
+  **纠偏（2026-10-19 晚）**：三条心跳齐发时 MMI 3315 **仍**在 ~10s 被拆——该车的
+  10s 拆链另有主因（缺 WiFi 隧道，见下条）；心跳是必要条件，不是充分条件。
   keepAlive 帧不加密（catplay 只加密 opcode=VideoFrame），不消耗 ChaCha 帧 nonce。
+- **MIB3 需要第二条 iAP2 链路（WiFi 隧道），只回 ACK 会被 ~10s 拆链**（2026-10-19
+  定谳，当晚日志 + AADisplay Frida 对照）：AirPlay 会话建立后，手机必须在屏幕流
+  SETUP 成功后**主动经控制通道** POST /command（iAPSendMessage 信封）发一次 DETECT，
+  车机回 SYN（事件通道）→ 手机 SYN|ACK（控制通道）→ 链路 NORMAL 后重跑控制会话
+  （0x1D00→0x1D01→0x1D02+0xAA00→0xAA06→0xAA02 挑战【长度按车机记忆，隧道独立键，
+  冷启动 20B 优先；同车蓝牙/隧道偏好可能不同——3315 蓝牙认 32B 而 Frida 隧道 20B】
+  →0xAA03→0xAA05→突发
+  0x4E0C/0xA100/0x4E0A/0x4E0B/0x4E09/0xFFFA/0xFFF0→应答订阅 0x5000/0x4157/0x4154/
+  0x4170，0xFFFB 只链路 ACK）。实现：`airplay/VirtualIap2Link.kt`（三形态合一：
+  DiPlay 隧道/MIB3/旧回显），协议细节与 Frida 逐字节常量见 `docs/PROTOCOL-NOTES.md`
+  §12。硬约束：① 手机→车机链路帧**只能**走控制通道 POST（事件通道出站 MIB3 不读）；
+  ② DETECT 必须在屏幕 SETUP 之后发一次（早发被冲掉，之后车机 marker 一律忽略）；
+  ③ 回显 LSP 声明自己的 maxOutgoing=0x7F（原样回显对端表=自己限死在小窗口，突发
+  积压）；④ 0xFFFA/0xFFF0/0x4158/0x5001 用逐字节常量，**勿重新编码**；⑤ 参考仓库
+  `reference/AADisplay` 是 GPL-3.0：只看协议事实，代码不抄。
 - **MFi 挑战长度按车机持久化，不要全局写死某一档**（2026-10-19 奥迪 MMI 3315 实测）：
   20B 挑战在该车静默 **6.0 秒**无应答，32B 才在 0.64 秒回签名——只靠「真车都 20B
   优先」的基线，每次连接都白等 6 秒。而各接收端偏好相反：DiPlay 只认 32B（长度不符

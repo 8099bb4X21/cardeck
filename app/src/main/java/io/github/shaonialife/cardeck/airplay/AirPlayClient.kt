@@ -3,7 +3,6 @@ package io.github.shaonialife.cardeck.airplay
 import android.content.Context
 import android.os.SystemClock
 import io.github.shaonialife.cardeck.iap2.Iap2Csm
-import io.github.shaonialife.cardeck.iap2.Iap2LinkEngine
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
 import io.github.shaonialife.cardeck.net.EndpointHosts
@@ -437,6 +436,10 @@ class AirPlayClient(
         failAllPending("控制通道关闭")
         runCatching { iapTunnel?.socket?.close() }
         iapTunnel = null
+        iapLink = null
+        // 注意：controlIapTx 不在这里 shutdown——close() 会被同实例的重试路径
+        // （retryWithPairing 等）复用，杀掉执行器会废掉重连后的 MIB3 出站；
+        // 守护线程常驻的代价可忽略（每客户端实例一根）
     }
 
     /**
@@ -1044,7 +1047,7 @@ class AirPlayClient(
     }
 
     /**
-     * 隧道客户端引用（DiPlay 形态）：事件通道虚拟链路（[IapLinkOverEvent]）的**出站方向**
+     * 隧道客户端引用（DiPlay 形态）：事件通道虚拟链路（[VirtualIap2Link]）的**出站方向**
      * 必须写进 type-130 TCP（DiPlay 的隧道链路引擎只从 TCP 读；其出站走事件通道，
      * 与我们被动接收一致）。无隧道（Audi 事件通道形态）时出站继续走事件通道 [sendIap]。
      */
@@ -1083,249 +1086,76 @@ class AirPlayClient(
     // 复用 [io.github.shaonialife.cardeck.iap2.Iap2LinkEngine] 完成握手与帧收发。
 
     @Volatile
-    private var iapLink: IapLinkOverEvent? = null
+    private var iapLink: VirtualIap2Link? = null
 
-    /** 车机 iAPSendMessage 字节入口（MainActivity 事件命令处理器调用）。 */
-    fun onIapEventBytes(data: ByteArray) {
-        val link =
-            iapLink ?: synchronized(this) {
-                iapLink ?: IapLinkOverEvent().also {
+    /** 虚拟链路唯一实例（出站路由/三形态语义见 [VirtualIap2Link]）。 */
+    private fun obtainIapLink(): VirtualIap2Link =
+        iapLink ?: synchronized(this) {
+            iapLink
+                ?: VirtualIap2Link(
+                    log = { line -> log(line) },
+                    sendEventIap = ::sendIap,
+                    sendControlIap = ::postControlIap,
+                    tunnelWriter = { iapTunnel },
+                    alive = { socket?.isClosed == false },
+                ).also {
                     it.begin()
                     iapLink = it
                 }
-            }
-        link.onCarBytes(data)
+        }
+
+    /** 车机 iAPSendMessage 字节入口（SessionController 事件命令处理器调用）。 */
+    fun onIapEventBytes(data: ByteArray) {
+        obtainIapLink().onCarBytes(data)
     }
 
-    inner class IapLinkOverEvent {
-        private val lock = Any()
-        private val engine = Iap2LinkEngine()
-        private val parser =
-            Iap2Csm
-                .Parser()
-        private var frameCount = 0
-        private var eaCount = 0
-        private var started = false
-        private var detectReplies = 0
+    /**
+     * MIB3 布防：屏幕流 SETUP 成功后调用——主动经**控制通道** POST /command 发一次
+     * DETECT，随后等车机 SYN（真机 Frida 时序，详见 [VirtualIap2Link.armMib3]）。
+     * 明文会话（pre-HomeKit 老车机）没有 WiFi 隧道语义，跳过。
+     */
+    private fun armMib3VirtualLink() {
+        if (cipher == null) return
+        if (iapTunnel != null) return // DiPlay 隧道形态：不需要（也不该）布防
+        obtainIapLink().armMib3()
+    }
 
-        /** 隧道发送端 CSM 握手进度（仅在隧道存在时推进；Audi 事件通道形态不参与）。 */
-        private var tunnelCsmStarted = false
-        private var tunnelIdentified = false
-
-        /** 同步回显待投递（隧道门闸：回显真正写进隧道 TCP 后才允许发 0x1D00）。 */
-        private var pendingEchoFlush = false
-        private var tunnelEchoDelivered = false
-
-        init {
-            engine.onEaData = { bytes -> handleEaData(bytes) }
-            engine.onSynchronizationEchoSent = { pendingEchoFlush = true }
-            // 节拍线程：驱动引擎计时器（重传等）
-            Thread({
-                while (socket?.isClosed == false) {
-                    try {
-                        Thread.sleep(200)
-                    } catch (_: InterruptedException) {
-                        return@Thread
-                    }
-                    synchronized(lock) {
-                        engine.advanceTime(System.nanoTime() / 1_000_000L)
-                        drainLocked()
-                    }
-                }
-            }, "iap-link-pacer").apply {
-                isDaemon = true
-                start()
-            }
+    /**
+     * 控制通道 iAPSendMessage 出站（MIB3）：手机侧 iAP2 链路帧**必须**走 RTSP 控制
+     * 连接上的 POST /command——写在事件通道上时 MIB3 根本不读（DiPlay 宽容，奥迪
+     * 不宽容；AADisplay Frida 结论）。串行执行器：不阻塞链路节拍线程，与
+     * /feedback 心跳共用 request() 的 CSeq/写锁（线程安全设计见 AirPlayClient）。
+     */
+    private val controlIapTx =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "mib3-iap-tx").apply { isDaemon = true }
         }
+    private var controlIapCount = 0
 
-        fun begin() {
-            synchronized(lock) {
-                if (started) return
-                started = true
-                // DETECT 语义（catplay LinkLayer server 角色）：静默进协商，
-                // 车机（客户端）DETECT 一次我们回一次，绝不主动重发
-                engine.enterNegotiating()
-                log("IAPLINK: 车机发来链路 marker（DETECT）——服务端模式待命，等车机 SYN")
-            }
-        }
-
-        fun onCarBytes(bytes: ByteArray) {
-            synchronized(lock) {
-                // 隧道存在时切换「回显先行」协商语义（DiPlay 对端引擎硬性期望，详见 Iap2LinkEngine）
-                engine.echoFirst = iapTunnel != null
-                // 车机 DETECT：一问一答（catplay server 角色：收到即回、绝不主动）。
-                // 引擎处于 NEGOTIATING（尚未见 SYN）时的裸 marker 都按 DETECT 对待
-                if (bytes.size == 6 &&
-                    bytes[0] == 0xFF.toByte() &&
-                    bytes[1] == 0x55.toByte() &&
-                    engine.state == Iap2LinkEngine.State.NEGOTIATING
-                ) {
-                    detectReplies++
-                    log("IAPLINK: 回 DETECT #$detectReplies")
-                    sendLinkBytes(Iap2LinkEngine.MARKER)
-                }
-                engine.feed(bytes, System.nanoTime() / 1_000_000L)
-                drainLocked()
-            }
-        }
-
-        /** 链路字节出站：有隧道走隧道 TCP（DiPlay），否则走事件通道（Audi）。 */
-        private fun sendLinkBytes(bytes: ByteArray) {
-            if (bytes.isEmpty()) return
-            val tunnel = iapTunnel
-            if (tunnel != null) {
-                tunnel.writeIapBytes(bytes)
-            } else {
-                sendIap(bytes)
-            }
-        }
-
-        /**
-         * 引擎出站字节落盘：有隧道写隧道 TCP（成功且内容含同步回显时标记回显已送达），
-         * 否则走事件通道（回显发往错误通道时作废投递标记，等对端 SYN 重发重新回显）。
-         */
-        private fun flushOutputLocked() {
-            val out = engine.takeOutput()
-            if (out.isEmpty()) return
-            val tunnel = iapTunnel
-            if (tunnel != null) {
-                val ok = tunnel.writeIapBytes(out)
-                if (ok && pendingEchoFlush) {
-                    pendingEchoFlush = false
-                    if (!tunnelEchoDelivered) {
-                        tunnelEchoDelivered = true
-                        log("IAPLINK: ✓ 同步回显已写入隧道（链路协商完成，发送端 CSM 就绪）")
-                    }
-                }
-            } else {
-                sendIap(out)
-                pendingEchoFlush = false
-            }
-        }
-
-        private fun drainLocked() {
-            while (true) {
-                when (val event = engine.pollEvent()) {
-                    null -> break
-                    is Iap2LinkEngine.Event.Control ->
-                        handleFrameLocked(event.bytes)
-
-                    is Iap2LinkEngine.Event.Dead -> {
-                        log("IAPLINK: 虚拟链路终止 - ${event.reason ?: "EOF"}")
-                        return
-                    }
-                }
-            }
-            // 先冲刷（回显必须先行送达对端），再启动 CSM，最后再冲刷 CSM 字节
-            flushOutputLocked()
-            maybeStartTunnelCsmLocked()
-            flushOutputLocked()
-        }
-
-        /**
-         * 隧道发送端握手启动：链路协商完成（NORMAL）且同步回显已送达后，主动发
-         * 0x1D00 StartIdentification。DiPlay 的隧道控制端（Iap2WirelessControlClient）
-         * 在 awaitReady 返回后等待我们发 0x1D00；缺此步其 5 分钟窗口超时即拆掉
-         * 整条链路（2026-10-11 实测根因）。回显送达门闸保证对端引擎先进入 NORMAL
-         * （其对端在未收到 SYN 前收到任何裸 ACK 会直接 die）。
-         */
-        private fun maybeStartTunnelCsmLocked() {
-            if (tunnelCsmStarted || iapTunnel == null || !tunnelEchoDelivered) return
-            if (engine.state != Iap2LinkEngine.State.NORMAL) return
-            tunnelCsmStarted = true
-            sendCsmLocked(
-                Iap2MessageIds.START_IDENTIFICATION,
-            )
-        }
-
-        /** 隧道上的 CSM 发送（计入发送窗口由引擎 flush 到隧道 TCP）。 */
-        private fun sendCsmLocked(
-            messageId: Int,
-            body: ByteArray = ByteArray(0),
-        ) {
-            val frame =
-                Iap2Csm
-                    .encode(messageId, body)
-            val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L)
-            log(
-                "IAPLINK: 隧道 tx 0x${messageId.toString(16)} " +
-                    "(${Iap2MessageIds.nameOf(messageId)}) " +
-                    "${frame.size}B ok=$ok",
-            )
-        }
-
-        /**
-         * 隧道发送端握手（对照 DiPlay Iap2WirelessControlClient 的对端期望）：
-         *   0x1D01 → 回 0x1D02（识别完成）→ 随发 0xAA00
-         *   0xAA01 → 发 0xAA02 挑战（32B，DiPlay CARLINKIT 身份只接受精确 32B）
-         *   0xAA03 → 发 0xAA05（自报成功）
-         * 完成后对方发出订阅并视为隧道就绪，5 分钟拆链不再发生。
-         */
-        private fun maybeRespondTunnelCsmLocked(frame: Iap2Csm.Frame) {
-            if (iapTunnel == null) return
-            val ids = Iap2MessageIds
-            when (frame.messageId) {
-                ids.IDENTIFICATION_INFORMATION -> {
-                    if (tunnelIdentified) return
-                    tunnelIdentified = true
-                    val params =
-                        Iap2Csm
-                            .parseParams(frame.body)
-                            .associateBy { it.id }
-                    log(
-                        "IAPLINK: 隧道 rx 0x1d01 接收端身份 " +
-                            "name=${params[0]?.value?.decodeToString()?.trimEnd('\u0000')} " +
-                            "model=${params[1]?.value?.decodeToString()?.trimEnd('\u0000')}",
+    fun postControlIap(frame: ByteArray) {
+        controlIapTx.execute {
+            try {
+                val body =
+                    BinaryPlist.encode(
+                        linkedMapOf(
+                            "type" to "iAPSendMessage",
+                            "params" to linkedMapOf<String, Any?>("data" to frame),
+                        ),
                     )
-                    sendCsmLocked(ids.IDENTIFICATION_ACCEPTED)
-                    sendCsmLocked(ids.MFI_REQUEST_CERTIFICATE)
-                }
-
-                ids.MFI_CERTIFICATE -> {
-                    val challenge = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
-                    sendCsmLocked(
-                        ids.MFI_REQUEST_CHALLENGE,
-                        Iap2Csm
-                            .param(0, challenge),
+                val (statusLine, _) =
+                    request(
+                        "POST",
+                        "/command",
+                        body,
+                        contentType = "application/x-apple-binary-plist",
                     )
+                controlIapCount++
+                if (controlIapCount <= 10 || controlIapCount % 50 == 0) {
+                    log("IAPLINK: tx(控制通道) #$controlIapCount ${frame.size}B [$statusLine]")
                 }
-
-                ids.MFI_RESPONSE -> {
-                    sendCsmLocked(ids.MFI_AUTHENTICATION_SUCCEEDED)
-                    log("IAPLINK: 隧道 MFi 完成——等待对端订阅（随后其标记隧道就绪）")
-                }
+            } catch (error: IOException) {
+                log("IAPLINK: 控制通道 POST 失败 - ${error.message}")
             }
-        }
-
-        private fun handleFrameLocked(bytes: ByteArray) {
-            frameCount++
-            val frames = parser.offer(bytes)
-            for (frame in frames) {
-                val hex = frame.body.joinToString(" ") { "%02x".format(it) }
-                if (frameCount <= 30 || frameCount % 100 == 0) {
-                    log(
-                        "IAPLINK: rx 0x${frame.messageId.toString(16)} " +
-                            "(${Iap2MessageIds.nameOf(frame.messageId)}) " +
-                            "${frame.body.size}B hex=${hex.take(160)}",
-                    )
-                }
-                maybeRespondTunnelCsmLocked(frame)
-            }
-            if (frames.isEmpty() && frameCount <= 10) {
-                log("IAPLINK: rx ${bytes.size}B（非 CSM）hex=" + bytes.joinToString(" ") { "%02x".format(it) }.take(160))
-            }
-        }
-
-        /** 引擎回调：EA 会话（2 号）数据帧——触摸 HID 的高概率载体。 */
-        var onEaData: ((ByteArray) -> Unit)? = null
-
-        fun handleEaData(bytes: ByteArray) {
-            eaCount++
-            val hex = bytes.joinToString(" ") { "%02x".format(it) }
-            if (eaCount <= 30 || eaCount % 100 == 0) {
-                log("IAPLINK: EA 数据 #$eaCount ${bytes.size}B hex=${hex.take(200)}")
-            }
-            onEaData?.invoke(bytes)
         }
     }
 
@@ -1766,6 +1596,9 @@ class AirPlayClient(
             "AIRPLAY: ✓ 主屏流协商成功 dataPort=$dataPort connId=$connectionId " +
                 "加密=${if (cipher is StreamFrameCipher.ChaCha) "ChaCha20" else "AES-128-CTR（未配对会话）"}",
         )
+        // MIB3：屏幕流 SETUP 200 拿到 dataPort 后，真机此时在控制通道发 detect（Frida
+        // 时序：screen SETUP → phone detect on control → HU SYN on control）。见 armMib3VirtualLink。
+        armMib3VirtualLink()
         return ScreenStreamInfo(connectionId, dataPort, cipher)
     }
 

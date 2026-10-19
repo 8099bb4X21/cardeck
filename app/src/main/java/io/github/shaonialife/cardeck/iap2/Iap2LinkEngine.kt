@@ -2,6 +2,9 @@ package io.github.shaonialife.cardeck.iap2
 
 import java.io.ByteArrayOutputStream
 
+/** 手机端回显 SYN|ACK 时声明的发送窗口（真机 iPhone / AADisplay 同值 0x7F）。 */
+private const val PHONE_DECLARED_MAX_OUTGOING = 0x7F
+
 /**
  * iAP2 链路引擎（发送端实现；链路层协议对称，本实现按「发起方」工作）。
  *
@@ -171,9 +174,20 @@ class Iap2LinkEngine(
 
     val isDead: Boolean get() = state == State.DEAD
 
+    /** 本引擎是否发起过 SYN（start=发起方；enterNegotiating/startResponder=响应方）。 */
+    private var originatedSyn = false
+
+    /**
+     * **本方声明的发送窗口**（LSP maxOutgoing 语义 = 声明方自己的未确认包上限）：
+     * 发送窗口按此计，而非对端声明值——回显时我们会声明 0x7F（ownSyncOf），
+     * 按对端值计窗会把突发消息卡死在对端的小窗口里（MIB3 突发 8 条 × 对端 4）。
+     */
+    private var declaredMaxOutgoing = maxOutgoing
+
     /** 进入协商：发 marker + 同步包（发送端=发起方，不等待对端 marker）。 */
     fun start(nowMillis: Long) {
         if (state != State.IDLE) return
+        originatedSyn = true
         state = State.NEGOTIATING
         appendOutput(MARKER)
         markerDeadline = nowMillis + MARKER_RESEND_MILLIS
@@ -381,7 +395,30 @@ class Iap2LinkEngine(
                 // 一次 0x1D00 都没走到（日志：133 条 SYN / 0 条 ACK）。
                 sendSynchronizationEcho(sync, sequence)
                 if (firstAdoption) onPeerSynchronizationAdopted?.invoke(sync)
-                if (echoFirst) completeNegotiationIfPending(nowMillis)
+                // 响应方（未发过 SYN）回显即视为协商完成：对端见到 SYN|ACK 后即认为
+                // 链路可用（MIB3 真机 iPhone 发完 SYN|ACK 立即发 0x1D00，不等 ACK）；
+                // 发起方仍等对端 ACK/数据（原语义）
+                if (echoFirst || !originatedSyn) completeNegotiationIfPending(nowMillis)
+            } else if (sync != null &&
+                !isPureSyn &&
+                adoptedSynchronization == null &&
+                state == State.NEGOTIATING
+            ) {
+                // 发起方收到 SYN|ACK（对端对我们 SYN 的应答，载荷=对端表）：
+                // 只采纳、**不回显**（回显会形成互回 SYN|ACK 的乒乓）。此前只在纯
+                // SYN 上采纳，对端是「纯响应方」时发起方永远到不了 NORMAL——
+                // MIB3 虚拟链路（手机 arm detect → 车机 SYN → 手机 SYN|ACK）正是
+                // 这个形态：车机侧由本分支收敛，随后按超时机制补裸 ACK。
+                peerSynchronization = sync
+                adoptedSynchronization = sync
+                sync.sessions.firstOrNull { it.kind == CONTROL_KIND }?.let {
+                    adoptedPeerControlSessionId = it.id
+                }
+                // Watermark must also advance (the pure SYN branch does the same): when left at 0,
+                // the initiator treats the responder's first data frame as an "expired frame", only re-sending ack=0 —
+                // the responder's send window gets poisoned by this bogus ack (backlog never flushes, unit test located)
+                lastReceivedInOrder = sequence
+                completeNegotiationIfPending(nowMillis)
             }
         }
         if (control and CONTROL_ACKNOWLEDGEMENT != 0) {
@@ -439,17 +476,29 @@ class Iap2LinkEngine(
      * 对**同一个** SYN 的重发保持字节级幂等：重放上次那一帧，不推进序号。
      * DiPlay 隧道模式每 500ms 重发同一 SYN，靠这条维持原有行为。
      */
+
+    /**
+     * 回显用的「我方参数」：会话表/超时沿用对端声明（手机端无特殊要求），
+     * 但 **maxOutgoing 提到 0x7F**——原样回显会把我们自己的发送窗口限死在对端的
+     * 小窗口（MIB3 突发 8 条在 maxOutgoing=4 下积压；真机 iPhone/AADisplay 均声明
+     * 0x7F）。maxLength 保持对端值（=我们的收包上限，勿放大）。
+     */
+    private fun ownSyncOf(peer: SynchronizationPayload): SynchronizationPayload =
+        peer.copy(maxOutgoing = PHONE_DECLARED_MAX_OUTGOING).also {
+            declaredMaxOutgoing = PHONE_DECLARED_MAX_OUTGOING
+        }
+
     private fun sendSynchronizationEcho(
         sync: SynchronizationPayload,
         peerSequence: Int,
     ) {
         if (lastEchoPeerSequence == peerSequence) {
-            writePacket(sync.encode(), lastEchoOwnSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
+            writePacket(ownSyncOf(sync).encode(), lastEchoOwnSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
             onSynchronizationEchoSent?.invoke()
             return
         }
         val ownSequence = nextSequence(sentSequence).also { sentSequence = it }
-        writePacket(sync.encode(), ownSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
+        writePacket(ownSyncOf(sync).encode(), ownSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
         lastEchoPeerSequence = peerSequence
         lastEchoOwnSequence = ownSequence
         onSynchronizationEchoSent?.invoke()
@@ -495,7 +544,7 @@ class Iap2LinkEngine(
         while (sendBacklog.isNotEmpty()) {
             val packet = sendBacklog.first()
             val peer = peerSynchronization
-            val window = peer?.maxOutgoing ?: maxOutgoing
+            val window = declaredMaxOutgoing
             if (lastSentAcknowledged != null &&
                 sequenceDistance(sentSequence, lastSentAcknowledged!!) >= window
             ) {

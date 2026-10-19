@@ -538,3 +538,52 @@ ACK 位与 ack 字段，裸 ACK 本就是冗余的；catplay 主机路径也只�
 | Windows 接收端（WinPlay） | `reference/WinPlay/`（TS 接收端；设备过滤见 §9d） |
 | MFi 认证（接收端向） | `reference/xcertplay/.../mfi/`；Oligo 博客（单向性证据） |
 | 解密固件(仅查阅) | ludwig-v/wireless-carplay-dongle-reverse-engineering（未克隆） |
+
+## 12. MIB3 WiFi 隧道（AirPlay 会话之上的第二条 iAP2 链路，2026-10-19）
+
+> 事实源：`reference/AADisplay`（分支 AADisplay-Split-Lite-Carplay，**GPL-3.0 只读参考**）。
+> 他们用 Frida 挂越狱 iPhone 的 mediaserverd 抓的真机握手；本仓库据此实现
+> `airplay/VirtualIap2Link.kt`（协议事实照抄，代码独立编写）。
+
+**为什么需要**：MIB3 在 AirPlay 会话建立后还要求手机在**事件通道**上开第二条 iAP2
+链路并重跑控制会话——只回链路 ACK（空回显）时 MIB3 约 10~12 秒整链拆除（本仓库
+2026-10-19 两轮实车日志 10.2s 复现；此前误判为心跳缺失，§9e 的三条心跳修复并不能
+救这台车）。AADisplay 源码注释原文："Empty ACK alone makes MIB3 tear AirPlay control
+down in ~12s with no picture."
+
+**传输不对称**（关键）：
+- 车机→手机：链路字节走**事件通道**（TCP 5001）上的 `POST /command`，bplist
+  `{"type":"iAPSendMessage","params":{"data":<链路帧>}}`；
+- 手机→车机：走**RTSP 控制通道**（7000）上的 `POST /command`（同样的 iAPSendMessage
+  信封，ChaCha 封帧）——写在事件通道上 MIB3 **不读**（DiPlay 宽容，奥迪不宽容）。
+
+**时序**（Frida 真机）：
+1. 屏幕流 SETUP 200（拿到 dataPort）后，手机主动发**一次** DETECT marker（经控制
+   通道）——早发会在 SETUP 交换期间被冲掉；此后车机的 marker 都是探测重发，忽略；
+2. 车机回 SYN（事件通道，纯 SYN 带 LSP）→ 手机回 SYN|ACK（控制通道）。LSP 要声明
+   **自己的**参数：maxOutgoing=0x7F（原样回显对端表=把自己限死在对端小窗口里，
+   突发消息会积压）、maxLength 保持对端值；会话表沿用对端（后续版本可注入
+   file-transfer 0x0C，仪表盘封面要用）；
+3. 链路 NORMAL 后手机发 0x1D00 → 车机 0x1D01 → 手机 0x1D02 + 0xAA00 →
+   （车机 0xAA06 auth serial → 手机再发 0xAA00）→ 车机 0xAA01 证书 → 手机 0xAA02
+   挑战 → 车机 0xAA03 → 手机 0xAA05（不验签直接接受）。**挑战长度无版本号可查**
+   （由车机 MFi 认证芯片代次决定，不在任何身份/版本字段里）：Frida 抓到的隧道
+   真机是 20B，DiPlay CARLINKIT 只认 32B，同一台 MMI 3315 蓝牙认 32B——所以隧道
+   路径接 `MfiLengthMemory`（记忆键=身份串+" tunnel"，与蓝牙链路独立），冷启动
+   基线 20B 优先，静默 6s/3s 换档重试、被拒（0xAA04）即换、全静默照发 0xAA05；
+4. 0xAA05 后手机**突发**（先于车机任何订阅）：0x4E0C 无线会话标识(随机大写 UUID)、
+   0xA100(param 6 空)、0x4E0A 语言 "zh"、0x4E0B 设备时间(u64 秒+s16 时区分+u8 夏令时)、
+   0x4E09 设备名 "iPhone"、0xFFFA StartLocationInformation、0xFFF0 GPRMC 状态——
+   后两条为逐字节 Frida 常量（`VirtualIap2Link` companion）；
+5. 车机订阅应答：0x5000→0x5001 NowPlaying 空态（**仪表盘歌词的数据通路**，后续接
+   MediaSessionsState）、0x4157→0x4158 通讯空态、0x4154→0x4155 无通话、
+   0x4170→0x4171 空列表；0xEA02(requestAppLaunch)/0xA101(VehicleStatus)/
+   **0xFFFB(PASCD 定位样本 ~1Hz) 只链路 ACK——漏 ACK 车机同样 ~10s 后关控制通道**。
+
+**引擎配套改动**（`iap2/Iap2LinkEngine.kt`，均有单测）：
+- 发起方收到 SYN|ACK（非纯 SYN）也采纳会话表并推进有序水位（只采纳不回显）；
+- 响应方回显 SYN|ACK 即视为协商完成（真机不等 ACK 就发 0x1D00）；
+- 回显用 ownSyncOf（maxOutgoing=0x7F），发送窗口按**本方声明值**计。
+
+**AADisplay 参考索引**：`carplay/protocol/WifiIap2Link.kt`（时序+常量）、
+`CarPlayRtspSession.kt:642`（控制通道 POST /command 写法）、`docs/AUDI_CARPLAY_CONNECT_ANALYSIS.md`。
