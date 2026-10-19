@@ -165,6 +165,10 @@ class Iap2LinkEngine(
     private var syncDeadline: Long? = null
     private var retransmitDeadline: Long? = null
 
+    /** 上一次回显 SYN 时对端的 SYN 序号与我方序号（重传同一 SYN 时原样重放）。 */
+    private var lastEchoPeerSequence: Int? = null
+    private var lastEchoOwnSequence = 0
+
     val isDead: Boolean get() = state == State.DEAD
 
     /** 进入协商：发 marker + 同步包（发送端=发起方，不等待对端 marker）。 */
@@ -349,7 +353,12 @@ class Iap2LinkEngine(
             // （DiPlay openTunnel）只从 TCP 读，若其 SYN 到达时我方隧道尚未建立，
             // 首次回显会走错通道；其 500ms 的 SYN 重发让我们在隧道就绪后补上回显
             // （parseAvailable 的帧扫描会丢弃重发中的 FF55 marker，无副作用）。
-            if (sync != null && (state == State.NEGOTIATING || echoFirst)) {
+            //
+            // **只有纯 SYN（不带 ACK 位）才回 SYN|ACK**：SYN|ACK 说明对端在回应我们的
+            // 发起方 SYN，属于「它已应答」的信号（见下方 ACK 分支），再回一条就会形成
+            // 双方互回 SYN|ACK 的无限乒乓（单测暴露：两个引擎互相喂帧时协商永不收敛）。
+            val isPureSyn = (control and CONTROL_ACKNOWLEDGEMENT) == 0
+            if (sync != null && isPureSyn && (state == State.NEGOTIATING || echoFirst)) {
                 val firstAdoption = adoptedSynchronization == null
                 peerSynchronization = sync
                 if (firstAdoption) adoptedSynchronization = sync
@@ -361,21 +370,18 @@ class Iap2LinkEngine(
                     adoptedPeerControlSessionId = it.id
                 }
                 lastReceivedInOrder = sequence
-                if (echoFirst) {
-                    // 隧道模式（DiPlay 对端引擎硬性期望，2026-10-11 对照源码）：
-                    //  ① 先收 SYN 再收任何裸 ACK——ACK 先到直接 die；
-                    //  ② 零 ACK 模式（maxAcks=0），等对端 ACK 完成协商会死锁。
-                    // 因此只发 SYN|ACK 回显（自带确认位，一帧同时完成两件事），不回裸 ACK。
-                    sendSynchronizationEcho(sync)
-                    if (firstAdoption) onPeerSynchronizationAdopted?.invoke(sync)
-                    completeNegotiationIfPending(nowMillis)
-                } else {
-                    sendAcknowledgement()
-                    if (firstAdoption) {
-                        sendSynchronizationEcho(sync)
-                        onPeerSynchronizationAdopted?.invoke(sync)
-                    }
-                }
+                // **每次** SYN 都只回一帧 SYN|ACK（不回裸 ACK）：
+                //  ① 语义完整：SYN|ACK 自带确认位与 ack 字段，裸 ACK 是冗余的
+                //     （catplay `on_recv_neg_host` 正是只发 SYN+ACK）；
+                //  ② 序号不能撞：裸 ACK 用当前 sentSequence，而 SYN|ACK 会自增，下一次
+                //     裸 ACK 就复用上一帧 SYN|ACK 的序号——BMW 把同序号帧当重复丢弃；
+                //  ③ 重传同一 SYN 时整帧原样重放，字节级幂等。
+                // 2026-10-19 BMW 87866 定谳：旧实现在首次采纳后只回裸 ACK，该车机每轮
+                // 重试都用新序号重开协商（161→191→40…），因此 14 轮全部卡在协商、
+                // 一次 0x1D00 都没走到（日志：133 条 SYN / 0 条 ACK）。
+                sendSynchronizationEcho(sync, sequence)
+                if (firstAdoption) onPeerSynchronizationAdopted?.invoke(sync)
+                if (echoFirst) completeNegotiationIfPending(nowMillis)
             }
         }
         if (control and CONTROL_ACKNOWLEDGEMENT != 0) {
@@ -424,10 +430,28 @@ class Iap2LinkEngine(
 
     /**
      * 回显对端 sync（SYN|ACK，载荷与对端完全一致）——声明「手机采纳车机会话表」。
-     * 不消耗发送序号（Audi 实测可用；extractor 真车客户端同款：ACK 与 echo 都不占序号）。
+     *
+     * **必须消耗一个新发送序号**：对端按自己的序号账法校验回包（catplay
+     * `NegotiationTx::SynAck` 用 `take_own_seq()` 自增）。旧实现复用 `sentSequence`
+     * （发 SYN 后从未自增），于是 SYN 与 SYN-ACK 同为 seq=99，BMW 判为重复帧丢弃——
+     * 14 轮协商全部超时、车机一条 ACK 都没回（2026-10-19 实车日志定谳）。
+     *
+     * 对**同一个** SYN 的重发保持字节级幂等：重放上次那一帧，不推进序号。
+     * DiPlay 隧道模式每 500ms 重发同一 SYN，靠这条维持原有行为。
      */
-    private fun sendSynchronizationEcho(sync: SynchronizationPayload) {
-        writePacket(sync.encode(), sentSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
+    private fun sendSynchronizationEcho(
+        sync: SynchronizationPayload,
+        peerSequence: Int,
+    ) {
+        if (lastEchoPeerSequence == peerSequence) {
+            writePacket(sync.encode(), lastEchoOwnSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
+            onSynchronizationEchoSent?.invoke()
+            return
+        }
+        val ownSequence = nextSequence(sentSequence).also { sentSequence = it }
+        writePacket(sync.encode(), ownSequence, CONTROL_SYNCHRONIZE or CONTROL_ACKNOWLEDGEMENT, 0)
+        lastEchoPeerSequence = peerSequence
+        lastEchoOwnSequence = ownSequence
         onSynchronizationEchoSent?.invoke()
     }
 

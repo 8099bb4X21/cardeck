@@ -87,7 +87,149 @@ class Iap2LinkEngineTest {
         }
     }
 
+    // ---- 协商细节回归 ----
+
+    /**
+     * SYN-ACK 必须使用**新的**发送序号（对端按 `SYN.seq + 1` 校验）。
+     *
+     * 2026-10-19 BMW 87866 实车日志：我方 SYN 与 SYN-ACK 同为 seq=99，车机判为重复帧
+     * 丢弃，14 轮协商全部超时、133 条 SYN 未换回一条 ACK。catplay 用 `take_own_seq()`
+     * 消耗新序号，这里锁死该行为。
+     */
+    @Test
+    fun synAckUsesFreshSequenceNumber() {
+        val phone = Iap2LinkEngine()
+        phone.start(0)
+        phone.takeOutput() // marker + 我方 SYN（seq=99）
+
+        phone.feed(synFrame(peerSequence = 161), 1)
+        val frames = parseFrames(phone.takeOutput())
+        val synAck = frames.single { it.control == 0xC0 }
+
+        assertEquals("ack 必须回显对端 SYN 序号", 161, synAck.ack)
+        assertEquals("SYN-ACK 序号必须比 SYN 大 1", 100, synAck.sequence)
+    }
+
+    /**
+     * 协商期间**每一条** SYN 都要回 SYN|ACK。
+     *
+     * BMW 每轮重试都用新序号重开协商；旧实现只在首次采纳时回显，其余只回裸 ACK，
+     * 车机永远走不完协商。catplay `on_recv_neg_host` 对每条 SYN 都发 SYN+ACK。
+     */
+    @Test
+    fun everySynGetsASynAckReply() {
+        val phone = Iap2LinkEngine()
+        phone.start(0)
+        phone.takeOutput()
+
+        // 车机连续三轮用不同序号重开协商（复刻日志 161 → 191 → 40）
+        val sequences = listOf(161, 191, 40)
+        val replies = ArrayList<Pair<Int, Int>>() // (synAckSeq, ack)
+        sequences.forEachIndexed { index, peerSeq ->
+            phone.feed(synFrame(peerSequence = peerSeq), (index + 1).toLong())
+            parseFrames(phone.takeOutput())
+                .filter { it.control == 0xC0 }
+                .forEach { replies += it.sequence to it.ack }
+        }
+
+        assertEquals("每条 SYN 都应有 SYN|ACK", sequences.size, replies.size)
+        assertEquals(sequences, replies.map { it.second })
+        // 序号逐次递增（99 → 100 → 101 → 102）
+        assertEquals(listOf(100, 101, 102), replies.map { it.first })
+    }
+
+    /** 同一个 SYN 的字节级重发必须幂等：整对帧原样重放，不推进序号、不产生新序号。 */
+    @Test
+    fun retransmittedSynKeepsTheSameEcho() {
+        val phone = Iap2LinkEngine()
+        phone.start(0)
+        phone.takeOutput()
+
+        phone.feed(synFrame(peerSequence = 77), 1)
+        val first = phone.takeOutput()
+        phone.feed(synFrame(peerSequence = 77), 2)
+        val again = phone.takeOutput()
+
+        assertArrayEquals("重传同一 SYN 应原样重放", first, again)
+        assertEquals(100, parseFrames(first).single { it.control == 0xC0 }.sequence)
+    }
+
+    /** 裸 ACK 不能与已发出的 SYN|ACK 撞序号（BMW 会把同序号帧当重复丢弃）。 */
+    @Test
+    fun ackSequenceNeverDuplicatesTheSynAck() {
+        val phone = Iap2LinkEngine()
+        phone.start(0)
+        phone.takeOutput()
+
+        val emitted = ArrayList<Int>()
+        listOf(161, 191, 40).forEachIndexed { index, peerSeq ->
+            phone.feed(synFrame(peerSequence = peerSeq), (index + 1).toLong())
+            emitted += parseFrames(phone.takeOutput()).map { it.sequence }
+        }
+        assertEquals("序号必须严格递增且无重复", emitted.size, emitted.distinct().size)
+        assertEquals(emitted.sorted(), emitted)
+    }
+
     // ---- 工具 ----
+
+    private class ParsedFrame(
+        val control: Int,
+        val sequence: Int,
+        val ack: Int,
+        val frameLength: Int,
+    )
+
+    /** 解析一段输出里的所有 FF5A 帧（跳过前置 marker）。 */
+    private fun parseFrames(bytes: ByteArray): List<ParsedFrame> {
+        val frames = ArrayList<ParsedFrame>()
+        var offset = 0
+        while (offset + 9 <= bytes.size) {
+            if (bytes[offset] != 0xFF.toByte() || bytes[offset + 1] != 0x5A.toByte()) {
+                offset++
+                continue
+            }
+            val frame = parseFrame(bytes, offset)
+            frames += frame
+            offset += frame.frameLength
+        }
+        return frames
+    }
+
+    /** 解析一帧 FF5A（长度含 9 字节头 + 载荷 + 载荷校验和）。 */
+    private fun parseFrame(
+        bytes: ByteArray,
+        offset: Int,
+    ): ParsedFrame {
+        require(bytes[offset] == 0xFF.toByte() && bytes[offset + 1] == 0x5A.toByte()) {
+            "offset=$offset 不是 FF5A 帧头"
+        }
+        val length = ((bytes[offset + 2].toInt() and 0xFF) shl 8) or (bytes[offset + 3].toInt() and 0xFF)
+        return ParsedFrame(
+            control = bytes[offset + 4].toInt() and 0xFF,
+            sequence = bytes[offset + 5].toInt() and 0xFF,
+            ack = bytes[offset + 6].toInt() and 0xFF,
+            frameLength = length,
+        )
+    }
+
+    /**
+     * 构造车机侧的 SYN 帧（含 marker）。
+     *
+     * 帧头是 **9 字节**：`FF5A | u16 长度 | u8 控制 | u8 seq | u8 ack | u8 会话 | u8 头校验和`，
+     * 所以 seq 在帧内偏移 5、头校验和在偏移 8（不是 7——那一位是会话 ID）。
+     */
+    private fun synFrame(peerSequence: Int): ByteArray {
+        val engine = Iap2LinkEngine()
+        engine.start(0)
+        val raw = engine.takeOutput()
+        val synOffset = 6 // 前置 marker 6 字节
+        raw[synOffset + 5] = peerSequence.toByte()
+        // 头校验和 = 前 8 字节之和的补码
+        var sum = 0
+        for (index in synOffset until synOffset + 8) sum += raw[index].toInt() and 0xFF
+        raw[synOffset + 8] = (-sum and 0xFF).toByte()
+        return raw
+    }
 
     private fun exchange(
         a: Iap2LinkEngine,

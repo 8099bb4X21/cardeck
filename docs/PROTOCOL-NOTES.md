@@ -421,6 +421,56 @@ Android 16，应用 **0.1.4**；车机 `Audi_MMI_3315` / `AUDI 5163` / DELPHI，
 **诊断日志（本次新增）**：`VIDEO: ✓ VideoConfig 已发送 … flags=0x07 1412x654` 后面
 跟一行头部前 24 字节 hex——下次反馈可直接核对这些字段是否写对。
 
+## 9h. BMW 87866 卡在 iAP2 链路协商：SYN-ACK 序号重复（2026-10-19）
+
+日志 `logs/cardeck/CarDeck-log-20261019-103436.txt`（OnePlus PKR110 / Android 16，
+应用 0.1.6，车机 `BMW 87866` / MAC `9C:F5:5F:D0:44:09`）。**14 轮会话全部卡在链路层**：
+`iap2 link ready` 0 次、`0x1D00` 发送 0 次、`0x1D01` 收到 0 次。
+
+**帧统计（决定性证据）**：
+
+| 方向 | 帧类型 | 次数 |
+|---|---|---|
+| BMW → 手机 | `0x80` SYN | **133** |
+| BMW → 手机 | `0x40` ACK / 数据 | **0** |
+| 手机 → BMW | `0x40` 裸 ACK | 350 |
+| 手机 → BMW | `0xC0` SYN\|ACK | 14 |
+
+**根因一：SYN-ACK 复用 SYN 的序号。** 原始字节：
+
+```
+我方 SYN    : ff 5a 00 1d 80 63 ...      seq = 0x63 (99)
+我方 SYN|ACK: ff 5a 00 1a c0 63 a1 ...   seq = 0x63 (99)   ← 撞号
+```
+
+`sentSequence` 只在 `drainSendWindow()` 发数据帧时自增，协商阶段从不递增。对端按
+`SYN.seq + 1` 校验回包（catplay `verify_neg_seq_ack`：`packet.seq == peer_seq + 1`），
+同序号被判重复帧丢弃。catplay 的 `NegotiationTx::SynAck` 用 `take_own_seq()` 自增。
+修复：`sendSynchronizationEcho` 消耗一个新序号；**同一个 SYN 的字节级重发保持幂等**
+（重放上一帧，不推进序号——DiPlay 隧道模式每 500ms 重发同一 SYN）。
+
+**根因二：只有第一条 SYN 得到 SYN|ACK。** 旧实现 `if (firstAdoption) sendSynchronizationEcho(...)`，
+其后每条 SYN 只回裸 ACK。而 BMW **每轮重试都用新序号重开协商**（161→191→40…，
+日志里单轮最多收到 36 条 SYN），永远等不到它要的回显。catplay `on_recv_neg_host`
+对每条 SYN 都发 SYN+ACK。修复：**每条纯 SYN（不带 ACK 位）都回一帧 SYN|ACK**。
+
+**踩坑：裸 ACK 会与 SYN|ACK 撞号。** 裸 ACK 用当前 `sentSequence`，而 SYN|ACK 会自增，
+下一次裸 ACK 就复用上一帧 SYN|ACK 的序号。故主机路径改为**只回 SYN|ACK**（它自带
+ACK 位与 ack 字段，裸 ACK 本就是冗余的；catplay 主机路径也只发 SYN+ACK）。
+代价：Audi 实测的「裸 ACK + SYN|ACK」帧序变为单帧 SYN|ACK——仍符合协议，
+但**需在 Audi 上复测确认**（最终 ACK 会回 100 而非 99，序号偏移一位是正常的）。
+
+**踩坑：不能对所有带 SYN 位的帧都回 SYN|ACK。** 首版实现没区分 SYN 与 SYN|ACK，
+两个引擎互喂时形成无限乒乓（单测 `windowBacklogFlushesAfterAcknowledgement` 直接
+挂死并空转 CPU 55 秒，`jstack` 才看出）。判据必须是 `control and ACK == 0`。
+
+**次要问题（本轮未改，建议后续处理）**：
+- 出站客户端与入站会话并行：16 次「BMW 处于蓝牙已连接状态（HFP/A2DP）——已断开」，
+  3 秒重试线程反复拆 HFP/A2DP，真车侧看是蓝牙被持续扰动；
+- 未指定目标时依次去连蓝牙耳机（`HUAWEI FreeBuds 4` / `FreeClip 2`），候选应只保留
+  声明了 CarPlay/iAP2 服务的设备；
+- 裸 ACK 500ms 一次（350 条），BMW 的 LSP 声明 `ackTimeout=3000ms`，按对端值发即可。
+
 ## 10. 参考文件速查
 
 > 表中路径均指 `reference/` 下**代码精读来源**（xcertplay 与 DiPlay 同源，

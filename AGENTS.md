@@ -573,6 +573,16 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   因此凡是「车机屏黑但 app 显示已连接」都先核 `VIDEO: ✓ VideoConfig … flags=` 这行
   日志（会同时打印头部前 24 字节 hex）。新增屏幕流头字段时同理：先用 catplay
   `screen_frame_ext.rs` 对照，别只对着测试台验证。
+- **iAP2 协商：SYN|ACK 必须用新序号，且每条 SYN 都要回**（2026-10-19 BMW 87866
+  实车定谳，`docs/PROTOCOL-NOTES.md` §9h）：14 轮会话全部卡在链路层（`iap2 link
+  ready` 0 次），车机发 133 条 SYN、回 0 条 ACK。两个根因：① `sentSequence` 只在
+  发数据帧时自增，导致 SYN 与 SYN|ACK 同为 seq=99，对端按 `peerSeq+1` 校验后判重复
+  丢弃（catplay 用 `take_own_seq()`）；② 只有首次采纳时回显，而 BMW **每轮重试都用
+  新序号重开协商**，其余 SYN 只拿到裸 ACK 永远等不到回显。现状：每条**纯 SYN**
+  （`control and ACK == 0`）都回一帧 SYN|ACK，同一 SYN 的重发字节级幂等（不推进
+  序号）。两条踩坑：**裸 ACK 会与 SYN|ACK 撞号**（故主机路径只回 SYN|ACK，Audi
+  帧序随之从「裸 ACK+SYN|ACK」变为单帧，需复测）；**不能对所有带 SYN 位的帧都回**
+  （会与对端的 SYN|ACK 形成无限乒乓，单测曾因此空转 55 秒，只有 `jstack` 能看出）。
 - **AirPlay 会话级 SETUP 的 `deviceID` 必须是本机真实蓝牙 MAC**（2026-10-19
   WinPlay 实测）：接收端可以按「用户选中的 iPhone 蓝牙地址」过滤会话，对不上即回
   **403**，状态行是它特有的 `403 OK`（WinPlay 的 STATUS_TEXT 表没有 403，回退成
