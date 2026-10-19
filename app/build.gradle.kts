@@ -12,7 +12,7 @@ plugins {
  * 经典原因（系统只看 versionCode，填小了用户装不上新包，且不会有任何提示）。
  * 0.x 表示实验性阶段；发布前只需改这一行。
  */
-val appVersionName = "0.1.7"
+val appVersionName = "0.1.8"
 val appVersionCode =
     appVersionName
         .split(".")
