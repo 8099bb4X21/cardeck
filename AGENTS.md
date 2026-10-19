@@ -550,6 +550,33 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
   32B/20B、0x4301 有无、ctrl 邀请死锁等），细节见 `docs/PROTOCOL-NOTES.md` §9，
   改协议代码前先对照。
+- **AirPlay 会话级 SETUP 的 `deviceID` 必须是本机真实蓝牙 MAC**（2026-10-19
+  WinPlay 实测）：接收端可以按「用户选中的 iPhone 蓝牙地址」过滤会话，对不上即回
+  **403**，状态行是它特有的 `403 OK`（WinPlay 的 STATUS_TEXT 表没有 403，回退成
+  OK——看到这个组合优先怀疑设备过滤）。此前用 catplay 的写死假值
+  `ff:ee:dd:cc:bb:aa`——Audi/DiPlay 不校验，WinPlay 必拒；表象是「连上后约 45s
+  自动断开」（接收端等视频超时后自己拆链）。现统一走 `DeviceIdentity`（与
+  0x4300/0x4E0E 同源），占位值 `02:00:00:00:00:00` 只作 Shizuku 未就绪兜底，
+  403 日志会打印该值供用户到接收端对照。**SETUP 非 200 要主动 close 控制通道**，
+  别静默等接收端拆链——否则用户只看到「自动断开」，排查从零开始。
+- **会话存活靠三条相互独立的心跳，缺一整轮 10 秒后被车机拆**（2026-10-19 奥迪
+  MMI 3315 两轮实测，时序逐毫秒重合）：
+  ① UDP keepAlive 4B ping → keepAlivePort；**间隔必须远小于车机看门狗**——catplay
+  取的 10s 与看门狗等长，`Thread.sleep` 抖动让心跳晚到 1ms 即超时（现取 5s）；
+  ② RTSP `POST /feedback` 空体，1s；
+  ③ **屏幕数据口内的 keepAlive 帧**（128B 明文头，opcode=2；`/info` 的
+  `keepAliveSendStatsAsBody=true` 时 opcode=5 带 bplist 统计体），1s，**视频持续
+  推流时也照发**——它不是视频流量的备份。只有 ①② 时现象是「推流正常、RECORD 后
+  10.2s 整轮 reset」，日志里视频/feedback/事件通道全都健康，极易误判为网络问题。
+  keepAlive 帧不加密（catplay 只加密 opcode=VideoFrame），不消耗 ChaCha 帧 nonce。
+- **MFi 挑战长度按车机持久化，不要全局写死某一档**（2026-10-19 奥迪 MMI 3315 实测）：
+  20B 挑战在该车静默 **6.0 秒**无应答，32B 才在 0.64 秒回签名——只靠「真车都 20B
+  优先」的基线，每次连接都白等 6 秒。而各接收端偏好相反：DiPlay 只认 32B（长度不符
+  直接断链）、MMI 6318 认 20B（32B 曾 0.4s 拆链）、MMI 3315 认 32B。
+  `MfiLengthMemory` 按 0x1D01 的 name+model+manufacturer 生成稳定 key，持久化
+  成功/静默/被拒三种结局；`orderAttempts`（纯函数）把**上次成功的长度排第一**，静默
+  与被拒只降级、不丢弃（固件可能变，全被拒时照常全试，防永久卡死）；已知静默过的
+  档位重试窗口压到 1.5s。**记忆是跨进程的**——旧实现只在进程内记，App 重启即丢。
 - **音频通道（车机侧声音）三条硬约束**（2026-10-17 奥迪联网实测打通，此前从无声音）：
   ① **会话建立顺序必须是 屏幕SETUP → 连数据端口 → RECORD → 视频起流 → 音频SETUP →
   补发RECORD**：车机对「屏幕流 SETUP 后约 2s 内未激活」有看门狗，而音频 SETUP 本身
@@ -571,6 +598,21 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   诊断三件套（无声时按序看）：`AUDIO: 采集样本 非零X% 峰值=N`（0%=没采到：应用禁止
   捕获或音频走了蓝牙）、`音频协商 → audioType=?`（选错通路）、车机 `/feedback` 里该
   connId 的 sampleTime 是否推进。
+- **音乐卡「无法读取播放信息」= 通知监听器「有授权、无绑定」**（2026-10-19 实测）：
+  `settings get secure enabled_notification_listeners` 里能看到本组件、
+  `MediaListenerService.onListenerConnected` 却从未被调用——此时 `dumpsys notification`
+  的 **Live notification listeners** 段里没有本组件，`getActiveSessions()` 仍返回会话
+  （播放状态可见）但 `metadata` 恒为 null，卡片就显示「无法读取播放信息」。
+  **授权列表 ≠ 已绑定**：重装 APK 后列表项还在，绑定可能丢失。实测对照——App 进程
+  不运行时静置 10s 不会自愈；启动 App 后 1s 内恢复，说明必须由我们主动重绑。
+  自愈实现见 `NotificationAccess.rebindIfNotConnected`：仅当本进程尚未确认连上
+  （`serviceConnected` 为 false，由 onListenerConnected 置位）时读一次
+  `dumpsys notification --noredact`，**只认 Live 段**，缺失则 `disallow_listener`
+  + `allow_listener` 触发系统重新绑定并短轮询确认。别用「在 enabled 列表里」当已授权
+  判据——那正是这个 bug 的误判来源。
+  另：监听器断开/销毁时必须 `MediaSessionsState.publish(null)`，否则卡片会保留旧歌名，
+  出现「正在播放 + 未在播放」这类自相矛盾的残留状态（布局静态小标题也不能写死
+  「正在播放」，已改为中性的「媒体」）。
 - **RTSP 控制通道必须异步读**（2026-10-17）：一条连接一把锁 + 同步读响应的实现，
   会让任何慢请求（奥迪音频 SETUP 2s+）期间 feedback 心跳停摆；车机对 feedback 有
   ~3s 看门狗，断供即拆会话。现为独立读线程收包解密 + 按 CSeq 投递，写侧只串行化

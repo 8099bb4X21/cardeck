@@ -252,6 +252,93 @@ iAP2 → AirPlay 配对 → 视频推流 → 触摸回传 → 虚拟屏注入，
 NsdManager unregisterService 异步（复用 listener 报 already in use，每次注册新建）；
 ctrl mDNS 注册必须发生在 bindProcessToNetwork **之后**（组播跟随进程绑定网络）。
 
+## 9d. WinPlay（Windows 接收端）实测记录（2026-10-19）
+
+WinPlay 是开源 Windows 无线 CarPlay 接收端（`reference/WinPlay`，GPL-3.0，Node + TS，
+接收端角色）。用户用荣耀做发送端连它（日志 `logs/cardeck/xiaomi-winplay.log`）：
+iAP2 → WiFi → mDNS → 配对全通，卡在会话级 SETUP。
+
+**根因：会话级 SETUP 的 `deviceID` 必须等于接收端选中的那台 iPhone 的蓝牙 MAC。**
+
+- WinPlay 启动时用 `cfg.targetBluetooth`（用户在 Windows 上选定的已配对 iPhone）
+  设置过滤器：`stack.deviceFilter = id => normalize(id) === normalize(cfg.targetBluetooth)`
+  （`reference/WinPlay/src/engine/run.ts:64`）。
+- 会话级 SETUP 里 `dict.deviceID` 对不上（或缺字段）直接回 **403**
+  （`src/engine/protocol/cpStack.ts:696-699`）；`RECORD` 在设备验收前同样 403。
+- 我们此前发的是 catplay 的写死假值 `ff:ee:dd:cc:bb:aa`
+  （旧注释「车机不校验」只在 Audi/DiPlay 成立）。
+- 状态行 `RTSP/1.0 403 OK` 是 WinPlay 的指纹：它的 `STATUS_TEXT` 表没有 403 条目，
+  `buildResponse` 回退成 `OK`（`src/engine/protocol/rtspMessage.ts`）。看到「403 OK」
+  优先怀疑设备过滤，而不是通用 RTSP 实现差异。
+- 失败后的表象是「连上后约 45 秒自动断开」：发送端不再发请求，接收端等视频超时
+  （`armVideoDeadline` 45s）后拆链路。发送端应在 SETUP 非 200 时主动 close，别静默等待。
+
+对照 Audi/DiPlay：两者都不校验 SETUP 的 deviceID，所以这个字段长期没有被发现。
+本项目已改为复用 `DeviceIdentity` 解析出的**真实本机蓝牙 MAC**（与 0x4300/0x4E0E
+一致），占位值 `02:00:00:00:00:00` 只在 Shizuku 未就绪时兜底，并在 403 日志里
+明确提示「接收端请选择该地址」。
+
+**WinPlay 的其他特性（对本项目有用的）**：
+
+- 端口固定 TCP 17000；`_airplay._tcp` TXT 与 iPhone 同构
+  （`srcvers=950.7.1 features=0x44540380,0x61 flags=0x4`）。
+- 会话级 SETUP 只在 `keepAliveLowPower` 为真时才开 keepAlive 端口。
+- 事件通道/流 SETUP/音频协商路径与 DiPlay 基本一致（`_setupScreen`/`_setupAudio`），
+  同样按 `DataStream-Salt<id>` 派生流密钥，可作为接收端行为的第三份交叉验证。
+
+**顺带修掉的 bplist 编码 bug**：`BinaryPlist.encodeInt` 原先按**无符号**范围选宽度，
+但 bplist 整数是**有符号**的——35449（0x8A79）被写成 2 字节，Apple 侧解析成 int16
+-30087。临时端口（timingPort/eventPort/dataPort 常落在 32768..65535）都会踩到；
+WinPlay 用 BigInt 无符号读取所以不受影响，Audi 是否受影响未知（视频曾正常，但不能
+排除它忽略了错误的 timingPort）。现已改为按 `Byte/Short/Int` 有符号范围选宽度，
+回归测试覆盖 0/127/128/255/256/32767/32768/35449/65535/65536。
+
+## 9e. 奥迪 MMI 3315 会话 10 秒被拆：三条心跳缺一不可（2026-10-19）
+
+用户实测日志 `logs/cardeck/CarDeck-log-20261019-081700.txt`：iAP2 → MFi → 热点 →
+配对 → SETUP → RECORD → 视频 30fps 稳定推流，**RECORD 后 10.17~10.23s 整轮被 reset**，
+两轮时序逐毫秒重合（不是随机网络问题）。
+
+**根因一：UDP keepAlive 间隔与车机看门狗等长。** 我们每 10s 发一次（catplay
+`KeepAliveClient::PING_INTERVAL`），而车机看门狗也是 10s。日志里 ping #2 距 #1
+恰好 10.001s，随后 213~247ms 内被拆——`Thread.sleep` 的毫秒抖动让心跳永远晚到
+deadline 1ms。catplay 的 10s 只适用于它自家接收端；对真车必须留余量。
+改为 **5s**（`AirPlayClient.KEEPALIVE_INTERVAL_MS`）。
+
+**根因二：缺屏幕流内 keepAlive 帧。** catplay 在**视频持续推流时仍然每秒**向
+屏幕数据口写一帧 keepAlive（`ScreenTransmitSession::create_keep_alive`，
+`DEFAULT_KEEP_ALIVE = 1s`）——它不是视频流量的备份，而是接收端屏幕上独立的存活
+信号。我们从未发过。帧格式（`reference/catplay/.../screen/screen_frame.rs`）：
+
+```
+128B 明文头: u32LE body 长度 | u8 opcode | 3B 小参数 | 15 × 8B 参数
+opcode 2 = KeepAlive（空体）
+opcode 5 = KeepAliveWithBody（/info.keepAliveSendStatsAsBody=true 时；
+           body = bplist{txUsageAvg, encoderCurrentFPS, sentFramesAvg,
+                        queuedFramesAvg, lossAvg}，
+           params[14] 后 4 字节 = body 长度 f32 LE）
+```
+
+**keepAlive 帧是明文**——catplay 的 `ScreenFrameCodec::encode_composite` 只对
+`opcode == VideoFrame` 加密，所以 keepAlive 不消耗 ChaCha 帧 nonce。我们按此实现，
+并在 `VideoSender` 的编码器出帧循环里按 1s 节流发送。
+
+**三条心跳相互独立**：UDP keepAlive（5s，keepAlivePort） + RTSP /feedback（1s，
+控制通道） + 屏幕流 keepAlive 帧（1s，视频数据口）。此前只实现了前两条，
+`docs` §9c 里记的「补双心跳」只在 MMI 6318 上够用。
+
+**音频采集全零（未解决，与拆链无关）**：`AUDIO: 采集样本 非零0% 峰值=0` 连续两轮。
+候选原因按概率：当时无媒体在播（会前只有一条旧记录）、音频被路由到车机蓝牙
+A2DP（PlaybackCapture 抓不到蓝牙输出）、或目标应用禁止播放捕获。
+
+**MFi 挑战长度的车机差异（本机实测补充）**：MMI 3315 对 20B **静默 6.0 秒**
+（15.605 发出 → 21.604 判定无应答），32B 在 0.64 秒回签名（22.247 收到 0xAA03）。
+这 6 秒属于每次连接都要付的固定成本，除非按车记住偏好。现已实现
+`MfiLengthMemory`：按 0x1D01 身份（name+model+manufacturer）持久化
+「成功 / 静默 / 被拒」三种结局，命中成功档位直接首选；静默档位重试窗口压到 1.5s。
+注意这与 §9b/§9c 的记录并不矛盾——**不同年款/固件的车机偏好相反**，MMI 6318
+认 20B 且对 32B 会拆链，所以基线顺序仍按接收端类型选择，记忆只做覆盖。
+
 ## 10. 参考文件速查
 
 > 表中路径均指 `reference/` 下**代码精读来源**（xcertplay 与 DiPlay 同源，
@@ -269,5 +356,6 @@ ctrl mDNS 注册必须发生在 bindProcessToNetwork **之后**（组播跟随�
 | 接收端 AirPlay 会话 | `reference/xcertplay/.../airplay/AirPlaySession.kt` + `PairVerify.kt` |
 | 测试台（实际运行版） | `reference/DiPlay/`（含真车诊断/音频等增强；与 xcertplay 同源） |
 | 发送端全套参考 | `reference/catplay/carplay/catplay_carplay/src/carplay_tx/` 等 |
+| Windows 接收端（WinPlay） | `reference/WinPlay/`（TS 接收端；设备过滤见 §9d） |
 | MFi 认证（接收端向） | `reference/xcertplay/.../mfi/`；Oligo 博客（单向性证据） |
 | 解密固件(仅查阅) | ludwig-v/wireless-carplay-dongle-reverse-engineering（未克隆） |
