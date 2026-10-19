@@ -26,6 +26,8 @@ internal fun Iap2LinkChannel.runSenderSession(
             DeviceIdentity.deviceName(context),
             onWifiCredentials,
             onEndpointUpdate,
+            // MFi 挑战长度按车机身份持久化（省掉 20B 静默 6 秒的试探）
+            context.applicationContext,
         )
     val endpoint = session.run(timeoutMillis)
     onEndpoint(endpoint)

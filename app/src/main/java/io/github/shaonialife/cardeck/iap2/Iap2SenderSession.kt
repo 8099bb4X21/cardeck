@@ -39,6 +39,11 @@ class Iap2SenderSession(
      * 用户看到的就是「连上之后自动断开」。收到就必须交给主控热更新端点/重试配对。
      */
     private val onEndpointUpdate: ((CarPlayEndpoint) -> Unit)? = null,
+    /**
+     * 仅用于 MFi 挑战长度的按车机持久化记忆（[MfiLengthMemory]）。null = 只用进程内
+     * 内存表（单测/纯 JVM），不影响协议流程。
+     */
+    private val context: android.content.Context? = null,
 ) {
     /** 从 0x5703 + 0x4301 解析出的接收端信息。 */
     data class CarPlayEndpoint(
@@ -109,18 +114,12 @@ class Iap2SenderSession(
         const val START_SESSION_RAW_LOG_BYTES = 1_024
 
         /**
-         * MFi 挑战「被拒档位」进程级记忆：只记录**导致链路被拆**的挑战长度
-         * （观察到车机对某个长度不容忍；静默超时不记，属可重试的正常失败）。
-         * 2026-10-11 奥迪实测新增：车机在 32B 挑战后 ~0.4s 直接拆链
-         * （10-09 观察到的是「静默不断链」，两种行为都出现过）——若无记忆，
-         * 每次会话都从 32B 撞起、反复断链；有记忆则本次进程内后续会话直接
-         * 从下一档开始（DiPlay 在 32B 秒答，不受 32 被阴影观察影响；
-         * 若两档都被拒则清空重来，避免永久卡死）。
+         * 已知「静默过」的档位重试窗口。首次试探保留原窗口（可能是慢车机），
+         * 但已经失败过一次的档位没必要再等满 6 秒——真 iPhone 应答在 100ms 级。
          */
-        @Volatile
-        private var mfiRejectedLengths: Set<Int> = emptySet()
+        const val MFI_SILENT_RETRY_WINDOW_MS = 1_500L
 
-        /** 挑战档位（长度, 等待窗口）：顺序与窗口由 DiPlay/Audi 双端实测决定。 */
+        /** 挑战档位（长度, 首次试探窗口）：顺序与窗口由 DiPlay/Audi 双端实测决定。 */
         private val MFI_ATTEMPTS = listOf(32 to 3_000L, 20 to 6_000L, 16 to 3_000L)
 
         /** 真车系接收端特征（0x1D01 name/model/manufacturer 子串，小写比对）。 */
@@ -171,7 +170,7 @@ class Iap2SenderSession(
         //    32B→20B 的会话全部卡死，20B→（记忆命中）的会话全部秒通。
         //  - 测试台 DiPlay（Carlinkit AuthV3 EC 身份）：**只接受精确 32B**，长度不符直接断链。
         // 全部无应答也不中止——我们不校验签名（0xAA05 自报），由 0x5702 是否应答判定放行。
-        runMfiChallenge(deadline, prefer20First = legacyCar)
+        runMfiChallenge(deadline, prefer20First = legacyCar, receiverKey = identityText)
         send(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
         log("iap2 tx=0xaa05 authentication-succeeded（自报）")
 
@@ -393,37 +392,46 @@ class Iap2SenderSession(
      *  - **20B 次之**：真车 Audi MIB3 对 20B 秒答（catplay/extractor 真车实录同款）；
      *    对 32B 的处置两种都出现过——10-09 静默不断链、10-11 拆链。
      *  - **16B 兜底**：部分旧配件。
-     * 「导致拆链」的档位由 [mfiRejectedLengths] 跨会话记忆（避免反复撞同一堵墙）；
+     *
+     * 顺序**以按车机持久化的记忆为准**（[MfiLengthMemory]，基线只作冷启动与兜底）：
+     * 2026-10-19 奥迪 MMI 3315 实测 20B 静默 6 秒、32B 0.64 秒应答——只靠基线
+     * 「真车都 20B 优先」每次连接都白等 6 秒。记忆命中后直接把上次成功的长度排第一。
      * 全部无应答时不抛异常直接返回——我们跳过签名校验，由后续 0x5702 是否获得应答
      * 判定对端是否放行（真车实测无应答后 0xaa05 仍可推进）。
      */
     private fun runMfiChallenge(
         deadline: Long,
         prefer20First: Boolean = false,
+        receiverKey: String,
     ) {
-        val ordered =
+        val baselineLengths =
             if (prefer20First) {
-                listOf(MFI_ATTEMPTS[1], MFI_ATTEMPTS[0], MFI_ATTEMPTS[2])
+                listOf(MFI_ATTEMPTS[1].first, MFI_ATTEMPTS[0].first, MFI_ATTEMPTS[2].first)
             } else {
-                MFI_ATTEMPTS
+                MFI_ATTEMPTS.map { it.first }
             }
-        var attempts = ordered.filter { it.first !in mfiRejectedLengths }
-        if (attempts.isEmpty()) {
-            // 所有档位都被拒过：清空重来，避免永久卡死
-            mfiRejectedLengths = emptySet()
-            attempts = ordered
-        } else if (attempts.size < ordered.size) {
+        val windowOf = MFI_ATTEMPTS.associate { it.first to it.second }
+        val memory = MfiLengthMemory.load(context, receiverKey)
+        val order = MfiLengthMemory.orderAttempts(baselineLengths, memory)
+        if (!memory.isEmpty) {
             log(
-                "iap2 MFi 跳过被拒档位（本进程记忆：${mfiRejectedLengths.sorted().joinToString("B/")}B）" +
-                    "——从 ${attempts.first().first}B 开始",
+                "iap2 MFi 按车机记忆（$receiverKey）：${MfiLengthMemory.describe(memory)}" +
+                    " → 本轮顺序 ${order.joinToString("/")}B",
             )
         }
-        for ((position, attempt) in attempts.withIndex()) {
-            val size = attempt.first
+        for ((position, size) in order.withIndex()) {
+            // 已知「静默过」的档位缩短窗口：它已经失败过一次，没必要再等满。
+            val baseWindow = windowOf[size] ?: MFI_ATTEMPTS.last().second
+            val windowMillis =
+                if (size in memory.silent && size != memory.succeeded) {
+                    minOf(baseWindow, MFI_SILENT_RETRY_WINDOW_MS)
+                } else {
+                    baseWindow
+                }
             val challenge = ByteArray(size).also(random::nextBytes)
             send(Iap2MessageIds.MFI_REQUEST_CHALLENGE, Iap2Csm.param(0, challenge))
-            log("iap2 tx=0xaa02 challenge=${size}B（第 ${position + 1} 次）")
-            val window = minOf(System.nanoTime() + attempt.second * 1_000_000L, deadline)
+            log("iap2 tx=0xaa02 challenge=${size}B（第 ${position + 1} 次，窗口 ${windowMillis}ms）")
+            val window = minOf(System.nanoTime() + windowMillis * 1_000_000L, deadline)
             var gotResponse = false
             var gotFailure = false
             while (true) {
@@ -432,8 +440,8 @@ class Iap2SenderSession(
                 val frame = recvFrame(remaining)
                 if (frame == null) {
                     if (!channel.isAlive) {
-                        log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）——记入本进程被拒档位")
-                        mfiRejectedLengths = mfiRejectedLengths + size
+                        log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）——记入该车机被拒档位")
+                        MfiLengthMemory.recordRejected(context, receiverKey, size)
                         return
                     }
                     continue
@@ -457,9 +465,17 @@ class Iap2SenderSession(
                 }
                 if (gotResponse || gotFailure) break
             }
-            if (gotResponse) return
-            if (position < attempts.size - 1) {
-                log("iap2 MFi ${size}B 无应答，改用 ${attempts[position + 1].first}B 重试")
+            if (gotResponse) {
+                MfiLengthMemory.recordSuccess(context, receiverKey, size)
+                return
+            }
+            if (gotFailure) {
+                MfiLengthMemory.recordRejected(context, receiverKey, size)
+            } else {
+                MfiLengthMemory.recordSilent(context, receiverKey, size)
+            }
+            if (position < order.size - 1) {
+                log("iap2 MFi ${size}B 无应答，改用 ${order[position + 1]}B 重试")
             } else {
                 log("iap2 MFi 挑战全部无应答——跳过校验直接发 0xaa05（由 0x5702 判定车机是否放行）")
             }
