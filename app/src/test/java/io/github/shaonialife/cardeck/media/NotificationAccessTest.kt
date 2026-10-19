@@ -39,4 +39,43 @@ class NotificationAccessTest {
             "io.github.shaonialife.cardeck/io.github.shaonialife.cardeck.media.OtherService"
         assertFalse(NotificationAccess.isGrantedIn(staleOldPackage, spec))
     }
+
+    /**
+     * 「在授权列表里」不等于「已被系统绑定」：重装后 enabled 列表仍有本组件，
+     * 但 Live 段缺失 → metadata 恒为 null、卡片显示「无法读取播放信息」
+     * （2026-10-19 实测）。必须只认 Live 段。
+     */
+    @Test
+    fun liveSectionDecidesWhetherMetadataIsReadable() {
+        val dump =
+            """
+            Notification listeners:
+              Allowed notification listeners:
+                $spec (user: 0 isPrimary: true)
+              All notification listeners (2) enabled for current profiles:
+                ComponentInfo{$spec}
+              Live notification listeners (1):
+                ComponentInfo{android/com.android.server.SystemNotificationListener} (user -1)
+              Snoozed notification listeners (0):
+            """.trimIndent()
+        // 授权列表里有、Live 段没有 → 仍是未绑定（必须触发重绑）
+        assertFalse(NotificationAccess.isLiveIn(dump, spec))
+    }
+
+    @Test
+    fun liveSectionIsDetectedOnceBound() {
+        val dump =
+            """
+            Live notification listeners (2):
+              ComponentInfo{android/com.android.server.SystemNotificationListener} (user -1)
+              ComponentInfo{$spec} (user 0): android.service.notification.INotificationListener${'$'}Stub${'$'}Proxy@abc
+            Snoozed notification listeners (0):
+            """.trimIndent()
+        assertTrue(NotificationAccess.isLiveIn(dump, spec))
+    }
+
+    @Test
+    fun missingLiveSectionIsNotTreatedAsBound() {
+        assertFalse(NotificationAccess.isLiveIn("no such section", spec))
+    }
 }

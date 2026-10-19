@@ -29,6 +29,7 @@ class MediaListenerService : NotificationListenerService() {
         // 两个状态都置位：NotificationAccess 供「是否要再试授权」判断，
         // MediaSessionsState 供 UI 文案区分「没在播放」与「读不到信息」。
         NotificationAccess.markGranted()
+        NotificationAccess.markConnected()
         MediaSessionsState.accessGranted = true
         try {
             manager.addOnActiveSessionsChangedListener(
@@ -47,11 +48,18 @@ class MediaListenerService : NotificationListenerService() {
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
         MediaSessionsState.accessGranted = false
+        NotificationAccess.markDisconnected()
+        // 必须清空：否则卡片会保留断开前的歌名/播放状态，出现「正在播放 + 未在播放」
+        // 甚至「正在播放 + 无法读取播放信息」的自相矛盾显示（2026-10-19 实测：
+        // 重装后监听器未被系统绑定，卡片长时间停在旧状态）。
+        MediaSessionsState.publish(null)
+        watched.clear()
     }
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(periodicRefresh)
         runCatching { manager.removeOnActiveSessionsChangedListener(sessionListener) }
+        MediaSessionsState.publish(null)
         super.onDestroy()
     }
 

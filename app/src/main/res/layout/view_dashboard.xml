@@ -42,11 +42,14 @@
             android:scaleType="centerCrop"
             android:visibility="gone" />
 
+        <!-- 静态小标题不能写「正在播放」：它不随状态变化，会和下方状态文案
+             （「未在播放」/「无法读取播放信息」）直接矛盾（2026-10-19 截图实测）。
+             中性的「媒体」标签，具体状态交给标题/副标题两行表达。 -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:letterSpacing="0.1"
-            android:text="正在播放"
+            android:text="媒体"
             android:textColor="#FFE0E0E5"
             android:textSize="13sp" />
 

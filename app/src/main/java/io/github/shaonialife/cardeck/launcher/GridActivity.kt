@@ -199,9 +199,13 @@ class GridActivity : AppCompatActivity() {
      *
      * 文案要区分三种「没有歌名」的成因，否则会误导：
      *  1. 有会话在播、但**没拿到通知使用权** → metadata 恒为 null（会话与播放状态
-     *     仍然可见）。此时显示「未授予通知使用权」并提示去哪里开；
+     *     仍然可见）。此时显示「无法读取播放信息」并提示去哪里开；
      *  2. 有会话但暂停/无元数据 → 「未在播放」；
      *  3. 完全没有会话 → 同样「未在播放」。
+     *
+     * 标题与副标题必须成对决定：曾出现标题「正在播放」（布局静态文案）配副标题
+     * 「未在播放」的自相矛盾显示（截图实测），静态文案已改为「媒体」，这里再按
+     * 状态统一写死两行，避免二者来自不同来源。
      */
     private fun renderMediaCard() {
         val panel = dashboardView ?: return
@@ -215,10 +219,10 @@ class GridActivity : AppCompatActivity() {
             title ?: if (missingDueToPermission) "无法读取播放信息" else "未在播放"
         panel.findViewById<TextView>(R.id.dashMediaArtist).text =
             artist
-                ?: if (missingDueToPermission) {
-                    "未授予「通知使用权」——请在系统设置中开启"
-                } else {
-                    ""
+                ?: when {
+                    missingDueToPermission -> "未授予「通知使用权」——请在系统设置中开启"
+                    now?.playing == true -> "正在播放"
+                    else -> ""
                 }
         panel.findViewById<ImageView>(R.id.dashPlayPause).setImageResource(
             if (now?.playing == true) R.drawable.ic_media_pause else R.drawable.ic_media_play,
