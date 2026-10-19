@@ -6,6 +6,7 @@ import io.github.shaonialife.cardeck.iap2.Iap2Csm
 import io.github.shaonialife.cardeck.iap2.Iap2LinkEngine
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
+import io.github.shaonialife.cardeck.util.DeviceIdentity
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -220,10 +221,13 @@ class AirPlayClient(
     }
 
     /**
-     * KeepAlive UDP 心跳（对照 catplay KeepAliveClient）：向车机 keepAlivePort 每 10s
-     * 发 4 字节随机 UDP；协议无应答。**缺失时车机 10s 看门狗拆整轮会话**
-     * （2026-10-11 实测：视频推流 10.6s 后被拆，时序严丝合缝）。
-     * socket 关闭（会话结束）后线程自行退出。
+     * KeepAlive UDP 心跳（对照 catplay KeepAliveClient）：向车机 keepAlivePort 发 4 字节
+     * 随机 UDP；协议无应答。**缺失时车机 10s 看门狗拆整轮会话**。
+     *
+     * 间隔取 **5s** 而不是 catplay 的 10s：10s 与车机看门狗等长，`Thread.sleep` 的
+     * 毫秒级抖动会让每次心跳都晚到 deadline 之后 1ms（2026-10-19 奥迪 3315 两轮实测：
+     * ping #2 距 #1 恰好 10.001s，随后 213~247ms 内整轮被 reset，RECORD 后 10.2s）。
+     * catplay 的 10s 只适用于它自家接收端；对真车必须留出至少一半的余量。
      */
     fun startKeepAlive(
         host: String,
@@ -236,12 +240,18 @@ class AirPlayClient(
                 udp = java.net.DatagramSocket()
                 val address = java.net.InetAddress.getByName(host)
                 var sent = 0
+                var lastSentAt = 0L
                 while (isSessionAlive() && udp?.isClosed == false) {
+                    val now = SystemClock.uptimeMillis()
+                    val gap = if (lastSentAt == 0L) 0L else now - lastSentAt
+                    lastSentAt = now
                     val payload = ByteArray(4).also(java.security.SecureRandom()::nextBytes)
                     udp.send(java.net.DatagramPacket(payload, payload.size, address, port))
                     sent++
-                    if (sent <= 3 || sent % 30 == 0) log("AIRPLAY: keepAlive ping #$sent → $host:$port")
-                    Thread.sleep(10_000)
+                    if (sent <= 3 || sent % 60 == 0) {
+                        log("AIRPLAY: keepAlive ping #$sent → $host:$port（间隔 ${gap}ms）")
+                    }
+                    Thread.sleep(KEEPALIVE_INTERVAL_MS)
                 }
             } catch (_: InterruptedException) {
             } catch (error: IOException) {
@@ -494,35 +504,13 @@ class AirPlayClient(
             log("AIRPLAY: 计时服务未启动（继续，但媒体时钟无法同步）")
         }
         val host = endpoint.ipAddresses.firstOrNull() ?: "receiver"
-        val body =
-            BinaryPlist.encode(
-                linkedMapOf(
-                    "deviceID" to "ff:ee:dd:cc:bb:aa", // catplay 同款假值（车机不校验）
-                    "macAddress" to "aa:bb:cc:dd:ee:ff",
-                    "name" to "iPhone",
-                    "model" to "iPhone14,2",
-                    "osName" to "iPhone OS",
-                    "osBuildVersion" to "19A404",
-                    "osVersion" to "15.0.2",
-                    // iPhone 自己的 AirPlay 版本（catplay 实证值）；此前误用车机的 320.17.7
-                    "sourceVersion" to SENDER_SOURCE_VERSION,
-                    "timingPort" to timingServer.port.toLong(),
-                    "sessionUUID" to
-                        java.util.UUID
-                            .randomUUID()
-                            .toString()
-                            .uppercase(),
-                    "sessionCorrelationUUID" to
-                        java.util.UUID
-                            .randomUUID()
-                            .toString()
-                            .uppercase(),
-                    "statsCollectionEnabled" to false,
-                    "keepAliveLowPower" to true,
-                    "features" to CONTROLLER_FEATURES,
-                ),
-            )
-        log("AIRPLAY: 初始 SETUP body=${body.size}B timingPort=${timingServer.port}")
+        // 会话级 SETUP 的 deviceID 必须是**本机真实蓝牙 MAC**：WinPlay（2026-10-19
+        // 实测）按用户选中的 iPhone 蓝牙地址过滤会话，deviceID 对不上直接回 403
+        // （14ms 拒绝，状态行是它特有的 `403 OK`——缺 403 文案时回退 OK）。此前的
+        // catplay 写死值 ff:ee:dd:cc:bb:aa 只在不过滤的接收端上侥幸可用。
+        val deviceId = setupDeviceId()
+        val body = buildSessionSetupBody(deviceId, timingServer.port)
+        log("AIRPLAY: 初始 SETUP body=${body.size}B timingPort=${timingServer.port} deviceID=$deviceId")
         val (statusLine, responseBody) =
             try {
                 request(
@@ -536,7 +524,21 @@ class AirPlayClient(
                 return null
             }
         if (!statusLine.contains("200")) {
-            log("AIRPLAY: SETUP 应答 [$statusLine]")
+            log("AIRPLAY: SETUP 应答 [$statusLine]（自报 deviceID=$deviceId）")
+            if (statusLine.contains("403")) {
+                // 403 的两类成因按可能性排序：设备过滤（WinPlay 等「只接受指定
+                // iPhone」）最常见，其次是接收端不接受的配对/信任状态。把本机
+                // 蓝牙地址直接打出来，用户对照接收端设置即可自查。
+                log(
+                    "AIRPLAY: 403 排查——接收端若启用了设备过滤，请在接收端选择本机蓝牙地址 " +
+                        "$deviceId" +
+                        if (deviceId == DeviceIdentity.PLACEHOLDER_MAC) {
+                            "（当前是占位值：未能解析真实蓝牙 MAC，Shizuku 是否就绪？）"
+                        } else {
+                            ""
+                        },
+                )
+            }
             return null
         }
         val root =
@@ -641,6 +643,8 @@ class AirPlayClient(
                 maxFps = ((display?.get("maxFPS") as? Long) ?: 30L).toInt(),
                 hidDeviceUuids = parsedHidUuids,
                 hidDescriptors = parsedHidDescriptors,
+                // 奥迪 MMI 3315 声明 true：屏幕流 keepAlive 用 opcode=5 带 bplist 统计体
+                keepAliveSendStatsAsBody = (infoRoot?.get("keepAliveSendStatsAsBody") as? Boolean) == true,
             )
         log(
             "AIRPLAY: ✓ SETUP 完成 eventPort=${info.eventPort} timingPort=${info.timingPort} " +
@@ -668,6 +672,11 @@ class AirPlayClient(
          * 必须解析描述符才能得到正确映射（奥迪实测：按下「下一首」收 0x05=usages[5]=0xB5）。
          */
         val hidDescriptors: Map<String, ByteArray> = emptyMap(),
+        /**
+         * `/info.keepAliveSendStatsAsBody`：屏幕流 keepAlive 帧是否携带统计体
+         * （true → opcode=5 + bplist；false → opcode=2 空帧）。奥迪 3315 为 true。
+         */
+        val keepAliveSendStatsAsBody: Boolean = false,
     )
 
     /** 屏幕流协商结果。 */
@@ -1282,6 +1291,12 @@ class AirPlayClient(
 
         /** 发送端自报的 AirPlay 版本（catplay 真车验证值，iOS 15.0.2 时代；勿用车机的版本）。 */
         private const val SENDER_SOURCE_VERSION = "566.25.21"
+
+        /**
+         * UDP keepAlive 间隔。catplay 用 10s，但那是它自家接收端的口径；真车（奥迪
+         * MMI 3315）看门狗同为 10s，等长即必输（sleep 抖动让心跳晚 1ms 到）。
+         */
+        private const val KEEPALIVE_INTERVAL_MS = 5_000L
 
         /** 读线程结束/连接关闭时投递给等待者的哨兵状态行（非真实 RTSP 应答）。 */
         private const val RTSP_CLOSED_MARK = "__closed__"
@@ -2190,6 +2205,57 @@ class AirPlayClient(
         endpoint.ipAddresses.firstOrNull { address ->
             address.contains('.') && !address.contains(':')
         }
+
+    /**
+     * 会话级 SETUP 自报的 deviceID（接收端用于识别「这是哪台 iPhone」）。
+     *
+     * 必须是本机真实蓝牙 MAC：WinPlay 2026-10-19 实测按用户选中的 iPhone 蓝牙
+     * 地址过滤，占位/假值一律 403；Audi MIB3 与 DiPlay 不校验，所以旧写死值
+     * 一直没暴露问题。BT 阶段必然已解析并缓存（0x4300/0x4E0E 也依赖它），
+     * 这里优先读缓存避免再起 shell；缓存缺失才走一次阻塞解析。
+     */
+    private fun setupDeviceId(): String {
+        val applicationContext = context ?: return DeviceIdentity.PLACEHOLDER_MAC
+        // 缓存命中即返回（BT 阶段已解析）；缺失时才允许一次阻塞查询。
+        return DeviceIdentity.cachedBluetoothMac()
+            ?: DeviceIdentity.bluetoothMac(applicationContext)
+    }
+
+    /**
+     * 构造会话级 SETUP 报文体（拆出来是为了单测：deviceID 一旦退回写死假值，
+     * WinPlay 这类按设备过滤的接收端会直接 403，且现象是 45 秒后才断开）。
+     */
+    internal fun buildSessionSetupBody(
+        deviceId: String,
+        timingPort: Int,
+    ): ByteArray =
+        BinaryPlist.encode(
+            linkedMapOf(
+                "deviceID" to deviceId,
+                "macAddress" to "aa:bb:cc:dd:ee:ff",
+                "name" to "iPhone",
+                "model" to "iPhone14,2",
+                "osName" to "iPhone OS",
+                "osBuildVersion" to "19A404",
+                "osVersion" to "15.0.2",
+                // iPhone 自己的 AirPlay 版本（catplay 实证值）；此前误用车机的 320.17.7
+                "sourceVersion" to SENDER_SOURCE_VERSION,
+                "timingPort" to timingPort.toLong(),
+                "sessionUUID" to
+                    java.util.UUID
+                        .randomUUID()
+                        .toString()
+                        .uppercase(),
+                "sessionCorrelationUUID" to
+                    java.util.UUID
+                        .randomUUID()
+                        .toString()
+                        .uppercase(),
+                "statsCollectionEnabled" to false,
+                "keepAliveLowPower" to true,
+                "features" to CONTROLLER_FEATURES,
+            ),
+        )
 
     private fun logInfoSummary(root: Map<*, *>) {
         val features = root["features"] as? Long

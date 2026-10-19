@@ -76,6 +76,18 @@ class BinaryPlistTest {
         assertEquals(3.5, decoded["ratio"])
     }
 
+    /**
+     * 整数宽度必须按**有符号**范围选。端口号常落在 32768..65535，按无符号阈值写成
+     * 2 字节时 Apple 端按 int16 读成负数（35449 → -30087），接收端会拒绝或绑错端口。
+     */
+    @Test
+    fun encodeDecodeRoundTripsPortRangeIntegers() {
+        for (value in listOf(0L, 127L, 128L, 255L, 256L, 32767L, 32768L, 35449L, 65535L, 65536L)) {
+            val decoded = BinaryPlist.parse(BinaryPlist.encode(value))
+            assertEquals("value=$value", value, decoded)
+        }
+    }
+
     @Test
     fun encodeLongAndUnicodeStrings() {
         val longAscii = "x".repeat(300)

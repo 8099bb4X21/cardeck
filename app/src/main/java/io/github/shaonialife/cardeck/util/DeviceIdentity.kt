@@ -56,6 +56,14 @@ object DeviceIdentity {
         }
     }
 
+    /**
+     * 已解析并缓存的本机蓝牙 MAC；尚未解析成功返回 null（不触发 shell 查询）。
+     *
+     * 供 AirPlay 会话级 SETUP 这类「不能阻塞在 shell 上」的位置使用——
+     * 无线 CarPlay 的 BT 阶段必然先调用过 [bluetoothMac]，走到这里时缓存已就绪。
+     */
+    fun cachedBluetoothMac(): String? = cachedMac
+
     /** 设备名（0x4E09 DeviceInformationUpdate 用；对齐真机发的是本机蓝牙名）。 */
     fun deviceName(context: Context): String =
         try {

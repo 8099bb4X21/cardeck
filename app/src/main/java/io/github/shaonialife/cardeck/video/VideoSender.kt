@@ -5,6 +5,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.view.Surface
 import io.github.shaonialife.cardeck.airplay.AirPlayCrypto
+import io.github.shaonialife.cardeck.airplay.BinaryPlist
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -35,6 +36,14 @@ class VideoSender(
     private val log: (String) -> Unit,
     /** 推流自然结束（对端断开等）时回调——CarPlay 会话真实结束的信号。 */
     private val onEnded: (() -> Unit)? = null,
+    /**
+     * 屏幕流内 keepAlive 帧是否携带统计体（车机 /info 的 `keepAliveSendStatsAsBody`）。
+     * 奥迪 MMI 3315 声明 true → opcode=5 + bplist 统计体；否则 opcode=2 空帧。
+     * 真 iPhone/catplay 在视频持续推流时**仍然每秒发一次**——它不是视频流量的备份，
+     * 而是接收端屏幕上独立的存活信号（2026-10-19 奥迪 3315 两轮实测：缺它时
+     * RECORD 后 10.2s 整轮被 reset，视频/feedback/事件通道全都健康）。
+     */
+    private val keepAliveWithStats: Boolean = false,
 ) {
     private val width: Int = (width / 2) * 2
     private val height: Int = (height / 2) * 2
@@ -44,6 +53,14 @@ class VideoSender(
     private val running = AtomicBoolean(false)
     private var frameCounter = 0L
     private var configSent = false
+
+    /** 上一次屏幕流 keepAlive 的时刻（uptimeMillis；0 = 尚未发过）。 */
+    private var lastKeepAliveAt = 0L
+
+    /** 两次 keepAlive 之间的帧数/字节数（统计体用，catplay ScreenSenderStats 同义）。 */
+    private var framesSinceKeepAlive = 0
+    private var bytesSinceKeepAlive = 0L
+    private var keepAliveCount = 0L
 
     @Volatile
     private var framesSent = 0L
@@ -110,6 +127,7 @@ class VideoSender(
             encoder = codec
             inputSurface = surface
             running.set(true)
+            lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
 
             onSurfaceReady(surface)
 
@@ -154,7 +172,10 @@ class VideoSender(
                         break
                     }
                 when {
-                    index == MediaCodec.INFO_TRY_AGAIN_LATER -> continue
+                    index == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                        maybeSendKeepAlive(output)
+                        continue
+                    }
 
                     index >= 0 -> {
                         val buffer = codec.getOutputBuffer(index) ?: continue
@@ -165,6 +186,7 @@ class VideoSender(
                             sendVideoFrame(buffer, bufferInfo.size, flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0, output)
                         }
                         codec.releaseOutputBuffer(index, false)
+                        maybeSendKeepAlive(output)
                     }
                 }
             }
@@ -176,6 +198,40 @@ class VideoSender(
             stop()
             // 会话真实结束信号（静默降噪解除 / 状态收尾）
             runCatching { onEnded?.invoke() }
+        }
+    }
+
+    /**
+     * 屏幕流 keepAlive 帧（catplay `ScreenTransmitSession::create_keep_alive`，1s 间隔）。
+     *
+     * 与 UDP keepAlive / RTSP feedback 是三条相互独立的存活信号；接收端（奥迪 3315）
+     * 只看视频帧不够——缺这条时 RECORD 后约 10s 会 reset 整轮会话（2026-10-19 两轮
+     * 实测）。帧是**明文**的（catplay 仅对 opcode=VideoFrame 加密），因此不消耗 ChaCha
+     * 帧计数；带统计体时 opcode=5，并把 body 长度写进头部 params[14] 的后 4 字节
+     * （f32 LE），与 catplay 逐字节一致。
+     */
+    private fun maybeSendKeepAlive(output: java.io.OutputStream) {
+        if (!running.get()) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastKeepAliveAt < KEEPALIVE_INTERVAL_MS) return
+        val elapsedNanos = (now - lastKeepAliveAt).coerceAtLeast(1L) * 1_000_000.0
+        val frames = framesSinceKeepAlive
+        val bytes = bytesSinceKeepAlive
+        val framesPerSecond = (frames * 1_000_000_000.0 / elapsedNanos).toInt()
+        val bytesPerSecond = bytes * 1_000_000_000.0 / elapsedNanos
+        framesSinceKeepAlive = 0
+        bytesSinceKeepAlive = 0
+        lastKeepAliveAt = now
+        keepAliveCount++
+        val frame = buildKeepAliveFrame(keepAliveWithStats, frames, bytesPerSecond, framesPerSecond)
+        output.write(frame)
+        output.flush()
+        if (keepAliveCount <= 3 || keepAliveCount % 30 == 0L) {
+            log(
+                "VIDEO: keepAlive #$keepAliveCount " +
+                    "opcode=${if (keepAliveWithStats) OP_KEEP_ALIVE_WITH_BODY else OP_KEEP_ALIVE} " +
+                    "body=${frame.size - HEADER_LEN}B fps=$framesPerSecond",
+            )
         }
     }
 
@@ -245,6 +301,8 @@ class VideoSender(
         output.write(sealed)
         output.flush()
         framesSent++
+        framesSinceKeepAlive++
+        bytesSinceKeepAlive += plain.size.toLong()
         if (keyFrame || framesSent <= 3 || framesSent % 150 == 0L) {
             log("VIDEO: 帧 #$framesSent ${plain.size}B${if (keyFrame) " (key)" else ""} 已发送")
         }
@@ -316,10 +374,68 @@ class VideoSender(
         return units
     }
 
-    private companion object {
-        const val HEADER_LEN = 128
-        const val OP_FRAME = 0
-        const val OP_CONFIG = 1
-        const val TAG_SIZE = 16
+    companion object {
+        private const val HEADER_LEN = 128
+        private const val OP_FRAME = 0
+        private const val OP_CONFIG = 1
+        private const val OP_KEEP_ALIVE = 2
+        private const val OP_KEEP_ALIVE_WITH_BODY = 5
+        private const val TAG_SIZE = 16
+
+        /** 屏幕流 keepAlive 间隔（catplay `DEFAULT_KEEP_ALIVE` = 1s）。 */
+        private const val KEEPALIVE_INTERVAL_MS = 1_000L
+
+        /**
+         * 构造屏幕流 keepAlive 帧（明文头 + 可选 bplist 统计体）。
+         *
+         * 拆成纯函数是为了单测：帧格式一旦写错（opcode/body 长度字段/统计体键名），
+         * 接收端会静默忽略而不报错——现象仍是 10 秒后被拆链，排查成本极高。
+         */
+        internal fun buildKeepAliveFrame(
+            withStats: Boolean,
+            frames: Int,
+            bytesPerSecond: Double,
+            framesPerSecond: Int,
+        ): ByteArray {
+            val body =
+                if (withStats) {
+                    // 字段名对照 catplay ScreenSenderStats（serde camelCase）
+                    BinaryPlist.encode(
+                        linkedMapOf(
+                            "txUsageAvg" to bytesPerSecond,
+                            "encoderCurrentFPS" to framesPerSecond.toLong(),
+                            "sentFramesAvg" to frames.toLong(),
+                            "queuedFramesAvg" to 0L,
+                            "lossAvg" to 0.0,
+                        ),
+                    )
+                } else {
+                    ByteArray(0)
+                }
+            val header = ByteArray(HEADER_LEN)
+            // 头部布局：u32LE body 长度、u8 opcode、3 字节小参数、15 × 8 字节参数
+            header[0] = (body.size and 0xFF).toByte()
+            header[1] = ((body.size ushr 8) and 0xFF).toByte()
+            header[2] = ((body.size ushr 16) and 0xFF).toByte()
+            header[3] = ((body.size ushr 24) and 0xFF).toByte()
+            header[4] = (if (body.isEmpty()) OP_KEEP_ALIVE else OP_KEEP_ALIVE_WITH_BODY).toByte()
+            if (body.isNotEmpty()) {
+                // params[14]（偏移 8+14*8=120）：前 4 字节 0.0f，后 4 字节 body 长度 f32 LE
+                writeLittleEndianFloat(header, 120, 0f)
+                writeLittleEndianFloat(header, 124, body.size.toFloat())
+            }
+            return if (body.isEmpty()) header else header + body
+        }
+
+        private fun writeLittleEndianFloat(
+            target: ByteArray,
+            offset: Int,
+            value: Float,
+        ) {
+            val bits = value.toRawBits()
+            for (index in 0 until 4) {
+                target[offset + index] = ((bits ushr (8 * index)) and 0xFF).toByte()
+            }
+        }
     }
 }

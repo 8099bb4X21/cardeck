@@ -1641,6 +1641,7 @@ object SessionController {
                                             height = streamH,
                                             targetFps = fps,
                                             log = { line -> appendLog(line) },
+                                            keepAliveWithStats = setup.keepAliveSendStatsAsBody,
                                             onEnded = {
                                                 // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
                                                 appendLog(">>> CarPlay 会话结束（推流终止）——恢复蓝牙探测")
@@ -1700,6 +1701,15 @@ object SessionController {
                                     client.record()
                                 }
                             }
+                        } else {
+                            // 会话级 SETUP 被拒（典型：接收端按设备过滤回 403，见
+                            // AirPlayClient.runSetup 的 deviceID 说明）。主动关闭控制通道：
+                            // 否则接收端要等约 45s 视频超时才拆 BT 链路，用户只看到
+                            // 「连上之后自动断开」，无从判断是会话建立失败。
+                            phaseHint = "接收端拒绝了会话建立（SETUP 未通过）"
+                            appendLog("AIRPLAY: 会话建立失败——主动关闭控制通道，本轮结束")
+                            uiHintSink?.invoke("接收端拒绝了会话建立（SETUP）——请查看日志中的 deviceID 提示")
+                            runCatching { client.close() }
                         }
                     }
                 } catch (error: Throwable) {
