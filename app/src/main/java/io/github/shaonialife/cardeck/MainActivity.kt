@@ -930,7 +930,9 @@ class MainActivity : AppCompatActivity() {
             if (!android.provider.Settings.canDrawOverlays(this)) {
                 promptOverlayPermission("「常亮+暗幕」已开启。")
             } else {
-                // 立即就绪：假息屏/自动暗幕不再依赖连接建立
+                // attach 只挂触摸探针、不排自动暗幕定时器：自动暗幕/常亮由会话驱动
+                // （ScreenDimmer.setSessionActive），否则未连接时也会 45s 后变黑
+                // ——用户实测「会话断了还会启动暗幕」即此（2026-10-19）。
                 ScreenDimmer
                     .attach(this)
             }

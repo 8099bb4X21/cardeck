@@ -42,12 +42,44 @@ object ScreenDimmer {
     @Volatile
     private var dimShown = false
 
+    /**
+     * 当前是否有活跃的投屏会话。
+     *
+     * **自动暗幕与常亮只在会话期间生效**（2026-10-19 用户实测反馈）：
+     * 应用启动时就会 attach（为了让「手动假息屏」随时可用），但车机侧断开
+     * （`VideoSender.onEnded`）不会释放 VirtualLauncher，暗幕的 45s 定时器仍在——
+     * 表现为「会话早就断了，过一会儿手机屏突然变黑」。所以自动调度必须由会话驱动，
+     * 手动 [enterDimNow] 不受此限制（用户显式操作）。
+     */
+    @Volatile
+    private var sessionActive = false
+
     private val showRunnable = Runnable { showDim() }
+
+    /** 会话开始/结束（由 SessionController 在推流起停时调用）。 */
+    fun setSessionActive(active: Boolean) {
+        if (sessionActive == active) return
+        sessionActive = active
+        val ctx = appContext ?: return
+        val h = handler
+        if (active) {
+            if (!enabled) return
+            enableStayAwake(ctx)
+            h?.post { schedule() }
+            Log.i("CarPlaySender", "DIMMER: 会话开始——常亮/自动暗幕生效（${IDLE_TIMEOUT_MS / 1000}s 无操作后变暗）")
+        } else {
+            h?.removeCallbacks(showRunnable)
+            // 会话结束时如果暗幕正盖着（车机自己断开），立即撤掉，让用户看到手机正常界面
+            h?.post { hideDim() }
+            restoreTimeout(ctx)
+            Log.i("CarPlaySender", "DIMMER: 会话结束——自动暗幕已停、屏幕超时已恢复")
+        }
+    }
 
     fun attach(context: Context) {
         if (appContext != null) {
             // 已附着：本次若为「启用」切换，补齐常亮与自动计时（触摸探针此前已挂）
-            if (enabled) {
+            if (enabled && sessionActive) {
                 enableStayAwake(context)
                 handler?.post { schedule() }
             }
@@ -63,15 +95,19 @@ object ScreenDimmer {
         appContext = context.applicationContext
         windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         handler = Handler(Looper.getMainLooper())
-        if (enabled) enableStayAwake(context)
+        // 常亮只在会话期间打开：应用启动时 attach 不把屏幕超时改成「永不」，
+        // 否则未连接时手机也永不熄屏（车机断开后同样收不回来）。
+        if (enabled && sessionActive) enableStayAwake(context)
         handler?.post {
             addWatcher()
-            if (enabled) schedule()
+            if (enabled && sessionActive) schedule()
         }
-        if (enabled) {
+        if (!enabled) {
+            Log.i("CarPlaySender", "DIMMER: 触摸探针已启动（常亮/暗幕关闭）")
+        } else if (sessionActive) {
             Log.i("CarPlaySender", "DIMMER: 已启动（常亮 + ${IDLE_TIMEOUT_MS / 1000}s 无操作后暗幕，点击恢复）")
         } else {
-            Log.i("CarPlaySender", "DIMMER: 触摸探针已启动（常亮/暗幕关闭）")
+            Log.i("CarPlaySender", "DIMMER: 触摸探针已启动（未在投屏——常亮/自动暗幕待会话开始后生效）")
         }
     }
 
@@ -85,9 +121,24 @@ object ScreenDimmer {
         Log.i("CarPlaySender", "DIMMER: 常亮/暗幕已关闭（触摸探针保留）")
     }
 
+    /**
+     * 自动暗幕是否应当生效（纯函数，见 [shouldAutoDim]）。
+     *
+     * 拆出来是为了单测：这三者任一为假都必须**不**弹暗幕。用户实测的 bug 正是
+     * 「会话已结束（sessionActive=false）但定时器还在」——手机屏无故变黑。
+     */
+    fun shouldAutoDim(
+        enabled: Boolean,
+        sessionActive: Boolean,
+        attached: Boolean,
+    ): Boolean = enabled && sessionActive && attached
+
     fun detach() {
         val h = handler
         handler = null
+        // 会话标记必须一并清零：否则下次 attach（未连接时启动 App）会沿用上一轮的
+        // true 而立即排程，又变回「没会话也自动变暗」的老问题。
+        sessionActive = false
         h?.removeCallbacksAndMessages(null)
         val wm = windowManager
         val dim = dimView
@@ -119,22 +170,27 @@ object ScreenDimmer {
             windowManager = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             h.post { addWatcher() }
         }
-        h.post { showDim() }
+        // 手动假息屏要有意义，屏幕必须保持常亮（否则真睡下去就没法「点击恢复」）
+        appContext?.let { if (enabled) enableStayAwake(it) }
+        h.post { showDim(force = true) }
     }
 
     /** 物理触摸（任意 app/界面）或暗幕点击时调用：重置自动暗幕计时。 */
     fun onUserInteraction() {
         val h = handler ?: return
         if (dimShown) hideDim()
-        if (enabled) schedule()
+        if (enabled && sessionActive) schedule()
     }
 
     private fun schedule() {
+        if (!sessionActive) return
         handler?.removeCallbacks(showRunnable)
         handler?.postDelayed(showRunnable, IDLE_TIMEOUT_MS)
     }
 
-    private fun showDim() {
+    private fun showDim(force: Boolean = false) {
+        // 自动路径必须有活跃会话：会话已结束（尤其车机侧断开）时绝不弹暗幕
+        if (!force && !shouldAutoDim(enabled, sessionActive, isAttached())) return
         val ctx = appContext
         if (ctx == null) {
             android.util.Log.w("ScreenDimmer", "showDim: appContext 为空（attach 未执行）")

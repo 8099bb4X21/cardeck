@@ -27,6 +27,7 @@ import io.github.shaonialife.cardeck.net.WifiSavedNetworks
 import io.github.shaonialife.cardeck.service.CarPlayService
 import io.github.shaonialife.cardeck.shizuku.Shell
 import io.github.shaonialife.cardeck.shizuku.ShizukuGate
+import io.github.shaonialife.cardeck.ui.ScreenDimmer
 import io.github.shaonialife.cardeck.util.Bg
 import io.github.shaonialife.cardeck.util.DebugFileLog
 import io.github.shaonialife.cardeck.video.VideoSender
@@ -458,6 +459,8 @@ object SessionController {
     fun retireSession() {
         videoSender?.stop()
         videoSender = null
+        // 暗幕/常亮随会话收掉（本方法在每轮配对起步也会执行，新一轮推流起来后会重新置位）
+        ScreenDimmer.setSessionActive(false)
         audioSender?.stop()
         audioSender = null
         currentSharedSecret = null
@@ -1829,9 +1832,13 @@ object SessionController {
                                                 // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
                                                 appendLog(">>> CarPlay 会话结束（推流终止）——恢复蓝牙探测")
                                                 BtSessionGate.sessionActive = false
-                                                // 车机掉线类结束（无用户断开操作）：同样复原横屏覆盖。
-                                                // 这里跑在推流收尾线程，不是连接关键路径，但统一走
-                                                // 异步口以保持「串行、不重入」的语义。
+                                                // 车机掉线类结束（无用户断开操作）：暗幕/常亮必须一起收掉。
+                                                // 这条路径不经过 retireSession（VirtualLauncher 仍挂着），
+                                                // 漏掉它就会出现「会话早就断了、45s 后手机屏突然变黑」
+                                                // （2026-10-19 用户实测）。
+                                                ScreenDimmer.setSessionActive(false)
+                                                // 同样复原横屏覆盖。这里跑在推流收尾线程，不是连接
+                                                // 关键路径，但统一走异步口以保持「串行、不重入」的语义。
                                                 appContext?.let { ctx ->
                                                     AppOrientationCompat.resetAllAsync(ctx, ::appendLog)
                                                 }
@@ -1870,6 +1877,9 @@ object SessionController {
                                         appendLog(
                                             "MODE: 隐形屏 ${if (ok) "已启动（高德车机版优先）display=${source.displayId}" else "启动失败（Shizuku 就绪？）"}",
                                         )
+                                        // 暗幕/常亮只在真正开始投屏后生效（见 ScreenDimmer.sessionActive）：
+                                        // 应用启动时只挂触摸探针，避免「会话早断了、手机过一会儿还是变暗」。
+                                        if (ok) ScreenDimmer.setSessionActive(true)
                                     }
                                 }
                                 // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。

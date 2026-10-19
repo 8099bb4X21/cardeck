@@ -269,6 +269,16 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   只允许单向转调 `DefaultMapPrefs`。
 - **会话生命周期钩子**：强制横屏覆盖（AppOrientationCompat）attach 时 applyAll、
   retireSession/onEnded 时 resetAll——新加系统级写入（settings/cmd）照此模式收口。
+- **暗幕/常亮必须由会话驱动，不能由 App 启动驱动**（2026-10-19 用户实测
+  「会话已断开、过一会儿仍然启动暗幕」）：`ScreenDimmer.attach` 原先在启动时就
+  `schedule()` 45 秒定时器，而车机侧断开走的是 `VideoSender.onEnded`——它**不经过
+  `retireSession`**，`VirtualLauncher` 仍挂着，定时器照常触发。现在自动暗幕的条件是
+  `enabled && sessionActive && attached`（纯函数 `shouldAutoDim`，有单测）：
+  会话开始（`VideoSender.start` 的 onSurfaceReady 里 `attach` 成功后才置位）才排程与
+  把屏幕超时改「永不」，`onEnded` / `retireSession` 与 `detach()` 都必须清零标记
+  （否则下次启动会沿用 true）。手动「假息屏」`enterDimNow` 走 `force` 路径不受限制。
+  **判断标准**：任何「会话期间才该生效」的 UI/系统副作用，都要同时挂在
+  「推流启动成功」与「onEnded」两端——只挂一端必然漏掉车机主动断开这条路径。
 - **取消连接必须全程可中断**：`sessionStarting` 互斥标志的复位依赖配对流程线程
   走到 finally——该线程可能阻塞在不可中断的等待（无超时 connect、mDNS 等待、
   BT 保活读循环），任何一处卡住都会让取消「无效」（英雄卡永久「正在连接」）。
