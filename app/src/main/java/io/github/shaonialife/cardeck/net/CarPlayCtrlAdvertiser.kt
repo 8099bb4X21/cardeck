@@ -30,18 +30,29 @@ class CarPlayCtrlAdvertiser(
         const val SERVICE_TYPE = "_carplay-ctrl._tcp"
 
         /**
-         * 设备信息服务的服务类型。真 iPhone 与 catplay 发送端都同时广播它
-         * （catplay `DeviceInfoBonjourEntry`，TXT `model=D84AP`）；部分车机在
-         * 发现 ctrl 服务后会再去解析 device-info 来确认「这是台 iPhone」。
-         * 缺失时表现为车机永远不发 ctrl 邀请（老固件尤其明显）。
+         * 发送端在 ctrl TXT 里自报的版本。
+         *
+         * **必须保持 950.7.1**：2026-10-19 奥迪 MMI 3315 实车对照定谳——改成 catplay 的
+         * 566.25.21（发送端 SDK 版本）后，车机**连 ctrl-int 探测都不再发**、0x4301 永不到达；
+         * 用 950.7.1 时同一台车 0.65 秒内就下发 0x4301。车机在 WiFi 上只看得到这个 TXT，
+         * 它显然是按「接收端/系统广播常见版本」来判断对方形态的。
          */
-        const val DEVICE_INFO_TYPE = "_device-info._tcp"
+        private const val SENDER_SRCVERS = "950.7.1"
 
-        /** 发送端自报的 AirPlay 版本（与 SETUP 的 sourceVersion 同源）。 */
-        private const val SENDER_SRCVERS = "566.25.21"
+        /**
+         * ctrl 服务实例名。同理保持 0.1.6 的 `sender`：改名为 `iPhone` 与上一条同时生效，
+         * 无法从单次日志区分归因，故一并回退到已验证可用的组合（2026-10-19）。
+         */
+        private const val SERVICE_NAME = "sender"
 
-        /** 真 iPhone 的 board 型号（catplay AIRPLAY_TX_IOS_BOARD）。 */
-        private const val SENDER_MODEL = "D84AP"
+        /** 测试可见：这两个值经真车验证，改动需先复测（见 CarPlayCtrlAdvertiserTest）。 */
+        internal fun advertisedSrcversForTest(): String = SENDER_SRCVERS
+
+        internal fun advertisedServiceNameForTest(): String = SERVICE_NAME
+
+        /** 测试可见：本类实际广播的服务类型全集（目前只有 ctrl；_device-info 已移除）。 */
+        internal fun advertisedServiceTypesForTest(): List<String> = listOf(SERVICE_TYPE)
+
         private const val TAG = "CTRL"
         private const val MAX_HEAD_BYTES = 16 * 1024
 
@@ -76,9 +87,6 @@ class CarPlayCtrlAdvertiser(
 
     /** 当前生效的注册监听器（每次 start 换新实例，避免 already-in-use）。 */
     private var activeListener: NsdManager.RegistrationListener? = null
-
-    /** 设备信息服务（_device-info._tcp）的注册监听器。 */
-    private var deviceInfoListener: NsdManager.RegistrationListener? = null
 
     /** 本次注册时刻（force 冷却判定用）。 */
     @Volatile
@@ -164,14 +172,12 @@ class CarPlayCtrlAdvertiser(
             }
             val info =
                 NsdServiceInfo().apply {
-                    serviceName = "iPhone"
+                    serviceName = SERVICE_NAME
                     serviceType = SERVICE_TYPE
                     setPort(socket.localPort)
                     // TXT id = 本机真实蓝牙 MAC（catplay CarPlayInviter 实证：车机按此
                     // 匹配待邀请的手机，占位值会导致车机永远不邀请 → 0x4301 永不到达）。
                     setAttribute("id", mac)
-                    // catplay 的 TXT srcvers 是发送端 SDK 版本（与 SETUP 的 sourceVersion 一致）。
-                    // 之前写 950.7.1 是车机侧版本，语义错误：车机可能据此选择协议分支。
                     setAttribute("srcvers", SENDER_SRCVERS)
                 }
             // 每次注册用全新 listener：unregisterService 是异步的，复用同一个 listener
@@ -179,12 +185,17 @@ class CarPlayCtrlAdvertiser(
             val freshListener = createListener()
             activeListener = freshListener
             nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, freshListener)
-            // 同步广播 _device-info._tcp：真 iPhone/catplay 都会发，部分车机据此确认设备类型
-            registerDeviceInfo()
             registered = true
             registeredAtMillis = SystemClock.uptimeMillis()
             registeredWithMac = mac
-            log("$TAG: 已监听 :${socket.localPort}，广播 $SERVICE_TYPE")
+            // 车机在 WiFi 上唯一可见的手机身份就是这几个 TXT 字段：占位 MAC / 版本不符都会
+            // 直接导致「不发 ctrl 探测、0x4301 永不到达」，而此前日志完全看不到它们
+            // （2026-10-19 奥迪 0.1.7 排查时无法归因），故每次注册都打一行。
+            log(
+                "$TAG: 已监听 :${socket.localPort}，广播 $SERVICE_TYPE " +
+                    "name=$SERVICE_NAME id=$mac srcvers=$SENDER_SRCVERS" +
+                    if (mac == DeviceIdentity.PLACEHOLDER_MAC) "（⚠ 占位 MAC：车机不会邀请）" else "",
+            )
             if (mac == DeviceIdentity.PLACEHOLDER_MAC) {
                 // 占位 id 车机不会邀请：后台等 Shizuku/MAC 就绪后立刻重注册，
                 // 别让「广播提前到启动连接」反而把 TXT id 写错（2026-10-18）。
@@ -198,43 +209,6 @@ class CarPlayCtrlAdvertiser(
         } catch (error: Exception) {
             log("$TAG: 启动失败 - ${error.message}")
             false
-        }
-    }
-
-    /** 广播 `_device-info._tcp`（TXT model = iPhone board 型号，catplay 同款）。 */
-    private fun registerDeviceInfo() {
-        val info =
-            NsdServiceInfo().apply {
-                serviceName = "iPhone"
-                serviceType = DEVICE_INFO_TYPE
-                setPort(0)
-                setAttribute("model", SENDER_MODEL)
-            }
-        val listener =
-            object : NsdManager.RegistrationListener {
-                override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
-                    log("$TAG: mDNS 注册成功（$DEVICE_INFO_TYPE model=$SENDER_MODEL）")
-                }
-
-                override fun onRegistrationFailed(
-                    serviceInfo: NsdServiceInfo,
-                    errorCode: Int,
-                ) {
-                    log("$TAG: $DEVICE_INFO_TYPE 注册失败 code=$errorCode（不影响 ctrl 服务）")
-                }
-
-                override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
-
-                override fun onUnregistrationFailed(
-                    serviceInfo: NsdServiceInfo,
-                    errorCode: Int,
-                ) = Unit
-            }
-        deviceInfoListener = listener
-        try {
-            nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
-        } catch (error: Exception) {
-            log("$TAG: $DEVICE_INFO_TYPE 注册异常 - ${error.message}")
         }
     }
 
@@ -374,8 +348,6 @@ class CarPlayCtrlAdvertiser(
         registeredNetwork = null
         activeListener?.let { runCatching { nsdManager.unregisterService(it) } }
         activeListener = null
-        deviceInfoListener?.let { runCatching { nsdManager.unregisterService(it) } }
-        deviceInfoListener = null
         runCatching { serverSocket?.close() }
         serverSocket = null
         log("$TAG: 已停止")

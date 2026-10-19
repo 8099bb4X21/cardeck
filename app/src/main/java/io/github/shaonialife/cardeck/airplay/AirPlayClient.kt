@@ -35,6 +35,17 @@ class AirPlayClient(
      * 早期实现只在配对前查一次，失败后只能对着网关兜底地址空转到 120s 窗口耗尽。
      */
     private val endpointRefresher: ((Iap2SenderSession.CarPlayEndpoint) -> Iap2SenderSession.CarPlayEndpoint?)? = null,
+    /**
+     * 配对重试期间的低频钩子（每 ~10s 一次，必须非阻塞）：主控用它重新公告 ctrl mDNS
+     * 并报告 mDNS 发现状态。
+     *
+     * 为什么需要：2026-10-19 奥迪 0.1.7 日志里车机**始终没有探测 ctrl、也没广播
+     * `_airplay._tcp`**，而我们在 4s 邀请窗口超时后只对着网关 `:7000` 空转 54s
+     * （`ECONNREFUSED`），期间既不再公告、也不报告「mDNS 一条都没发现」。
+     * 车机的 Bonjour 可能错过首次公告；周期性重播给它是真实 iPhone 的做法
+     * （catplay 每 1s force_announce）。
+     */
+    private val retryTick: ((attempt: Int) -> Unit)? = null,
 ) {
     /**
      * 当前使用的接收端端点。0x4301 晚到 / mDNS 后上线时由主控热更新；
@@ -210,6 +221,10 @@ class AirPlayClient(
             // _airplay._tcp 可能已经在后台发现到，及时换过去比空转 120s 强。
             endpointRefresher?.invoke(endpoint)?.let { refreshed ->
                 updateEndpoint(refreshed, "配对期间 mDNS 刷新")
+            }
+            // 低频钩子：主控据此重新公告 ctrl mDNS（车机 Bonjour 可能漏掉首次公告）
+            if (attempt == 1 || attempt % RETRY_TICK_ATTEMPTS == 0) {
+                runCatching { retryTick?.invoke(attempt) }
             }
             close()
             if (!ensureConnected(2_000)) {
@@ -1381,6 +1396,9 @@ class AirPlayClient(
 
         /** 等车机打开 AirPlay 窗口的总时长（用户在车机上点手机图标的等待窗口）。 */
         private const val PAIRING_WINDOW_MILLIS = 120_000L
+
+        /** 配对重试期间调用 [retryTick] 的间隔（次）：每轮回 2s，10 次 ≈ 每 20s 重新公告一次。 */
+        private const val RETRY_TICK_ATTEMPTS = 10
 
         /**
          * 接收端明确回「没有这个接口」的 HTTP 状态。命中即判定为 pre-HomeKit 老车机，

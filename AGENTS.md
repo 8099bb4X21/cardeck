@@ -583,6 +583,21 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   序号）。两条踩坑：**裸 ACK 会与 SYN|ACK 撞号**（故主机路径只回 SYN|ACK，Audi
   帧序随之从「裸 ACK+SYN|ACK」变为单帧，需复测）；**不能对所有带 SYN 位的帧都回**
   （会与对端的 SYN|ACK 形成无限乒乓，单测曾因此空转 55 秒，只有 `jstack` 能看出）。
+- **车机如何识别我们的字段，一律不许"照 catplay 抄"**（2026-10-19 奥迪 0.1.7 回归
+  定谳，`docs/PROTOCOL-NOTES.md` §9i）：把 ctrl TXT 的 `srcvers` 从 `950.7.1` 改成
+  catplay 的 `566.25.21`、实例名 `sender` → `iPhone` 之后，同一台 Audi MMI 3315
+  从「0x4300 后 0.65s 下发 0x4301」变成**连 `GET /ctrl-int/1/connect` 都不发**，
+  `_airplay._tcp` 与 0x4301 双零、网关 `:7000` 空转 54s（`ECONNREFUSED`）。
+  iAP2 全通、车机还在发 0xAE00，极易误判成网络问题。已回退并加测试
+  `CarPlayCtrlAdvertiserTest` 钉死。**同一类字段**：`sourceVersion`、`deviceID`、
+  服务名、`model`、TXT `id`——改前必须真车 A/B 验证，且日志必须能直接看到取值。
+  配套：`_device-info._tcp` 已移除（Android `NsdServiceInfo` 不接受 port=0，
+  每次都报 `The port is missing`，属未验证收益的噪音）。
+- **0x4300/0x4E0E 的蓝牙标识必须在会话启动时就拿到真实 MAC**（2026-10-19 奥迪
+  0.1.7 日志）：整轮都是占位 `02:00:00:00:00:00`。根因是 `DeviceIdentity` 的 10 秒
+  静默窗口撞上「BT 会话在 Shizuku 刚就绪的同一毫秒构造」——首次失败后 10 秒内全返回
+  占位值。`BtSession` 现改为 `forceRetry = true` 并打印解析结果。奥迪会用它与 RFCOMM
+  对端核对，占位值导致静默丢弃。排查时**先看 `设备状态问候 … mac=` 这行**。
 - **AirPlay 会话级 SETUP 的 `deviceID` 必须是本机真实蓝牙 MAC**（2026-10-19
   WinPlay 实测）：接收端可以按「用户选中的 iPhone 蓝牙地址」过滤会话，对不上即回
   **403**，状态行是它特有的 `403 OK`（WinPlay 的 STATUS_TEXT 表没有 403，回退成

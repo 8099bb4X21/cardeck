@@ -471,6 +471,53 @@ ACK 位与 ack 字段，裸 ACK 本就是冗余的；catplay 主机路径也只�
   声明了 CarPlay/iAP2 服务的设备；
 - 裸 ACK 500ms 一次（350 条），BMW 的 LSP 声明 `ackTimeout=3000ms`，按对端值发即可。
 
+## 9i. 0.1.7 在奥迪 MMI 3315 上的回归：ctrl 广播身份字段被改（2026-10-19）
+
+日志 `logs/cardeck/CarDeck-log-20261019-141711.txt`（Xiaomi 15 / Android 16，0.1.7，
+同车同手机在 0.1.6 下可正常连接）。表象：**iAP2 全通、车机却不开 AirPlay 窗口**。
+
+**已走通**：RFCOMM → `iap2 link ready` → 0x1D01 → MFi（32B，按记忆首选 0.58s）
+→ 0x5703（`Audi_MMI_3315_5GHz` ch149）→ 加入应用专属网络。车机 iAP2 层是活的
+（后续还发来 0xAE00）。
+
+**卡点（四项证据全为零）**：
+
+| 检查项 | 0.1.7（本次） | 0.1.6（同车可用） |
+|---|---|---|
+| 0x4301 到达 | **0 次** | 0x4300 后 **0.65s** |
+| 车机 `GET /ctrl-int/1/connect` | **0 次** | 有 |
+| mDNS `_airplay._tcp` | **0 次** | `CarPlay -> 10.174.189.1:7000` |
+| 网关 `:7000` | 54s 全部 `ECONNREFUSED` | 立即可连 |
+
+**根因：ctrl 广播的 TXT `srcvers` 与实例名被我按 catplay 改了。** 0.1.6 是
+`name=sender` + `srcvers=950.7.1`（车机认）；0.1.7 改成 `name=iPhone` +
+`srcvers=566.25.21`（catplay 的发送端 SDK 版本），车机**连探测都不再发**。
+这两项是车机在 WiFi 上唯一能看到的手机身份，改动等价于换了一台设备。
+→ 已回退到 0.1.6 的值，并加测试 `CarPlayCtrlAdvertiserTest` 钉死（将来不要再
+"照 catplay 抄"）。
+
+**同时移除 `_device-info._tcp` 广播**：Android 的 `NsdServiceInfo` 不接受 port=0，
+真机每次都报 `The port is missing`（日志 4 次）。它是未验证收益的附加广播，
+失败只会制造噪音——移除而不是去修，因为没有任何证据表明这台车需要它。
+
+**另两个顺带修掉的问题**：
+
+1. **0x4300/0x4E0E 用的是占位 MAC**：本次日志全篇
+   `设备状态问候 … mac=02:00:00:00:00:00`。`DeviceIdentity` 对解析失败有 10 秒静默
+   窗口，而 BT 会话常在 Shizuku 刚就绪的同一毫秒构造——首次失败后 10 秒内全返回
+   占位值（0.1.6 的日志里第 2、3 轮就是真实 MAC `5C:40:71:A4:0A:90`）。奥迪会拿
+   0x4300 的传输标识与 RFCOMM 对端核对，占位值导致静默丢弃。
+   → `BtSession` 改为会话启动时 `forceRetry` 解析并打日志。
+2. **ctrl 广播的 TXT 从未进日志**：导致上面这次无法直接归因（只能靠版本对比）。
+   → 每次注册打印 `name= / id= / srcvers=`，占位 MAC 额外标 ⚠。
+3. **兜底期不再公告也不再查 mDNS**：4s 邀请窗口超时后只对着网关空转 54s。
+   → `AirPlayClient` 增加 `retryTick`（每 10 次重试 ≈ 20s）：重新 force_announce
+   ctrl，并把「车机邀请次数 + mDNS 是否发现」写进日志。
+
+**方法论教训**：把「参考实现的值」直接搬进线上，代价可能是一整轮真车不可用。
+凡是影响**车机如何识别我们**的字段（TXT、服务名、sourceVersion、deviceID），
+都必须先在真车上 A/B 验证，且改动要能一眼从日志归因。
+
 ## 10. 参考文件速查
 
 > 表中路径均指 `reference/` 下**代码精读来源**（xcertplay 与 DiPlay 同源，
