@@ -28,6 +28,20 @@ class CarPlayCtrlAdvertiser(
 ) {
     companion object {
         const val SERVICE_TYPE = "_carplay-ctrl._tcp"
+
+        /**
+         * 设备信息服务的服务类型。真 iPhone 与 catplay 发送端都同时广播它
+         * （catplay `DeviceInfoBonjourEntry`，TXT `model=D84AP`）；部分车机在
+         * 发现 ctrl 服务后会再去解析 device-info 来确认「这是台 iPhone」。
+         * 缺失时表现为车机永远不发 ctrl 邀请（老固件尤其明显）。
+         */
+        const val DEVICE_INFO_TYPE = "_device-info._tcp"
+
+        /** 发送端自报的 AirPlay 版本（与 SETUP 的 sourceVersion 同源）。 */
+        private const val SENDER_SRCVERS = "566.25.21"
+
+        /** 真 iPhone 的 board 型号（catplay AIRPLAY_TX_IOS_BOARD）。 */
+        private const val SENDER_MODEL = "D84AP"
         private const val TAG = "CTRL"
         private const val MAX_HEAD_BYTES = 16 * 1024
 
@@ -62,6 +76,9 @@ class CarPlayCtrlAdvertiser(
 
     /** 当前生效的注册监听器（每次 start 换新实例，避免 already-in-use）。 */
     private var activeListener: NsdManager.RegistrationListener? = null
+
+    /** 设备信息服务（_device-info._tcp）的注册监听器。 */
+    private var deviceInfoListener: NsdManager.RegistrationListener? = null
 
     /** 本次注册时刻（force 冷却判定用）。 */
     @Volatile
@@ -147,19 +164,23 @@ class CarPlayCtrlAdvertiser(
             }
             val info =
                 NsdServiceInfo().apply {
-                    serviceName = "sender"
+                    serviceName = "iPhone"
                     serviceType = SERVICE_TYPE
                     setPort(socket.localPort)
                     // TXT id = 本机真实蓝牙 MAC（catplay CarPlayInviter 实证：车机按此
                     // 匹配待邀请的手机，占位值会导致车机永远不邀请 → 0x4301 永不到达）。
                     setAttribute("id", mac)
-                    setAttribute("srcvers", "950.7.1")
+                    // catplay 的 TXT srcvers 是发送端 SDK 版本（与 SETUP 的 sourceVersion 一致）。
+                    // 之前写 950.7.1 是车机侧版本，语义错误：车机可能据此选择协议分支。
+                    setAttribute("srcvers", SENDER_SRCVERS)
                 }
             // 每次注册用全新 listener：unregisterService 是异步的，复用同一个 listener
             // 会撞上 "listener already in use"（真车实测 10-11 卡住 ctrl 广播）
             val freshListener = createListener()
             activeListener = freshListener
             nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, freshListener)
+            // 同步广播 _device-info._tcp：真 iPhone/catplay 都会发，部分车机据此确认设备类型
+            registerDeviceInfo()
             registered = true
             registeredAtMillis = SystemClock.uptimeMillis()
             registeredWithMac = mac
@@ -177,6 +198,43 @@ class CarPlayCtrlAdvertiser(
         } catch (error: Exception) {
             log("$TAG: 启动失败 - ${error.message}")
             false
+        }
+    }
+
+    /** 广播 `_device-info._tcp`（TXT model = iPhone board 型号，catplay 同款）。 */
+    private fun registerDeviceInfo() {
+        val info =
+            NsdServiceInfo().apply {
+                serviceName = "iPhone"
+                serviceType = DEVICE_INFO_TYPE
+                setPort(0)
+                setAttribute("model", SENDER_MODEL)
+            }
+        val listener =
+            object : NsdManager.RegistrationListener {
+                override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
+                    log("$TAG: mDNS 注册成功（$DEVICE_INFO_TYPE model=$SENDER_MODEL）")
+                }
+
+                override fun onRegistrationFailed(
+                    serviceInfo: NsdServiceInfo,
+                    errorCode: Int,
+                ) {
+                    log("$TAG: $DEVICE_INFO_TYPE 注册失败 code=$errorCode（不影响 ctrl 服务）")
+                }
+
+                override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
+
+                override fun onUnregistrationFailed(
+                    serviceInfo: NsdServiceInfo,
+                    errorCode: Int,
+                ) = Unit
+            }
+        deviceInfoListener = listener
+        try {
+            nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (error: Exception) {
+            log("$TAG: $DEVICE_INFO_TYPE 注册异常 - ${error.message}")
         }
     }
 
@@ -316,6 +374,8 @@ class CarPlayCtrlAdvertiser(
         registeredNetwork = null
         activeListener?.let { runCatching { nsdManager.unregisterService(it) } }
         activeListener = null
+        deviceInfoListener?.let { runCatching { nsdManager.unregisterService(it) } }
+        deviceInfoListener = null
         runCatching { serverSocket?.close() }
         serverSocket = null
         log("$TAG: 已停止")

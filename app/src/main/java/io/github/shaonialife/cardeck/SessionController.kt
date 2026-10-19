@@ -3,6 +3,7 @@ package io.github.shaonialife.cardeck
 import android.content.Context
 import android.view.KeyEvent
 import io.github.shaonialife.cardeck.airplay.AirPlayClient
+import io.github.shaonialife.cardeck.airplay.PairVerifyClient
 import io.github.shaonialife.cardeck.audio.AudioSender
 import io.github.shaonialife.cardeck.bt.BtProfiles
 import io.github.shaonialife.cardeck.bt.BtSessionGate
@@ -17,8 +18,10 @@ import io.github.shaonialife.cardeck.input.TouchReports
 import io.github.shaonialife.cardeck.input.TouchRouter
 import io.github.shaonialife.cardeck.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
+import io.github.shaonialife.cardeck.net.AirPlayFeatures
 import io.github.shaonialife.cardeck.net.CarPlayCtrlAdvertiser
 import io.github.shaonialife.cardeck.net.CarPlayServiceBrowser
+import io.github.shaonialife.cardeck.net.EndpointHosts
 import io.github.shaonialife.cardeck.net.WifiCarPlayConnector
 import io.github.shaonialife.cardeck.net.WifiSavedNetworks
 import io.github.shaonialife.cardeck.service.CarPlayService
@@ -78,6 +81,19 @@ object SessionController {
 
     /** 端点不完整时等 mDNS 缓存命中：绑网时已开始发现，通常几百毫秒内命中。 */
     private const val ENDPOINT_RESOLVE_WAIT_MS = 3_000L
+
+    /**
+     * 明文 SETUP 被拒后「加密升级」补配对的上限（catplay handle_setup_result 路径）。
+     * 只在实际被拒时才走到这里，正常车机零成本；不支持配对的接收端会在
+     * pair-setup 收到 404/405/455 后立刻放弃，不会等满这个窗口。
+     */
+    private const val PAIRING_UPGRADE_WINDOW_MS = 30_000L
+
+    /**
+     * 明文会话初始 SETUP 的重试窗口。pre-HomeKit 车机的 AirPlay 端口常在
+     * 「用户点车机上的手机图标」后才开放；端口晚开 1~2 秒不该让整轮失败。
+     */
+    private const val INITIAL_SETUP_WINDOW_MS = 30_000L
 
     /**
      * 端点已到但手机还没切到车机热点时的等待上限。
@@ -334,9 +350,15 @@ object SessionController {
                         // 手机双归属（连车机热点 + 自己开热点共享给电脑）时 mDNS 会跨网
                         // 发现电脑的 AirPlay 接收器（macOS 自带）——2026-10-11 实测把
                         // MacBook 当成车机连了 120s。非本网段一律不算车机。
+                        // 地址判定统一走 EndpointHosts：IPv4 按 /24 前缀，链路本地 IPv6
+                        // 天然只在本链路，全局 IPv6 按 /64 比对。旧实现只认 IPv4，会把
+                        // 只广播 fe80:: 的奥迪 4xxx 直接丢掉（2026-10-19）。
                         val ip = info.host?.hostAddress ?: return@CarPlayServiceBrowser false
-                        val prefix = wifiConnector?.localIpv4Address()?.substringBeforeLast('.')?.plus(".")
-                        ip.contains('.') && !ip.contains(':') && (prefix == null || ip.startsWith(prefix))
+                        EndpointHosts.isSameNetwork(
+                            ip,
+                            wifiConnector?.localIpv4Address(),
+                            wifiConnector?.localIpv6Addresses().orEmpty(),
+                        )
                     },
                 )
         }
@@ -469,7 +491,11 @@ object SessionController {
                 appendLog("MODE: 投屏已就绪（当前无会话——下次连接时自动启用音频）")
                 return
             }
-        val secret = currentSharedSecret ?: return
+        val secret = currentSharedSecret
+        if (secret == null) {
+            appendLog("MODE: 明文会话（未配对）无共享密钥——不补启音频")
+            return
+        }
         if (audioSender?.isRunning == true) return
         appendLog("MODE: 会话进行中，动态补启音频通道…")
         startAudioChannel(context, client, secret, currentAudioHost)
@@ -1055,15 +1081,21 @@ object SessionController {
     fun startAudioChannel(
         context: Context,
         client: AirPlayClient,
-        sharedSecret: ByteArray,
+        sharedSecret: ByteArray?,
         host: String?,
     ): Boolean {
         if (!audioEnabledForSession) {
             appendLog("AUDIO: 本次连接未开启车机侧声音（「启动连接」弹窗选择）——仅推视频")
             return false
         }
+        if (sharedSecret == null) {
+            // 明文会话（et=NONE）没有共享密钥可派生 DataStream 输出密钥：
+            // 推出去的 RTP 车机无法解密。宁可不推，也不要制造「有包无声」的假象。
+            appendLog("AUDIO: 明文会话（未配对）无共享密钥——跳过音频通道")
+            return false
+        }
         if (host == null) {
-            appendLog("AUDIO: 无接收端 IPv4 地址，跳过音频通道")
+            appendLog("AUDIO: 无接收端可用地址，跳过音频通道")
             return false
         }
         val projection = CarPlayService.mediaProjection
@@ -1100,16 +1132,24 @@ object SessionController {
     }
 
     /**
-     * 端点补全：0x4301 缺失/无 IPv4 时用 mDNS 解析车机 `_airplay._tcp` 合成端点
-     * （真 iPhone 同款发现路径，也是 Audi MIB3 唯一路径——它不发 0x4301）。
-     * 测试台端点自带 IPv4 与端口，本方法秒过、行为不变。
+     * 端点补全：优先吸收 mDNS 解析出的地址，再决定是否等待/兜底。
+     *
+     * 关键（2026-10-19 奥迪 4851 实车日志）：0x4301 只给了
+     * `fe80::3ca8:64ff:fe7c:293e`（IPv6 链路本地），而 `_airplay._tcp` 解析出的是
+     * `10.174.189.1:7000`——车机实际用 IPv4 通的。**不能因为 0x4301 带了 IPv6 就不看
+     * mDNS**：那样会把唯一验证过的 IPv4 路径丢掉。这里先做一次「零等待」缓存合并，
+     * 拿到 IPv4 就按 EndpointHosts 的优先级（IPv4 → IPv6）使用；缓存没命中才按需等。
      */
     private fun resolveEndpointHost(
         endpoint: Iap2SenderSession.CarPlayEndpoint,
         source: String,
     ): Iap2SenderSession.CarPlayEndpoint {
         var effective = endpoint
-        val needHost = !effective.ipAddresses.any { it.contains('.') && !it.contains(':') }
+        val cached = endpointBrowser?.awaitEndpoint(0)
+        if (cached != null) {
+            effective = mergeBrowserEndpoint(effective, cached, source, needPort = effective.airPlayPort <= 0)
+        }
+        val needHost = !EndpointHosts.hasUsable(effective.ipAddresses)
         val needPort = effective.airPlayPort <= 0
         if (!needHost && !needPort) return effective
 
@@ -1124,7 +1164,7 @@ object SessionController {
                 // mDNS 在部分网络/机型上不稳定（2026-10-11 实测车机 mDNS 时有时无）；
                 // 网关地址 + 默认端口 7000 直接连，AirPlay 端口是固定约定。
                 val gateway = wifiConnector?.gatewayAddress()
-                if (gateway != null && gateway.contains('.') && !gateway.contains(':')) {
+                if (gateway != null && EndpointHosts.candidates(listOf(gateway)).isNotEmpty()) {
                     appendLog(">>> [$source] mDNS 未发现，兜底使用网关地址 $gateway:7000（车机热点网关=车机）")
                     return effective.copy(
                         ipAddresses = listOf(gateway) + effective.ipAddresses,
@@ -1134,9 +1174,26 @@ object SessionController {
                 appendLog(">>> [$source] mDNS 未发现车机 AirPlay 服务（车机可能尚未启动无线会话）")
                 return effective
             }
+        return mergeBrowserEndpoint(effective, info, source, needPort)
+    }
+
+    /**
+     * 把一次 mDNS 解析结果并入端点：地址**追加到最前**（EndpointHosts 会按
+     * IPv4 → 全局 IPv6 → 链路本地 IPv6 重排，顺序只影响同类型内部）。
+     * 其余字段只在缺失时补（0x4301 的权威值不覆盖）。
+     */
+    private fun mergeBrowserEndpoint(
+        endpoint: Iap2SenderSession.CarPlayEndpoint,
+        info: android.net.nsd.NsdServiceInfo,
+        source: String,
+        needPort: Boolean,
+    ): Iap2SenderSession.CarPlayEndpoint {
+        var result = endpoint
         val address = info.host?.hostAddress
-        var result = effective
-        if (address != null && address.contains('.') && !address.contains(':')) {
+        if (address != null &&
+            EndpointHosts.candidates(listOf(address)).isNotEmpty() &&
+            result.ipAddresses.none { EndpointHosts.stripScope(it) == EndpointHosts.stripScope(address) }
+        ) {
             result = result.copy(ipAddresses = listOf(address) + result.ipAddresses)
             appendLog(">>> [$source] mDNS 解析到车机地址 $address:${info.port}")
         }
@@ -1145,28 +1202,18 @@ object SessionController {
         }
         // TXT 公钥兜底（pair-verify 校验用；0x4301 缺失时只能从这里拿）
         if (result.publicKey == null) {
-            val txtPk =
-                info.attributes["pk"]
-                    ?.toString(Charsets.UTF_8)
-                    ?.trimEnd { it.code == 0 }
-                    ?.takeIf { it.isNotEmpty() }
-            if (txtPk != null) result = result.copy(publicKey = txtPk)
+            txtValue(info, "pk")?.let { result = result.copy(publicKey = it) }
         }
         if (result.deviceIdentifier == null) {
-            val txtId =
-                info.attributes["deviceid"]
-                    ?.toString(Charsets.UTF_8)
-                    ?.trimEnd { it.code == 0 }
-                    ?.takeIf { it.isNotEmpty() }
-            if (txtId != null) result = result.copy(deviceIdentifier = txtId)
+            txtValue(info, "deviceid")?.let { result = result.copy(deviceIdentifier = it) }
         }
         if (result.sourceVersion == null) {
-            val txtVer =
-                info.attributes["srcvers"]
-                    ?.toString(Charsets.UTF_8)
-                    ?.trimEnd { it.code == 0 }
-                    ?.takeIf { it.isNotEmpty() }
-            if (txtVer != null) result = result.copy(sourceVersion = txtVer)
+            txtValue(info, "srcvers")?.let { result = result.copy(sourceVersion = it) }
+        }
+        if (result.advertisedFeatures == null) {
+            AirPlayFeatures.parse(txtValue(info, "features"))?.let {
+                result = result.copy(advertisedFeatures = it)
+            }
         }
         return result
     }
@@ -1244,9 +1291,8 @@ object SessionController {
         var result = endpoint
         val address = info.host?.hostAddress
         if (address != null &&
-            address.contains('.') &&
-            !address.contains(':') &&
-            result.ipAddresses.none { it == address }
+            EndpointHosts.candidates(listOf(address)).isNotEmpty() &&
+            result.ipAddresses.none { EndpointHosts.stripScope(it) == EndpointHosts.stripScope(address) }
         ) {
             result = result.copy(ipAddresses = listOf(address) + result.ipAddresses)
         }
@@ -1261,6 +1307,11 @@ object SessionController {
         }
         if (result.sourceVersion == null) {
             txtValue(info, "srcvers")?.let { result = result.copy(sourceVersion = it) }
+        }
+        if (result.advertisedFeatures == null) {
+            AirPlayFeatures.parse(txtValue(info, "features"))?.let {
+                result = result.copy(advertisedFeatures = it)
+            }
         }
         if (result == endpoint) return null
         appendLog(
@@ -1293,7 +1344,47 @@ object SessionController {
             publicKey = late.publicKey ?: fallback.publicKey,
             deviceIdentifier = late.deviceIdentifier ?: fallback.deviceIdentifier,
             sourceVersion = late.sourceVersion ?: fallback.sourceVersion,
+            advertisedFeatures = late.advertisedFeatures ?: fallback.advertisedFeatures,
         )
+
+    /**
+     * 初始 SETUP（带重连重试）。
+     *
+     * 已配对路径：配对循环刚连通过，SETUP 一次即可（失败就是真失败，交给降级/收尾）。
+     * 明文会话路径：车机的 AirPlay 端口可能要到「用户点车机图标」后才开，
+     * catplay 同样是「收到邀请才连」；这里在 [INITIAL_SETUP_WINDOW_MS] 内每 2s
+     * 重连一次并重试 SETUP，避免端口晚开 1~2 秒就整轮失败。
+     */
+    private fun runInitialSetup(
+        client: AirPlayClient,
+        plainSession: Boolean,
+        noPairing: Boolean,
+    ): AirPlayClient.SetupInfo? {
+        val first = client.runSetup()
+        if (first != null || !plainSession) return first
+        val deadline = android.os.SystemClock.uptimeMillis() + INITIAL_SETUP_WINDOW_MS
+        var attempt = 1
+        while (android.os.SystemClock.uptimeMillis() < deadline && !connectCancelled) {
+            attempt++
+            appendLog("AIRPLAY: 明文 SETUP 第 ${attempt - 1} 次未通过——2s 后重连重试（车机 AirPlay 端口可能尚未开放）")
+            try {
+                Thread.sleep(2_000)
+            } catch (_: InterruptedException) {
+                return null
+            }
+            if (connectCancelled) return null
+            client.close()
+            if (!client.reconnect(2_000)) continue
+            val retried = client.runSetup()
+            if (retried != null) {
+                appendLog("AIRPLAY: ✓ 明文 SETUP 在第 $attempt 次尝试成功")
+                return retried
+            }
+            // 端口开了但 SETUP 仍被拒：TXT 判断可能错了，交给调用方的加密升级路径
+            if (!noPairing) return null
+        }
+        return null
+    }
 
     /** BT 会话交接点：拿到 0x5703/0x4301 后两条路径流程一致——绑 WiFi → AirPlay 配对 → SETUP → 推流。 */
     private fun onCarPlayEndpoint(
@@ -1322,6 +1413,28 @@ object SessionController {
         )
         phaseHint = "蓝牙已连上车机，解析热点地址…"
         ssidSink?.invoke(endpoint.ssid)
+        // 诊断（老车机排查必看）：地址是 IPv4 还是只有 IPv6、TXT features 是否声明配对能力。
+        // 奥迪 4xxx 两种「连不上」都源于这里——旧版日志里完全没有这两项。
+        val addresses = endpoint.ipAddresses
+        val hasIpv4 = addresses.any { EndpointHosts.isIpv4(it) }
+        val pairingFlag = AirPlayFeatures.supportsPairing(endpoint.advertisedFeatures)
+        appendLog(
+            ">>> [$source] 端点诊断：地址=${addresses.ifEmpty { listOf("(无)") }}" +
+                "（${if (hasIpv4) {
+                    "IPv4"
+                } else if (addresses.isEmpty()) {
+                    "无地址"
+                } else {
+                    "仅 IPv6"
+                }}）" +
+                " features=" + (endpoint.advertisedFeatures?.let { "0x${it.toString(16)}" } ?: "未知") +
+                " HomeKit配对=" +
+                when (pairingFlag) {
+                    true -> "声明支持"
+                    false -> "未声明（按 pre-HomeKit 明文会话处理）"
+                    null -> "未知（按需配对）"
+                },
+        )
         // 先绑网络再解析端点：mDNS 组播跟随 bindProcessToNetwork 的网络，解析放前面
         // 只会拿到旧网络的结果（此前靠 resolveEndpointHost 内部重试掩盖，白等数秒）。
         // 绑定完成后再并行做三件事：ctrl 广播针对新网络重注册、后台发现 _airplay._tcp、
@@ -1338,10 +1451,12 @@ object SessionController {
             ctrlAdvertiser?.ensureForNetwork(endpoint.ssid, force = true, network = wifiConnector?.currentNetwork)
             endpointBrowser?.resetCache()
             endpointBrowser?.start()
-            // 0x4301 自带完整 IPv4+端口 = 接收端已明确告知「连这里」，无需等邀请
+            // 0x4301 自带完整地址+端口 = 接收端已明确告知「连这里」，无需等邀请
             // （DiPlay 测试台路径：本轮直接配对，省掉固定等待）。
+            // IPv6 也算地址：奥迪 4xxx 的 0x4301 常只给 fe80::（旧判据只看 IPv4，
+            // 会把这类端点当成「不完整」，白等 ctrl 邀请再退回网关兜底）。
             val endpointSelfContained =
-                endpoint.airPlayPort > 0 && endpoint.ipAddresses.any { it.contains('.') && !it.contains(':') }
+                endpoint.airPlayPort > 0 && EndpointHosts.hasUsable(endpoint.ipAddresses)
             Bg.run("airplay-pairing") {
                 try {
                     if (connectCancelled) {
@@ -1391,14 +1506,28 @@ object SessionController {
                     var client = newClient()
                     currentClient = client
                     drainPendingEndpoint(client)
-                    var keys = client.runPairing()
+                    // pre-HomeKit 老车机（CarPlay 210.81 时代，奥迪 4xxx 固件）在
+                    // `_airplay._tcp` 里**不声明** HK_PAIRING_AND_ENCRYPT：它们只接受
+                    // 明文 SETUP（et=NONE）+ AES-CTR 屏幕流，走 pair-setup 必然失败。
+                    // catplay 的接收端分类 1 即此形态；旧实现会在这里空转 120s 配对窗口，
+                    // 用户看到的就是「连不上」。
+                    val noPairing =
+                        AirPlayFeatures.supportsPairing(client.currentEndpoint.advertisedFeatures) == false
+                    var keys: PairVerifyClient.ControlKeys? =
+                        if (noPairing) {
+                            client.skipPairing("TXT features 未声明 HK_PAIRING_AND_ENCRYPT")
+                            client.reconnect()
+                            null
+                        } else {
+                            client.runPairing()
+                        }
                     if (connectCancelled) {
                         retireSession()
                         appendLog("AIRPLAY: 用户已取消——中止配对")
                         sessionStarting.set(false)
                         return@run
                     }
-                    if (keys == null && !client.pairSetupRejected && client.attemptedPairing) {
+                    if (keys == null && !noPairing && !client.pairSetupRejected && client.attemptedPairing) {
                         // 第二阶段（仅测试台 DiPlay）：复现「BT 控制已结束」状态再试一次。
                         // 真车（Audi）绝不能断 BT——真无线 CarPlay 的 BT 控制通道全程保活，
                         // 断开会让车机拆掉整轮 AirPlay 窗口（实车实测）。
@@ -1417,23 +1546,59 @@ object SessionController {
                             return@run
                         }
                     }
-                    if (keys != null) {
-                        phaseHint = "配对完成，建立 CarPlay 会话…"
+                    // keys == null 时仍有合法路径：**catplay 的 et=NONE 明文会话**。
+                    //  - 接收端明确不支持配对（pre-HomeKit / TXT 无 HK_PAIRING_AND_ENCRYPT）；
+                    //  - 配对彻底失败但 RTSP 确实连上过（有些车只认明文会话，
+                    //    pair-setup/pair-verify 全拒——catplay 正是「先试明文、失败才配对」，
+                    //    我们反过来：优先配对（保住 DiPlay/已知车机），失败后降级明文兜底）。
+                    val plainSession =
+                        keys == null && (client.pairingUnsupported || client.attemptedPairing)
+                    if (plainSession) {
+                        phaseHint = "建立明文会话…"
                         appendLog(
-                            "AIRPLAY: ✓ 配对完成 writeKey=" +
-                                keys.phoneWriteKey.joinToString("") { "%02x".format(it) }.take(16) + "… " +
-                                "readKey=" + keys.phoneReadKey.joinToString("") { "%02x".format(it) }.take(16) + "…",
+                            "AIRPLAY: 配对不可用（${if (client.pairingUnsupported) "接收端不支持" else "配对失败"}）" +
+                                "——改用 et=NONE 明文会话 + AES-CTR 屏幕流（catplay 接收端分类 1/2）",
                         )
-                        val setup = client.runSetup()
+                        // 配对循环结束时 socket 已关/状态机不可用：SETUP 前必须重连一次。
+                        // 失败不直接判死：车机 AirPlay 端口可能还没开，下面会按窗口重试。
+                        if (!client.reconnect()) {
+                            appendLog("AIRPLAY: 明文会话首次重连未成功——继续按窗口重试 SETUP")
+                        }
+                    }
+                    // keys 是 lambda 内的可变捕获变量：Kotlin 无法智能转换，先固化成不可变值。
+                    val pairedKeys = keys
+                    if (pairedKeys != null || plainSession) {
+                        phaseHint = if (pairedKeys != null) "配对完成，建立 CarPlay 会话…" else "建立明文会话…"
+                        if (pairedKeys != null) {
+                            appendLog(
+                                "AIRPLAY: ✓ 配对完成 writeKey=" +
+                                    pairedKeys.phoneWriteKey.joinToString("") { "%02x".format(it) }.take(16) + "… " +
+                                    "readKey=" + pairedKeys.phoneReadKey.joinToString("") { "%02x".format(it) }.take(16) + "…",
+                            )
+                        }
+                        // 已配对 → 共享密钥；明文会话 → null（流加密降级为 AES-CTR 零密钥）
+                        var sessionKey = pairedKeys?.sharedSecret
+                        var setup = runInitialSetup(client, plainSession, noPairing)
+                        if (setup == null && plainSession && noPairing) {
+                            // catplay 的「加密升级」路径：只有在**我们主动跳过配对**（TXT 未声明
+                            // HK_PAIRING_AND_ENCRYPT）且明文 SETUP 仍失败时才补做。
+                            // 反过来（配对先试过且失败）再试一次没有意义，只会多等 30s。
+                            val upgraded = client.retryWithPairing(PAIRING_UPGRADE_WINDOW_MS)
+                            if (upgraded != null) {
+                                sessionKey = upgraded.sharedSecret
+                                setup = client.runSetup()
+                            }
+                        }
                         if (setup != null) {
                             // 记录会话凭据：投影授权晚于连接时用于动态补启音频。
                             // 用 client.currentEndpoint 而非 effectiveEndpoint：配对期间
                             // mDNS 刷新过端点时，真正连上的是 client 里的地址（2026-10-18：
                             // 0x4301 的定长 IP 字段带 NUL，mDNS 给的是干净地址，取旧值
                             // 会让视频端口/keepAlive 用脏地址 → 一律解析失败）。
-                            currentSharedSecret = keys.sharedSecret
-                            currentAudioHost = client.currentEndpoint.ipAddresses.firstOrNull { it.contains('.') }
-                            client.connectEventChannel(keys.sharedSecret, setup) { command ->
+                            currentSharedSecret = sessionKey
+                            currentAudioHost =
+                                client.activeHost ?: EndpointHosts.candidates(client.currentEndpoint.ipAddresses).firstOrNull()
+                            client.connectEventChannel(sessionKey, setup) { command ->
                                 when (command["type"]) {
                                     "hidSendReport" -> {
                                         val uuid = command["uuid"]?.toString()
@@ -1545,12 +1710,12 @@ object SessionController {
                             setup.hidDeviceUuids.forEach { uuid ->
                                 client.sendHidSetInputMode(uuid, mode = 0)
                             }
-                            val screen = client.runScreenStream(keys.sharedSecret, setup.displayUuid)
+                            val screen = client.runScreenStream(sessionKey, setup.displayUuid)
                             if (screen != null) {
-                                // 地址取 client 的当前端点（配对期间可能被 mDNS 刷新过）：
-                                // 视频数据端口与 keepAlive 都按它建 socket，用陈旧地址会
-                                // 直接解析失败（2026-10-18 实测「TCP 已连通」但视频端口挂掉）。
-                                val host = client.currentEndpoint.ipAddresses.firstOrNull { it.contains('.') }
+                                // 地址取 client 真正连通的那个（配对期间可能被 mDNS 刷新过）：
+                                // 视频数据端口与 keepAlive 都按它建 socket；IPv6 端点也算
+                                // 可用地址（EndpointHosts 统一排序：IPv4 → 全局 IPv6 → 链路本地 IPv6）。
+                                val host = client.activeHost ?: EndpointHosts.candidates(client.currentEndpoint.ipAddresses).firstOrNull()
                                 // 心跳双保险（缺失任一都会被车机 ~10s 看门狗拆会话，2026-10-11 实测）：
                                 //   keepAlive UDP ping（车机 SETUP 返回的 keepAlivePort，10s 周期）
                                 //   + RTSP POST /feedback（1s 周期，catplay FEEDBACK_INTERVAL）
@@ -1560,7 +1725,7 @@ object SessionController {
                                 client.startFeedbackLoop()
                                 // iAP 隧道（type-130）：车机→手机的 iAP2 EA 数据（触摸 HID 载体）。
                                 // 建立失败不阻塞会话（触摸不可用但视频照常）。
-                                val tunnel = client.runIapTunnel(keys.sharedSecret)
+                                val tunnel = client.runIapTunnel(sessionKey)
                                 tunnel?.onIapMessage = { frame ->
                                     // 触摸证据采集：先全量记录，格式确认后接 TouchRouter
                                     if (frame.messageId != 0x0000) {
@@ -1636,7 +1801,7 @@ object SessionController {
                                         VideoSender(
                                             host = host,
                                             dataPort = screen.dataPort,
-                                            streamKey = screen.streamKey,
+                                            frameCipher = screen.cipher,
                                             width = streamW,
                                             height = streamH,
                                             targetFps = fps,
@@ -1691,7 +1856,7 @@ object SessionController {
                                 }
                                 // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
                                 // 会话已激活（RECORD 完成）后再协商；失败不影响视频主链路。
-                                val audioStarted = startAudioChannel(context, client, keys.sharedSecret, host)
+                                val audioStarted = startAudioChannel(context, client, sessionKey, host)
                                 if (audioStarted) {
                                     // 流在 RECORD 之后加入：AirPlay 语义要求再发一次 RECORD
                                     // 把新流纳入已激活的会话。缺这一步时车机对 SETUP 回 200

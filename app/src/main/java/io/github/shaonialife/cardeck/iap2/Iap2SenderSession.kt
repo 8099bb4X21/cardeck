@@ -56,6 +56,16 @@ class Iap2SenderSession(
         val publicKey: String?,
         val sourceVersion: String?,
         val ipAddresses: List<String>,
+        /**
+         * `_airplay._tcp` TXT 的 features 位图（高 32 位已并入）。
+         *
+         * 关键位：bit38 `HK_PAIRING_AND_ENCRYPT` = 支持 HomeKit 配对/加密。
+         * null = 未知（只有 0x4301、没发现 mDNS）——按「需要配对」处理，保持旧行为。
+         * catplay 用它区分三个时代的接收端：pre-HomeKit（CarPlay 210.81，无该位，
+         * 只能 `et=NONE` 明文会话 + AES-CTR 屏幕流）/ 支持但可跳过（280 时代）/
+         * 强制配对（现代）。2026-10-19 奥迪 4xxx（4851）连不上与这条分类直接相关。
+         */
+        val advertisedFeatures: Long? = null,
     )
 
     private val parser = Iap2Csm.Parser()

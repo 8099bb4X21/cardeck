@@ -1,13 +1,16 @@
 package io.github.shaonialife.cardeck.airplay
 
 import org.bouncycastle.crypto.digests.SHA512Digest
+import org.bouncycastle.crypto.engines.AESEngine
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
 import org.bouncycastle.crypto.modes.ChaCha20Poly1305
+import org.bouncycastle.crypto.modes.SICBlockCipher
 import org.bouncycastle.crypto.params.AEADParameters
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
 import org.bouncycastle.crypto.params.HKDFParameters
 import org.bouncycastle.crypto.params.KeyParameter
+import org.bouncycastle.crypto.params.ParametersWithIV
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
@@ -95,6 +98,30 @@ object AirPlayCrypto {
         val output = ByteArray(digest.digestSize)
         digest.doFinal(output, 0)
         return output
+    }
+
+    /**
+     * AES-128-CTR 密钥流（catplay `AirPlayCipherCodec` / `ScreenFrameCodec` 的 AES 路径）。
+     *
+     * 计数器是标准 CTR128BE（BouncyCastle SICBlockCipher 同为大端计数），
+     * **状态跨帧连续**——catplay 每个流只建一个 `Aes128Ctr`、逐帧 apply_keystream，
+     * 所以这里也必须由调用方持有同一个实例，不能每帧新建。
+     */
+    class Aes128CtrStream(
+        key: ByteArray,
+        iv: ByteArray,
+    ) {
+        // newInstance 的返回类型是 CTRModeCipher 接口（SICBlockCipher 的实现细节已封装）。
+        private val cipher: org.bouncycastle.crypto.modes.CTRModeCipher =
+            SICBlockCipher
+                .newInstance(AESEngine())
+                .apply { init(true, ParametersWithIV(KeyParameter(key), iv)) }
+
+        /** 原地异或密钥流（加密与解密同一操作）。 */
+        fun applyKeystream(data: ByteArray) {
+            if (data.isEmpty()) return
+            cipher.processBytes(data, 0, data.size, data, 0)
+        }
     }
 
     fun chachaSeal(

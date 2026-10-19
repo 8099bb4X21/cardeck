@@ -3,6 +3,7 @@ package io.github.shaonialife.cardeck.airplay
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -53,5 +54,29 @@ class SessionSetupBodyTest {
         assertEquals(port.toLong(), root["timingPort"])
         assertTrue((root["features"] as List<*>).contains("viewAreas"))
         assertEquals(true, root["keepAliveLowPower"])
+    }
+
+    /**
+     * 未配对（et=NONE）会话必须显式带 `et=1`（catplay `AirPlayEncryptionType::NONE`）。
+     * pre-HomeKit 老车机只认明文会话；缺这个键时严格接收端会把它当成
+     * 「声明加密但没有密钥」而拒绝。
+     */
+    @Test
+    fun unpairedSessionDeclaresEtNone() {
+        val root =
+            BinaryPlist.parse(
+                client().buildSessionSetupBody("10:C1:97:1A:C7:44", 35449, encrypted = false),
+            ) as Map<*, *>
+        assertEquals(1L, root["et"])
+        assertEquals(false, root["updateSessionRequest"])
+    }
+
+    @Test
+    fun pairedSessionOmitsEt() {
+        val root =
+            BinaryPlist.parse(
+                client().buildSessionSetupBody("10:C1:97:1A:C7:44", 35449, encrypted = true),
+            ) as Map<*, *>
+        assertNull(root["et"])
     }
 }

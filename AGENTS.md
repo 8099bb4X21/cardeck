@@ -550,6 +550,29 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
   32B/20B、0x4301 有无、ctrl 邀请死锁等），细节见 `docs/PROTOCOL-NOTES.md` §9，
   改协议代码前先对照。
+- **老车机（CarPlay 210.81 / 奥迪 4xxx 固件）必须按 catplay 的「三时代」分类处理**
+  （2026-10-19 定谳，`docs/PROTOCOL-NOTES.md` §9f）：该代是 **pre-HomeKit** 接收端
+  （`_airplay._tcp` features 无 bit38 `HK_PAIRING_AND_ENCRYPT`），只接受
+  `et=NONE` 明文控制会话 + **AES-128-CTR 零密钥**屏幕流，`pair-setup` 必然失败。
+  六处硬约束：① bplist **根对象必须在字节 8**（210.81 不读 trailer 的 topObject，
+  我们的编码器默认根在末尾——已统一 `makeRootFirst`）；② 初始 SETUP 用相对 URI
+  `/setup`；③ 未配对会话显式带 `et=1`，事件通道明文；④ 屏幕帧未配对走 AES-128-CTR
+  （密钥流**跨帧连续**，每帧新建实例 = 第二帧起全乱码）；⑤ 控制密文帧 MTU 1440 →
+  单帧明文上限 **1422**（旧 0x4000 会被判 PayloadTooBig）；⑥ **不要用
+  `contains('.')` 判「有没有地址」**——奥迪 4xxx 常只发 IPv6 link-local，判成无地址
+  就会退到「网关:7000」兜底并永远连不上（统一走 `net/EndpointHosts`，IPv4 → 全局
+  IPv6 → 链路本地 IPv6，且视频/音频/事件通道复用配对真正连通的 `activeHost`）。
+  TXT features 缺失一律按「未知」保持旧路径，不能误判成「不支持配对」。
+- **屏幕流 VideoConfig 帧头必须带「加密标志 + 画布宽高」**（2026-10-19 奥迪 4851
+  实车定谳，`docs/PROTOCOL-NOTES.md` §9g）：车友反馈「app 显示已连接、车机没反应」，
+  日志里会话/触摸/心跳全健康、零错误。根因是我们只写了 `body_size`+`opcode`，而
+  catplay `ScreenFrame::config` 还写：`small_param[1] |= ScreenFlag::Encrypted(0x04)`
+  （**偏移 6**，声明后续帧是密文）、`params[1]`（**偏移 16**）= 宽高两个 **f32 LE**、
+  `params[0]`（偏移 8..16）留 0。Audi/DELPHI 按这些头字段建解码器，缺了就**整屏黑但
+  会话照旧、触摸照常**；DiPlay/WinPlay 只读 body 与 avcC，**测试台永远发现不了**。
+  因此凡是「车机屏黑但 app 显示已连接」都先核 `VIDEO: ✓ VideoConfig … flags=` 这行
+  日志（会同时打印头部前 24 字节 hex）。新增屏幕流头字段时同理：先用 catplay
+  `screen_frame_ext.rs` 对照，别只对着测试台验证。
 - **AirPlay 会话级 SETUP 的 `deviceID` 必须是本机真实蓝牙 MAC**（2026-10-19
   WinPlay 实测）：接收端可以按「用户选中的 iPhone 蓝牙地址」过滤会话，对不上即回
   **403**，状态行是它特有的 `403 OK`（WinPlay 的 STATUS_TEXT 表没有 403，回退成

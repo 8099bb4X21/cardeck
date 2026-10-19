@@ -73,4 +73,42 @@ class VideoKeepAliveFrameTest {
         assertTrue("body=$size", size > 0)
         assertEquals(128 + size, frame.size)
     }
+
+    /**
+     * VideoConfig 帧头必须与 catplay `ScreenFrame::config` 一致。
+     *
+     * 奥迪 4851（AUDI 5163 / DELPHI，0.1.4 日志）实测：配对、SETUP、RECORD、推流、
+     * 触摸全部正常，**车机屏全黑**。catplay 在 config 头里写了两项被我们漏掉的字段：
+     *  - `small_param[1] |= ScreenFlag::Encrypted (0x04)` —— 声明视频帧是密封的；
+     *  - `params[1]` = (width, height) 两个 f32 LE —— 车机据此建立解码器画布。
+     * DiPlay/WinPlay 只读 body、不校验头，所以测试台一直没暴露。
+     */
+    @Test
+    fun videoConfigHeaderDeclaresEncryptionAndCanvasSize() {
+        val header = VideoSender.buildVideoConfigHeader(bodySize = 35, width = 1412, height = 654)
+
+        assertEquals(35, bodySize(header))
+        assertEquals(1, header[4].toInt() and 0xFF) // opcode = VideoConfig
+        // small_param[1] 在头部偏移 6；Encrypted = 1<<2
+        assertEquals(0x04, header[6].toInt() and 0x04)
+
+        // params[0]（偏移 8..16）是 PTS 槽位，config 必须留 0
+        for (index in 8 until 16) {
+            assertEquals("params[0] 应为 0（偏移 $index）", 0, header[index].toInt())
+        }
+
+        // params[1]（偏移 16..24）= width f32 LE、height f32 LE
+        val width = ByteBuffer.wrap(header, 16, 4).order(ByteOrder.LITTLE_ENDIAN).float
+        val height = ByteBuffer.wrap(header, 20, 4).order(ByteOrder.LITTLE_ENDIAN).float
+        assertEquals(1412.0f, width, 0.0f)
+        assertEquals(654.0f, height, 0.0f)
+    }
+
+    @Test
+    fun videoConfigHeaderUsesEncodedEvenDimensions() {
+        // 编码器尺寸在构造时已向下对齐偶数，header 必须报同一个值（车机按它建画布）
+        val header = VideoSender.buildVideoConfigHeader(bodySize = 20, width = 1260, height = 654)
+        assertEquals(1260.0f, ByteBuffer.wrap(header, 16, 4).order(ByteOrder.LITTLE_ENDIAN).float, 0.0f)
+        assertEquals(654.0f, ByteBuffer.wrap(header, 20, 4).order(ByteOrder.LITTLE_ENDIAN).float, 0.0f)
+    }
 }

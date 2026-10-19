@@ -339,6 +339,88 @@ A2DP（PlaybackCapture 抓不到蓝牙输出）、或目标应用禁止播放捕
 注意这与 §9b/§9c 的记录并不矛盾——**不同年款/固件的车机偏好相反**，MMI 6318
 认 20B 且对 32B 会拆链，所以基线顺序仍按接收端类型选择，记忆只做覆盖。
 
+## 9f. 老车机（CarPlay 210.81 / 奥迪 4xxx 固件）连不上：按 catplay 对齐的六处差异（2026-10-19）
+
+用户反馈「奥迪软件版本 4 开头的（如 4851）连不上」。该代车机对应 catplay 分类中的
+**pre-HomeKit 接收端**（README 兼容表：Audi/Porsche ~2020 HARMAN MIB2/MHI2 即
+CarPlay 210.81）。对照 catplay 上游（本地引用停在 9-30，本次拉到 v0.17.0、39 个提交）
+逐项核对后，本项目有六处与之不一致，全部按 catplay 修正：
+
+**① bplist 根对象必须位于字节 8（catplay 9ad3a7e）**。CarPlay 210.81 不读 trailer 的
+topObject，**直接按偏移 8 取根**；我们的编码器先编码子对象、最后才追加根容器，根默认在
+末尾。现象是车机收到合法 bplist 却解析不出字典（`SETUP plist decode failed` / 400）。
+修复：`BinaryPlist.encode` 末尾统一 `makeRootFirst` 重排并按偏移表修正（catplay 同算法），
+单测 `StreamFrameCipherTest.encodedPlistRootObjectStartsAtByteEight` 用 >255 对象的
+多字节偏移表锁住（小 plist 是单字节表、测不出该 bug）。
+
+**② 初始 SETUP 的请求 URI 用相对路径 `/setup`**（catplay `initial_setup` 同款）。
+旧实现发绝对 `rtsp://host:port/`。老固件对绝对 URI 敏感。
+
+**③ 未配对会话必须带 `et=1`（NONE），屏幕流走 AES-128-CTR 零密钥**。
+catplay `ScreenFrameCodec::new` 注释：「There was never support for unencrypted screen
+sessions. ET = None maps to AES session where session_key before derivation is all
+zeroes.」即 `et=NONE` ≠ 明文视频，而是 **AES-128-CTR + 16 字节全零会话密钥**，
+密钥/IV = `SHA512("AirPlayStreamKey"/"AirPlayStreamIV" + connId(decimal) + sessionKey)[0..16]`。
+事件通道在未配对会话里也是**明文**（catplay `EventsServer::unencrypted`）。
+`et=NONE` 时音频没有共享密钥可派生 DataStream 输出密钥，直接跳过。
+
+**④ 屏幕数据帧的两种加密形态**。已配对（pair-verify）→ ChaCha20-Poly1305；
+未配对 → AES-128-CTR（无 tag、长度不变、密钥流**跨帧连续**，每帧新建实例会让第二帧起
+全部乱码）。只加密 `opcode=VideoFrame`，keepAlive/config 始终明文。
+
+**⑤ 控制通道密文帧的 MTU 是 1440**（catplay `AIRPLAY_CIPHER_MTU_MAX`）：
+单帧明文上限 = 1440 - 2B AAD - 16B tag = **1422**。旧实现 0x4000 会被严格车机
+判为协议违规（catplay 解码侧 `len > 1422` 直接 `PayloadTooBig`）。
+
+**⑥ 只发 IPv4 地址的判据过窄**。奥迪 4xxx 的 `_airplay._tcp` / 0x4301 常只给
+**IPv6 链路本地**（`fe80::…%wlan0`）。旧代码到处用 `contains('.')` 判「有没有地址」，
+这类端点被判成不完整 → 白等 ctrl 邀请 → 退回「网关:7000」兜底（4xxx 的网关未必是
+`.1`、端口也未必 7000）→ 永远连不上。现统一走 `net/EndpointHosts`：
+IPv4 优先 → 全局 IPv6 → 链路本地 IPv6（补 scope），并且**视频/音频/事件通道复用
+配对真正连通的地址**（`AirPlayClient.activeHost`），不再各自回头挑 IPv4。
+
+**配套：用 TXT features 识别车机年代**。`_airplay._tcp` 的 `features=低32,高32`，
+bit38 = `HK_PAIRING_AND_ENCRYPT`。老车机不声明该位 → 直接 `skipPairing` 走明文会话，
+不再空跑 120s 配对窗口（这正是「一直连不上」的直接观感）。TXT 缺失/解析失败一律
+视为「未知」并保持旧路径，绝不误降级。若明文 SETUP 仍被拒（判断失误），再补做一次
+配对（catplay `handle_setup_result` 的 crypto 升级路径，窗口压到 30s）。
+
+**顺带对齐**：`_carplay-ctrl._tcp` 的 TXT `srcvers` 改为发送端版本号（566.25.21，
+此前误写车机侧 950.7.1）、服务名 iPhone；同时广播 `_device-info._tcp`（model=D84AP，
+catplay `DeviceInfoBonjourEntry`）；`GET /info` 带空 bplist 字典体 + plist Content-Type。
+
+## 9g. 奥迪 4851 实车「连上了但车机没反应」：VideoConfig 帧头缺两个字段（2026-10-19）
+
+车友日志 `logs/cardeck/CarDeck-log-20261019-101353-all.txt`（小米 24129PN74C /
+Android 16，应用 **0.1.4**；车机 `Audi_MMI_3315` / `AUDI 5163` / DELPHI，
+`srcvers=450.14.2`，CarPlay `name=CarPlay`）。分析结果分两部分：
+
+**A. 这次日志里确实每次都 10.2 秒被 reset**（六轮全部复现，与 §9e 同源）：
+事件通道建立 → 恰好 +10.2s `EVENT: 读取结束 - Connection reset`。该版本缺
+屏幕流内 keepAlive 帧、UDP keepAlive 还是 10s（与看门狗等长）。这两点已在
+**0.1.6** 修掉（§9e），所以本轮不必再改——但车友必须升级到 0.1.6 才会有完整会话。
+
+**B. 「app 显示已连接、车机没反应」的直接原因：VideoConfig 帧头缺字段。**
+0.1.6 之前的实现在发 VideoConfig 时只写 `body_size` + `opcode`，而 catplay
+`ScreenFrame::config` 还会写两项，Audi 这类严格解码器缺了就**整屏黑**：
+
+| 字段 | 头部位置 | 值 | 作用 |
+|---|---|---|---|
+| `small_param[1]` | 偏移 6 | `ScreenFlag::Encrypted (0x04)` | 声明后续 VideoFrame 是加密的；不声明就按明文 NAL 解 → 解码失败 |
+| `params[1]` | 偏移 16 | `(width, height)` 两个 **f32 LE** | 车机据此建立解码器画布尺寸 |
+| `params[0]` | 偏移 8..16 | 全 0 | config 不带 PTS（只有 VideoFrame 才写） |
+
+**为什么测试台一直没暴露**：DiPlay `ScreenStream.onMessage` 只读 `body`（opcode 0/1）
+并从 avcC 里取分辨率，WinPlay `screenStream.ts` 同样只看 opcode 与 body——两者都不校验
+这几个头字段。真车（Audi DELPHI）按头字段建解码器，缺了就黑屏，且**会话、触摸、
+心跳全部正常**，日志里没有任何错误行——这是最难排查的一类。
+
+**A 与 B 的关系**：A 让会话活不过 10 秒（用户看到「闪一下就断」）；B 让会话活着时
+屏幕也是黑的（用户看到「显示已连接但车机没反应」）。两者独立，必须都修。
+
+**诊断日志（本次新增）**：`VIDEO: ✓ VideoConfig 已发送 … flags=0x07 1412x654` 后面
+跟一行头部前 24 字节 hex——下次反馈可直接核对这些字段是否写对。
+
 ## 10. 参考文件速查
 
 > 表中路径均指 `reference/` 下**代码精读来源**（xcertplay 与 DiPlay 同源，

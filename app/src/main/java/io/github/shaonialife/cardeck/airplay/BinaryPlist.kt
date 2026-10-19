@@ -36,7 +36,76 @@ object BinaryPlist {
         writeUint(out, objects.size.toLong(), 8)
         writeUint(out, rootRef.toLong(), 8)
         writeUint(out, tableOffset.toLong(), 8)
-        return out.toByteArray()
+        // 根对象必须位于字节 8：本编码器先递归编码子对象、最后才追加根容器，
+        // 默认根在末尾。CarPlay 210.81 一类的老车机**不查 trailer 的 topObject，
+        // 直接读偏移 8**（catplay 上游 9ad3a7e「fix recent encoder regression with
+        // CarPlay 210.81 that hardcodes expected offset of the root object」）。
+        // Apple 的编码器本来也是根在前，这里按同一布局重排以匹配真实 iPhone。
+        return makeRootFirst(out.toByteArray())
+    }
+
+    /**
+     * 把根对象整体移到偏移 8，并修正偏移表（catplay `make_root_first` 同算法）。
+     * 输入必须是本类刚生成的合法 bplist（根是最后一个对象），异常布局原样返回。
+     */
+    private fun makeRootFirst(data: ByteArray): ByteArray {
+        if (data.size < 41 || !data.copyOfRange(0, 8).contentEquals("bplist00".toByteArray(Charsets.US_ASCII))) {
+            return data
+        }
+        val trailer = data.size - 32
+        val width = data[trailer + 6].toInt() and 0xFF
+        if (width != 1 && width != 2 && width != 4 && width != 8) return data
+        val count = readUint(data, trailer + 8, 8).toInt()
+        val root = readUint(data, trailer + 16, 8).toInt()
+        val table = readUint(data, trailer + 24, 8).toInt()
+        if (root >= count ||
+            table < 9 ||
+            table.toLong() + count.toLong() * width > trailer
+        ) {
+            return data
+        }
+
+        fun entry(index: Int): Int = table + index * width
+        val rootStart = readUint(data, entry(root), width).toInt()
+        if (rootStart !in 8 until table) return data
+        if (rootStart == 8) return data
+        // 根之后（到偏移表之前）属于根对象的字节块；其余对象都排在它前面。
+        var rootEnd = table
+        for (index in 0 until count) {
+            val offset = readUint(data, entry(index), width).toInt()
+            if (offset !in 8 until table) return data
+            if (offset > rootStart) rootEnd = minOf(rootEnd, offset)
+        }
+        val rootLen = rootEnd - rootStart
+        if (rootLen <= 0) return data
+        val out = data.copyOf()
+        // data[8..rootEnd) 右旋 rootLen：等价于把根块搬到最前、其余对象顺延。
+        val tailLen = rootEnd - 8 - rootLen
+        System.arraycopy(data, rootStart, out, 8, rootLen)
+        System.arraycopy(data, 8, out, 8 + rootLen, tailLen)
+        for (index in 0 until count) {
+            val at = entry(index)
+            val offset = readUint(data, at, width).toInt()
+            val adjusted =
+                when {
+                    index == root -> 8
+                    offset < rootStart -> offset + rootLen
+                    else -> offset
+                }
+            writeUint(out, adjusted.toLong(), width, at)
+        }
+        return out
+    }
+
+    private fun writeUint(
+        target: ByteArray,
+        value: Long,
+        size: Int,
+        offset: Int,
+    ) {
+        for (index in 0 until size) {
+            target[offset + index] = (value ushr (8 * (size - 1 - index))).toByte()
+        }
     }
 
     /** 预遍历：引用宽度必须按最终对象总数（含容器自身）确定。 */

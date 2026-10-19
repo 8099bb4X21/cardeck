@@ -100,6 +100,27 @@ class WifiCarPlayConnector(
     }
 
     /**
+     * 本机在当前绑定网络上的全部 IPv6 地址。
+     *
+     * mDNS 结果的网段验收用：奥迪 4xxx 的 `_airplay._tcp` 常只发链路本地 IPv6，
+     * 旧过滤只按 IPv4 前缀判定，会把车机本身也当成「非本网段」丢掉（2026-10-19）。
+     */
+    fun localIpv6Addresses(): List<String> {
+        val network = boundNetwork.get() ?: return emptyList()
+        return try {
+            connectivityManager
+                .getLinkProperties(network)
+                ?.linkAddresses
+                ?.mapNotNull { it.address.hostAddress }
+                ?.filter { it.contains(':') }
+                ?.map { it.substringBefore('%').substringBefore('/') }
+                .orEmpty()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
      * 用应用专属网络（WifiNetworkSpecifier）加入车机热点。
      *
      * 阻塞直到连接成功/系统拒绝/超时（内部 200ms 分片，[isCancelled] 可即时退出）。
