@@ -164,6 +164,26 @@ class VideoSender(
         socket = null
     }
 
+    /**
+     * 立即编码一个关键帧（车机 `/command` 的 `forceKeyFrame` 请求）。
+     *
+     * 车机解不出画面时会反复要 I 帧；我们本身每秒一个，但**要帧请求必须立即响应**——
+     * 否则车机可能一直卡在「等下一个 I 帧」的状态，表现就是「连上了但没画面」
+     * （宝马 iD9 2026-10-20 实测：会话刚起时收到一次 forceKeyFrame）。
+     */
+    fun requestKeyFrame(): Boolean {
+        val codec = encoder ?: return false
+        return try {
+            val params = android.os.Bundle()
+            params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+            codec.setParameters(params)
+            true
+        } catch (error: Exception) {
+            log("VIDEO: 请求关键帧失败 - ${error.message}")
+            false
+        }
+    }
+
     // ---- 编码输出 → 协议封装发送 ----
 
     private fun drainEncoder() {
