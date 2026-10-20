@@ -762,7 +762,12 @@ class AirPlayClient(
                 displayHeight = ((display?.get("heightPixels") as? Long) ?: 2320L).toInt(),
                 // /info displays[0] 的显示屏 UUID（真实 iPhone 会把它回填进屏幕流 SETUP；
                 // 键名以小写 "uuid" 为准，大写 "UUID" 兜底）
-                displayUuid = (display?.get("uuid") ?: display?.get("UUID"))?.toString(),
+                displayUuid =
+                    uuidText(
+                        display?.get("uuid")
+                            ?: display?.get("UUID")
+                            ?: display?.get("displayUUID"),
+                    ),
                 maxFps = ((display?.get("maxFPS") as? Long) ?: 30L).toInt(),
                 hidDeviceUuids = parsedHidUuids,
                 hidDescriptors = parsedHidDescriptors,
@@ -1915,6 +1920,15 @@ class AirPlayClient(
     ): ScreenStreamInfo? {
         // 对照 catplay（真车验证）：streamConnectionID = 随机 u64（+1 保证非零）
         val connectionId = java.security.SecureRandom().nextLong() and Long.MAX_VALUE or 1L
+        val streamUuid = displayUuid ?: java.util.UUID.randomUUID().toString()
+        log(
+            "AIRPLAY: 主屏流 SETUP uuid=$streamUuid " +
+                if (displayUuid == null) {
+                    "（⚠️ /info 未提供 displayUuid，只能用随机值——车机可能收下流却不绑到任何屏）"
+                } else {
+                    "（来自 /info displays[].uuid）"
+                },
+        )
         val body =
             BinaryPlist.encode(
                 linkedMapOf(
@@ -1926,11 +1940,7 @@ class AirPlayClient(
                                 // 真实 iPhone / catplay 发送端：uuid 与 latencyMs 都必带。
                                 // uuid 必须是接收端 /info displays[] 声明的显示屏 UUID（真车会校验；
                                 // 随机值曾致 Audi 直接 400 拆会话）。latencyMs=25 为 catplay 实测值。
-                                "uuid" to (
-                                    displayUuid ?: java.util.UUID
-                                        .randomUUID()
-                                        .toString()
-                                ),
+                                "uuid" to streamUuid,
                                 "latencyMs" to SCREEN_LATENCY_MS,
                             ),
                         ),
@@ -2734,6 +2744,30 @@ class AirPlayClient(
             is Map<*, *> -> "dict(${value.size})"
             is String -> "str(${value.length})"
             else -> value.javaClass.simpleName
+        }
+
+    /**
+     * `/info displays[].uuid` 统一字符串化。
+     *
+     * 三种编码都见过：字符串（奥迪 "0"/"1"、部分固件给 36 位 UUID）、
+     * **16 字节 UUID 类型**（bplist 0xB，`toString()` 会变成 `[B@1f2e3d4` 这种垃圾）、
+     * CFKeyedArchiver 的 UID（整数）。屏幕流 SETUP 里的 `uuid` 必须与接收端声明的
+     * **完全一致**，否则车机可能收下流却不往任何屏上绑（表现为「连上了没画面」）。
+     */
+    private fun uuidText(value: Any?): String? =
+        when (value) {
+            null -> null
+            is String -> value.takeIf { it.isNotBlank() }
+            is ByteArray ->
+                if (value.size == 16) {
+                    val hex = value.joinToString("") { "%02x".format(it) }
+                    "${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-" +
+                        "${hex.substring(16, 20)}-${hex.substring(20)}"
+                } else {
+                    value.joinToString("") { "%02x".format(it) }
+                }
+            is Number -> value.toString()
+            else -> value.toString().takeIf { it.isNotBlank() }
         }
 
     private fun logInfoSummary(root: Map<*, *>) {
