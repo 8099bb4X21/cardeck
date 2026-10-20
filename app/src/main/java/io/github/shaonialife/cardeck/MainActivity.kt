@@ -234,24 +234,30 @@ class MainActivity : AppCompatActivity() {
      * ——与正文「以看视频为主时建议暂不开启」一致；取消在最下。
      */
     private fun showAudioChoiceDialog() {
-        DarkMessageDialog.show(
-            activity = this,
-            title = "是否在车机侧播放声音？",
-            message =
-                "开启后：手机媒体/导航声音将投到车机播放，手机本机静音" +
-                    "（不开启则车上无声音）。\n\n" +
-                    "注意：声音与画面同时传输会明显增加负载，可能出现画面卡顿或连接不稳；" +
-                    "以看视频为主时建议暂不开启。\n\n" +
-                    "开启声音需要「投屏」权限，选择后会一并申请。",
-            actions =
-                listOf(
+        // 默认档 = 高质量媒体通路（type=102 + AAC-LC，真 iPhone 走这条）；
+        // 「兼容档」= 强制只走 PCM 旧通路（type=100），AAC 被车机直接拒掉时的人工退路。
+        // 按钮竖排每个约 36dp：横屏屏高只有 ~300dp，再多一个「取消」就会顶出屏幕，
+        // 因此横屏省略「取消」（弹窗默认可返回键/点外部关闭）。
+        val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val actions =
+            buildList {
+                add(
                     DarkMessageDialog.Action(
                         "仅视频（更流畅）",
                         DarkMessageDialog.Emphasis.PRIMARY,
                     ) { beginWithAudio(enabled = false) },
-                    DarkMessageDialog.Action("开启声音") { beginWithAudio(enabled = true) },
-                    DarkMessageDialog.Action("取消") {},
-                ),
+                )
+                add(DarkMessageDialog.Action("开启声音") { beginWithAudio(enabled = true) })
+                if (!landscape) add(DarkMessageDialog.Action("取消") {})
+            }
+        DarkMessageDialog.show(
+            activity = this,
+            title = "是否在车机侧播放声音？",
+            message =
+                "开启后手机媒体/导航声音投到车机播放、手机本机静音（不开启则车上无声）。\n" +
+                    "音视频同时传会增加负载，以看视频为主时可先不开启。\n" +
+                    "开启声音需要「投屏」权限，会一并申请。",
+            actions = actions,
         )
     }
 
@@ -491,6 +497,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun beginWithAudio(enabled: Boolean) {
         SessionController.audioEnabledForSession = enabled
+        // 声音只剩一个模式：通路协商（AAC-LC 优先，不行自动退 PCM）在会话内自动完成，
+        // 不再有「兼容档」这种人工分支。
+        SessionController.audioPreferCompat = false
         if (!enabled) {
             log("MODE: 本次连接仅推视频（未开启车机侧声音）")
             startConnectionNow()
