@@ -348,6 +348,11 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   （独立 SDP 服务），声音走 WiFi 的 AirPlay，这些音频/通话配置文件可断。
   实现（`bt/BtProfiles`）：发 iAP2 连接前查目标地址的配置文件状态，有连接就先断开
   （配对成功回调里也断两次：立即 + 1.5s 后，车机侧重连常发生在两者之间）。
+  **断开只对「确认提供 iAP2 服务（SDP …caff）或用户选定目标」的设备做**（2026-10-20
+  收窄，`Iap2BluetoothClient.awaitIap2Service`）：自动模式候选=全部已配对设备，
+  耳机/手表没有该服务、连不上还白被断 HFP/A2DP（设备级断开兜底更会波及其它在线
+  设备）。SDP 探测先读系统 uuids 缓存、缺失再 fetchUuidsWithSdp 等 ACTION_UUID
+  （2.5s 窗），结论按地址缓存到客户端停止、start() 时重置。
   **注意 API 约束**：`BluetoothHeadset/A2dp/LeAudio.disconnect(BluetoothDevice)` 是
   **@SystemApi**（编译不可见，运行时只要 `BLUETOOTH_CONNECT`），只能反射调用；
   查询用公开的 `getProfileProxy` + `connectedDevices`（需主 Looper）。**不要**把这段

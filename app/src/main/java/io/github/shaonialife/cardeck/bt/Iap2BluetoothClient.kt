@@ -50,6 +50,9 @@ class Iap2BluetoothClient(
 
         /** 「蓝牙已连接→已断开」日志节流（车机可能反复自动重连，避免刷屏）。 */
         private const val PROFILE_LOG_THROTTLE_MILLIS = 15_000L
+
+        /** SDP 服务探测等待窗（fetchUuidsWithSdp → ACTION_UUID 广播）。 */
+        private const val SDP_PROBE_TIMEOUT_MILLIS = 2_500L
     }
 
     private var thread: Thread? = null
@@ -73,6 +76,67 @@ class Iap2BluetoothClient(
 
     /** 目标设备不在已配对列表的提示节流（避免每 3 秒刷屏）。 */
     private var lastTargetMissingLogAt = 0L
+
+    /** 「无 iAP2 服务→跳过」日志去重（每地址一次即可，重复轮询不刷屏）。 */
+    private val skippedNoService = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /** 「是否提供 iAP2 服务」结论缓存（地址→结论）：SDP 查询不便宜，勿每 3s 重查。 */
+    private val iap2ServiceCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * 设备是否提供配件端 iAP2 服务（…caff）：先读系统 uuids 缓存，缺失再
+     * `fetchUuidsWithSdp` 触发一次 SDP 查询并等 `ACTION_UUID` 广播（超时按无服务）。
+     * 结论缓存到客户端停止——车机固件升级换 UUID 的场景由重启 App 覆盖。
+     * 权限：start() 已校验 BLUETOOTH_CONNECT；uuids/fetchUuidsWithSdp 的
+     * SecurityException 由 runCatching 吸收（探测失败按无服务处理，不断音频）。
+     */
+    @SuppressLint("MissingPermission")
+    private fun awaitIap2Service(device: BluetoothDevice): Boolean {
+        iap2ServiceCache[device.address]?.let { return it }
+
+        fun cachedHas(): Boolean =
+            runCatching {
+                device.uuids?.any { it == ACCESSORY_IAP2_UUID } == true
+            }.getOrDefault(false)
+
+        if (cachedHas()) {
+            iap2ServiceCache[device.address] = true
+            return true
+        }
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val receiver =
+            object : android.content.BroadcastReceiver() {
+                override fun onReceive(
+                    receiverContext: Context,
+                    intent: android.content.Intent,
+                ) {
+                    @Suppress("DEPRECATION")
+                    val hit = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                    if (hit?.address == device.address) latch.countDown()
+                }
+            }
+        val started =
+            runCatching {
+                ContextCompat.registerReceiver(
+                    context,
+                    receiver,
+                    android.content.IntentFilter(BluetoothDevice.ACTION_UUID),
+                    ContextCompat.RECEIVER_EXPORTED,
+                )
+                device.fetchUuidsWithSdp()
+            }.getOrDefault(false)
+        if (started) {
+            try {
+                latch.await(SDP_PROBE_TIMEOUT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+        runCatching { context.unregisterReceiver(receiver) }
+        val has = cachedHas()
+        iap2ServiceCache[device.address] = has
+        return has
+    }
 
     /** 「蓝牙已连接→已断开」日志节流时间戳。 */
     private var lastProfileLogAt = 0L
@@ -99,6 +163,9 @@ class Iap2BluetoothClient(
             log("BT-C: 蓝牙不可用或未开启")
             return false
         }
+        // 每轮启动重置 SDP 结论与跳过日志（新配对/换固件后重新探测）
+        iap2ServiceCache.clear()
+        skippedNoService.clear()
         running = true
         val myGeneration = generation.incrementAndGet()
         val target = targetProvider()
@@ -153,6 +220,16 @@ class Iap2BluetoothClient(
                         null
                     } ?: device.address
                 runCatching { adapter.cancelDiscovery() }
+                // 自动模式（未选目标）先过 SDP 闸门：候选=全部已配对设备，耳机/手表
+                // 没有 iAP2 服务，连不上还白白被断 HFP/A2DP（设备级断开兜底更会波及
+                // 其它在线设备）——确认提供 …caff 才进入「断开+连接」流程。选定目标
+                // 的设备不过闸（用户显式指定，保持原路径与时序）。
+                if (targetProvider() == null && !awaitIap2Service(device)) {
+                    if (skippedNoService.add(device.address)) {
+                        log("BT-C: 跳过「$name」（未发现 iAP2 服务——非 CarPlay 设备，保持其音频连接）")
+                    }
+                    continue
+                }
                 // 「只配对、不连接」：奥迪 MIB3 实测手机与车机处于蓝牙已连接状态
                 // （HFP/A2DP 在线）时，车机不开放无线 CarPlay 的 iAP2 服务窗口——
                 // 表现为每 3s 连接失败。iAP2 是独立的 SDP 直连服务，与这些配置文件
