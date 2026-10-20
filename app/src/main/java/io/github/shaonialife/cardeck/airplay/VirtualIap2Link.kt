@@ -638,12 +638,15 @@ class VirtualIap2Link(
 
             else -> {
                 // 未处理的消息也留痕：车机若用非常规 ID 下发媒体键/按键，这里能第一时间
-                // 在日志里看到对应消息号（切歌按键排查的关键观测点）
+                // 在日志里看到对应消息号（切歌按键排查的关键观测点）。
+                // 带全量 hex：宝马 iD9 的 0xad00/0xad02/0xad03 家族既不在 Apple 公开表里，
+                // 也没有参考实现的命名——只能靠报文体结构反推它是不是输入（触摸/HID）通路。
                 unknownCsmIds++
                 if (unknownCsmIds <= 20) {
                     log(
                         "IAPLINK: 未处理的 CSM 0x${frame.messageId.toString(16)} " +
-                            "(${Iap2MessageIds.nameOf(frame.messageId)}) ${frame.body.size}B",
+                            "(${Iap2MessageIds.nameOf(frame.messageId)}) ${frame.body.size}B hex=" +
+                            frame.body.joinToString(" ") { "%02x".format(it) },
                     )
                 }
             }

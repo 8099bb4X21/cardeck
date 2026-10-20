@@ -504,6 +504,14 @@ class AirPlayClient(
     @Volatile
     private var badEventCommands = 0
 
+    /**
+     * 解不出来的 /command 的「体型指纹」（长度 + 首 8 字节）。
+     *
+     * 车机一般每秒重发同一批命令，按指纹去重后只对**新出现**的体型做全文取证，
+     * 既不刷屏又不会漏掉任何一类（此前只按条数截断，换个车型就只看到前 8 条）。
+     */
+    private val badEventSignatures = LinkedHashSet<String>()
+
     /** 事件通道建立后由 connectEventChannel 调用。cipher=null 表示明文通道。 */
     private fun registerEventCommandChannel(
         socket: Socket,
@@ -668,20 +676,19 @@ class AirPlayClient(
             return null
         }
         // 拉取主显示屏参数（跟随接收端屏幕方向；横屏车机应推横屏画面，触摸坐标也按此对齐）
+        // 这一路**不能静默失败**：/info 挂掉意味着显示屏几何、HID 设备（触摸）、音频能力
+        // 全部退回写死值。2026-10-20 宝马 iD9 就是在这里静默失败，日志只剩
+        // `hidDevices uuids=[]` / `displayUuid=null` 两个结果，看不到原因。
         var infoRoot: Map<*, *>? = null
-        val display =
-            try {
-                val (_, infoBody) = requestInfo()
-                val info = BinaryPlist.parse(infoBody) as? Map<*, *>
-                infoRoot = info
-                // 缓存供音频协商使用（audioType / latency / 格式按车机实际声明选择，
-                // 不写死某一台车机的值——2026-10-17 兼容性加固）
-                negotiatedInfo = info
-                val displays = info?.get("displays") as? List<*>
-                displays?.firstOrNull() as? Map<*, *>
-            } catch (_: Exception) {
-                null
-            }
+        val infoMap = loadInfoWithDiagnostics()
+        infoRoot = infoMap
+        val display = (infoMap?.get("displays") as? List<*>)?.firstOrNull() as? Map<*, *>
+        if (display == null) {
+            log(
+                "AIRPLAY: 未取得 /info displays → 显示屏参数退回手机分辨率兜底" +
+                    "（车机侧可能是小画面/黑边）；HID 设备为空 → 车机不会发 hidSendReport（触摸不可用）",
+            )
+        }
         // /info 全量转储：找奥迪私有的数据流 UUID（type-130 的 clientTypeUUID 候选）、
         // HID 设备描述（触摸）、以及任何我们没实现的能力声明
         // uuid 原样保留（奥迪发字符串 "0"/"1"，DiPlay 用整数——hidSetInputMode 原样回传）
@@ -695,9 +702,7 @@ class AirPlayClient(
                     if (key in skipped) "$key=[${(value as? List<*>)?.size ?: "?"}项]" else "$key=${value.toString().take(200)}"
                 }
             log("AIRPLAY: /info 字段: $summary")
-            (root["displays"] as? List<*>)?.forEachIndexed { index, d ->
-                log("AIRPLAY: /info displays[$index]=$d")
-            }
+            // displays 已在 logInfoSummary 里逐条打印（含键值明细），此处不再重复
             // 音频能力逐条打印（整行 /info 被 take(200) 截断，audioFormats 恰好断在中间）：
             // 决定 audioType 只能靠这里——奥迪 type=100 到底声明了 compatibility 还是 media
             (root["audioFormats"] as? List<*>)?.forEachIndexed { index, entry ->
@@ -771,6 +776,171 @@ class AirPlayClient(
                 "displayUuid=${info.displayUuid}",
         )
         return info
+    }
+
+    /**
+     * 拉 `/info` 并做完整取证（状态行 / body 长度 / 解析异常 / 原始 hex）。
+     *
+     * 此前的写法是 `catch (_: Exception) { null }`——车机一拒绝就彻底静默（2026-10-20
+     * 宝马 iD9：`/info 字段` 那行日志根本没出现，只有 `uuids=[]` 和 `displayUuid=null`）。
+     * 会话内被拒时再补一次**独立短连接**探测：接收端的 AirPlay 服务通常允许未绑定
+     * 会话的 `/info`（能力查询），而活跃会话内的 `/info` 反而常被按 455/403 拒掉。
+     */
+    private fun loadInfoWithDiagnostics(): Map<*, *>? {
+        var statusLine = "未请求"
+        var body = ByteArray(0)
+        try {
+            val first = requestInfo()
+            statusLine = first.first
+            body = first.second
+            if (!statusLine.contains("200") || body.isEmpty()) {
+                log("AIRPLAY: /info 首次 [$statusLine] body=${body.size}B → 800ms 后重试一次")
+                Thread.sleep(800)
+                ensureConnected(2_000)
+                val retry = requestInfo(5_000)
+                log("AIRPLAY: /info 重试 [${retry.first}] body=${retry.second.size}B")
+                if (retry.first.contains("200") && retry.second.isNotEmpty()) {
+                    statusLine = retry.first
+                    body = retry.second
+                }
+            }
+        } catch (error: Exception) {
+            log("AIRPLAY: /info 请求异常 - ${error.javaClass.simpleName}: ${error.message}")
+        }
+        parseInfoBody(statusLine, body)?.let { return it }
+        scheduleSideProbe()
+        return null
+    }
+
+    /**
+     * 延后 [delayMillis] 再走侧信道 `/info`。
+     *
+     * 为什么不当场探：会话刚建立的头 20 秒正是最关键取证窗口（车机订阅、每秒 `/command`、
+     * 隧道 CSM）。万一副连接让车机把主会话拆了，我们就丢掉整轮证据。延后探测即使出事，
+     * 也能带着完整日志回来定位。
+     *
+     * 探到 HID 设备就立刻补发 `hidSetInputMode`——触摸可能当场生效（显示屏几何本轮已定，
+     * 改不了，但输入通路可以不重建会话就补上）。
+     */
+    private fun scheduleSideProbe(delayMillis: Long = 25_000) {
+        Thread(
+            {
+                runCatching { Thread.sleep(delayMillis) }
+                val info = probeInfoOnSideConnection() ?: return@Thread
+                val uuids =
+                    (info["hidDevices"] as? List<*>).orEmpty().mapNotNull { entry ->
+                        val hid = entry as? Map<*, *> ?: return@mapNotNull null
+                        when (val raw = hid["uuid"]) {
+                            is Number -> raw.toString()
+                            is String -> raw
+                            else -> null
+                        }
+                    }
+                if (uuids.isEmpty()) {
+                    log("AIRPLAY: 侧信道 /info 成功但车机未声明 HID 设备 → 触摸不走 AirPlay HID 通路")
+                    return@Thread
+                }
+                log("AIRPLAY: 侧信道拿到 HID 设备 $uuids → 补发 hidSetInputMode（触摸可能立即生效）")
+                uuids.forEach { uuid -> runCatching { sendHidSetInputMode(uuid, mode = 0) } }
+            },
+            "info-side-probe",
+        ).apply { isDaemon = true }.start()
+    }
+
+    /** `/info` 报文 → 字典。失败时把原因与原始 hex 落日志，并缓存到 negotiatedInfo。 */
+    private fun parseInfoBody(
+        statusLine: String,
+        body: ByteArray,
+    ): Map<*, *>? {
+        log("AIRPLAY: /info 应答 [$statusLine] body=${body.size}B")
+        if (body.isEmpty()) return null
+        val info =
+            try {
+                val result = BinaryPlist.parseRecovered(body)
+                result.note?.let { log("AIRPLAY: /info $it") }
+                result.value as? Map<*, *>
+            } catch (error: IllegalArgumentException) {
+                log("AIRPLAY: /info plist 解析失败 - ${error.message}")
+                log("AIRPLAY: /info 原始体（${body.size}B）hex=" + hexDump(body, 320))
+                null
+            }
+        if (info == null) return null
+        logInfoSummary(info)
+        negotiatedInfo = info
+        return info
+    }
+
+    /**
+     * 独立短连接探测 `/info`（不加密、不带会话）：会话内被拒时的兜底。
+     *
+     * 只新建一条 TCP，发 `GET /info` 读完一条报文就关闭——不碰控制通道的状态机，
+     * 车机若不认（455/403/超时）只是白跑一趟，不会影响已经跑起来的视频流。
+     */
+    private fun probeInfoOnSideConnection(timeoutMillis: Int = 4_000): Map<*, *>? {
+        val target = endpoint
+        if (target.airPlayPort <= 0) return null
+        val host =
+            activeHost ?: EndpointHosts.candidates(target.ipAddresses).firstOrNull() ?: return null
+        var probe: Socket? = null
+        return try {
+            log("AIRPLAY: /info 侧信道探测 → $host:${target.airPlayPort}（独立短连接，不碰会话）")
+            probe =
+                Socket().apply {
+                    connect(InetSocketAddress(resolveAddress(host), target.airPlayPort), timeoutMillis)
+                    soTimeout = timeoutMillis
+                }
+            val payload = BinaryPlist.encode(linkedMapOf<String, Any?>())
+            val head =
+                "GET /info RTSP/1.0\r\n" +
+                    "CSeq: 1\r\n" +
+                    "User-Agent: AirPlay/$SENDER_SOURCE_VERSION\r\n" +
+                    "Content-Type: application/x-apple-binary-plist\r\n" +
+                    "Content-Length: ${payload.size}\r\n\r\n"
+            probe.getOutputStream().apply {
+                write(head.toByteArray(Charsets.US_ASCII) + payload)
+                flush()
+            }
+            val input = probe.getInputStream()
+            val collected = java.io.ByteArrayOutputStream()
+            val chunk = ByteArray(16 * 1024)
+            var expected = -1
+            while (true) {
+                val count =
+                    try {
+                        input.read(chunk)
+                    } catch (_: java.net.SocketTimeoutException) {
+                        -1
+                    }
+                if (count < 0) break
+                collected.write(chunk, 0, count)
+                val bytes = collected.toByteArray()
+                if (expected < 0) {
+                    val separator = indexOf(bytes, HEAD_SEPARATOR)
+                    if (separator >= 0) {
+                        val (_, contentLength) =
+                            parseRtspHead(String(bytes, 0, separator, Charsets.ISO_8859_1))
+                        expected = separator + HEAD_SEPARATOR.size + contentLength
+                    }
+                }
+                if (expected >= 0 && bytes.size >= expected) break
+            }
+            val bytes = collected.toByteArray()
+            val separator = indexOf(bytes, HEAD_SEPARATOR)
+            if (separator < 0) {
+                log("AIRPLAY: /info 侧信道无有效应答（${bytes.size}B，车机可能只服务已绑定会话）")
+                return null
+            }
+            val headText = String(bytes, 0, separator, Charsets.ISO_8859_1)
+            val (line, contentLength) = parseRtspHead(headText)
+            val bodyStart = separator + HEAD_SEPARATOR.size
+            val infoBody = bytes.copyOfRange(bodyStart, minOf(bodyStart + contentLength, bytes.size))
+            return parseInfoBody("侧信道 $line", infoBody)
+        } catch (error: Exception) {
+            log("AIRPLAY: /info 侧信道失败 - ${error.javaClass.simpleName}: ${error.message}")
+            null
+        } finally {
+            runCatching { probe?.close() }
+        }
     }
 
     class SetupInfo(
@@ -1196,6 +1366,32 @@ class AirPlayClient(
         bytes: ByteArray,
         limit: Int = 24,
     ): String = bytes.take(limit).joinToString(" ") { "%02x".format(it) } + if (bytes.size > limit) "…" else ""
+
+    /**
+     * 报文全量十六进制（故障取证用）：默认最多 480 字节、每行 48 字节。
+     * 排查车机 plist 解不出来时，只给 24 字节前缀看不到出错的对象，必须给全文。
+     */
+    private fun hexDump(
+        bytes: ByteArray,
+        limit: Int = 480,
+        perLine: Int = 48,
+    ): String {
+        if (bytes.isEmpty()) return "（空）"
+        val shown = minOf(bytes.size, limit)
+        val builder = StringBuilder(shown * 3)
+        var index = 0
+        while (index < shown) {
+            if (index > 0) builder.append("\n    ")
+            val end = minOf(index + perLine, shown)
+            for (position in index until end) {
+                builder.append("%02x".format(bytes[position]))
+                if (position != end - 1) builder.append(' ')
+            }
+            index = end
+        }
+        if (bytes.size > shown) builder.append(" …（共 ${bytes.size}B，只显示前 $shown）")
+        return builder.toString()
+    }
 
     /** 应答体是否是 iAP2 链路帧（marker 0xFF55 / 同步包 0xFF5A）。 */
     private fun looksLikeIapLink(bytes: ByteArray): Boolean =
@@ -1908,30 +2104,40 @@ class AirPlayClient(
                                 }
                                 continue
                             }
+                            var commandError: String? = null
                             val parsed =
                                 try {
-                                    BinaryPlist.parse(message.body)
-                                } catch (error: Exception) {
-                                    // 解析器对畸形 body 可能抛任意运行时异常（实测
-                                    // StringIndexOutOfBounds）——绝不能让它逃出去杀死
-                                    // 事件读线程（触摸/保活全丢、会话随后被拆）
-                                    if (badEventCommands == 0) {
-                                        log("EVENT: 命令解析异常 - ${error.javaClass.simpleName}: ${error.message}")
+                                    val result = BinaryPlist.parseRecovered(message.body)
+                                    result.note?.let { note ->
+                                        log("EVENT: /command 容错解析成功——$note")
                                     }
+                                    result.value
+                                } catch (error: Throwable) {
+                                    // 不能只 catch IllegalArgumentException：越界/长度异常若逃出
+                                    // 这里会直接打死事件读线程，车机会把整个会话拆掉。
+                                    commandError = "${error.javaClass.simpleName}: ${error.message}"
                                     null
                                 }
                             val command = parsed as? Map<*, *>
                             if (command == null) {
-                                // 车机每秒都会 POST 一条解不出来的 /command（实测 249B）——
-                                // 只留前 8 条带 hex，用来判定是「格式未支持」还是「另有通
-                                // 路（压缩/加密）」，不刷屏。
+                                // 车机每秒都会 POST 一条解不出来的 /command——按「体型指纹」
+                                // 去重，每种体型留一次全文（原因 + 报文头 + 完整 hex），其余只计数。
                                 badEventCommands++
-                                if (badEventCommands <= 8) {
+                                val signature =
+                                    message.body.size.toString() + ":" + hexPrefix(message.body, 8)
+                                if (badEventSignatures.add(signature) && badEventSignatures.size <= 4) {
                                     log(
                                         "EVENT: 命令无法识别 [$firstLine] body=${message.body.size}B " +
-                                            "解析=${parsed?.javaClass?.simpleName ?: "失败"} " +
-                                            "hex=" + hexPrefix(message.body, 96),
+                                            "原因=" + (commandError ?: "解析结果=${parsed?.javaClass?.simpleName}"),
                                     )
+                                    log(
+                                        "EVENT: 命令报文头=" +
+                                            message.head.replace("\r\n", " | ").take(300),
+                                    )
+                                    log("EVENT: 命令报文体（${message.body.size}B）hex=" + hexDump(message.body))
+                                }
+                                if (badEventCommands % 120 == 0) {
+                                    log("EVENT: 累计 ${badEventCommands} 条 /command 解析失败（已静默，仅计数）")
                                 }
                                 continue
                             }
@@ -2520,7 +2726,27 @@ class AirPlayClient(
         return BinaryPlist.encode(fields)
     }
 
+    private fun typeName(value: Any?): String =
+        when (value) {
+            null -> "null"
+            is ByteArray -> "data(${value.size}B)"
+            is List<*> -> "list(${value.size})"
+            is Map<*, *> -> "dict(${value.size})"
+            is String -> "str(${value.length})"
+            else -> value.javaClass.simpleName
+        }
+
     private fun logInfoSummary(root: Map<*, *>) {
+        // 顶层字段全量清单（键: 类型）——车机把能力藏在哪个键下一目了然，避免只认得
+        // Apple 官方那几个键（宝马 iD9 的 HID 声明可能就在我们没解析的键上）
+        log(
+            "AIRPLAY: /info 顶层字段(${root.size})=" +
+                root.entries.joinToString(" ") { (key, value) -> "$key:${typeName(value)}" },
+        )
+        // 任何名字里带 hid 的键都完整打印（设备清单 + 描述符是触摸通路的前提）
+        root.entries
+            .filter { (key, _) -> key.toString().contains("hid", ignoreCase = true) }
+            .forEach { (key, value) -> log("AIRPLAY: /info $key=$value") }
         val features = root["features"] as? Long
         log(
             "AIRPLAY: /info 摘要 name=${root["name"]} model=${root["model"]} " +
@@ -2528,10 +2754,13 @@ class AirPlayClient(
                 if (features != null) " features=0x${features.toString(16)}" else "",
         )
         (root["displays"] as? List<*>)?.forEachIndexed { index, display ->
+            log("AIRPLAY: /info displays[$index]=$display")
             if (display is Map<*, *>) {
                 log(
-                    "AIRPLAY: display[$index] uuid=${display["UUID"]} " +
-                        "${display["WidthPhysical"]}x${display["HeightPhysical"]}@${display["RefreshRate"]}Hz",
+                    "AIRPLAY: /info displays[$index] 键值=" +
+                        display.entries.joinToString(" ") { (key, value) ->
+                            "$key=${value.toString().take(80)}"
+                        },
                 )
             }
         }
