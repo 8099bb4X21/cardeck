@@ -1920,7 +1920,10 @@ class AirPlayClient(
     ): ScreenStreamInfo? {
         // 对照 catplay（真车验证）：streamConnectionID = 随机 u64（+1 保证非零）
         val connectionId = java.security.SecureRandom().nextLong() and Long.MAX_VALUE or 1L
-        val streamUuid = displayUuid ?: java.util.UUID.randomUUID().toString()
+        val streamUuid =
+            displayUuid ?: java.util.UUID
+                .randomUUID()
+                .toString()
         log(
             "AIRPLAY: 主屏流 SETUP uuid=$streamUuid " +
                 if (displayUuid == null) {
@@ -2147,7 +2150,7 @@ class AirPlayClient(
                                     log("EVENT: 命令报文体（${message.body.size}B）hex=" + hexDump(message.body))
                                 }
                                 if (badEventCommands % 120 == 0) {
-                                    log("EVENT: 累计 ${badEventCommands} 条 /command 解析失败（已静默，仅计数）")
+                                    log("EVENT: 累计 $badEventCommands 条 /command 解析失败（已静默，仅计数）")
                                 }
                                 continue
                             }

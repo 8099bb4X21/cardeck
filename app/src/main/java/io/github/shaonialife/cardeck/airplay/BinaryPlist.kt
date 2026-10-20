@@ -425,7 +425,9 @@ object BinaryPlist {
         if (intMarker ushr 4 != 0x1) {
             throw IllegalArgumentException(
                 "期望长度 int 对象，得到 0x${intMarker.toString(16)}（offset=$offset " +
-                    "上下文=" + bytes.copyOfRange(offset, minOf(offset + 8, bytes.size))
+                    "上下文=" +
+                    bytes
+                        .copyOfRange(offset, minOf(offset + 8, bytes.size))
                         .joinToString(" ") { "%02x".format(it) } + "）",
             )
         }

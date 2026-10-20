@@ -1889,21 +1889,21 @@ object SessionController {
                                         client.assertModes()
                                     }
 
-                                    else -> appendLog(
-                                        // 未识别的命令必须带参数：车机的私有命令（如 requestUI）
-                                        // 到底要什么，全在 params 里——只打 type 等于没打。
-                                        "EVENT: 命令 type=${command["type"]} " +
-                                            command.entries
-                                                .filter { it.key?.toString() != "type" }
-                                                .joinToString(" ") { (key, value) ->
-                                                    "$key=" +
-                                                        when (value) {
-                                                            is ByteArray -> value.joinToString("") { "%02x".format(it) }
-                                                            else -> value.toString().take(240)
-                                                        }
-                                                }
-                                                .take(600),
-                                    )
+                                    else ->
+                                        appendLog(
+                                            // 未识别的命令必须带参数：车机的私有命令（如 requestUI）
+                                            // 到底要什么，全在 params 里——只打 type 等于没打。
+                                            "EVENT: 命令 type=${command["type"]} " +
+                                                command.entries
+                                                    .filter { it.key?.toString() != "type" }
+                                                    .joinToString(" ") { (key, value) ->
+                                                        "$key=" +
+                                                            when (value) {
+                                                                is ByteArray -> value.joinToString("") { "%02x".format(it) }
+                                                                else -> value.toString().take(240)
+                                                            }
+                                                    }.take(600),
+                                        )
                                 }
                             }
                             // 资源声明（must）：真车对未声明资源的屏幕流 SETUP 直接 400

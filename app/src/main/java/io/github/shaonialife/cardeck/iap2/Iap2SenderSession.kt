@@ -116,8 +116,7 @@ class Iap2SenderSession(
     private fun accessoryDeclaresSend(messageId: Int): Boolean? = if (accessorySendIds.isEmpty()) null else messageId in accessorySendIds
 
     /** 车机是否声明能收某消息；null = 未提供清单（未知，按保守策略继续）。 */
-    private fun accessoryDeclaresReceive(messageId: Int): Boolean? =
-        if (!receiveListDeclared) null else messageId in accessoryReceiveIds
+    private fun accessoryDeclaresReceive(messageId: Int): Boolean? = if (!receiveListDeclared) null else messageId in accessoryReceiveIds
 
     private companion object {
         /** 等 StartHID 的窗口：xcertplay 会发（订阅后立即到），DiPlay 不发。 */
@@ -878,13 +877,17 @@ class Iap2SenderSession(
             log("iap2 0x1d01 车机可收清单(${receives.size})=" + receives.joinToString(" ") { "0x%04x".format(it) })
             log(
                 "iap2 0x1d01 协议代际：请求 WiFi 配置(0x5702)=" +
-                    (accessoryDeclaresReceive(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)?.let {
-                        if (it) "可收" else "不收"
-                    } ?: "未知") +
+                    (
+                        accessoryDeclaresReceive(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)?.let {
+                            if (it) "可收" else "不收"
+                        } ?: "未知"
+                    ) +
                     " 回 WiFi 配置(0x5703)=" +
-                    (accessoryDeclaresSend(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION)?.let {
-                        if (it) "会发" else "不发"
-                    } ?: "未知"),
+                    (
+                        accessoryDeclaresSend(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION)?.let {
+                            if (it) "会发" else "不发"
+                        } ?: "未知"
+                    ),
             )
         }
         log("iap2 0x1d01 原始体=" + frame.body.joinToString("") { "%02x".format(it) })
