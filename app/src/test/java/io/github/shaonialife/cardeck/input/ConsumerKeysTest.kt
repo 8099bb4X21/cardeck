@@ -15,55 +15,19 @@ import org.junit.Test
  * 早期把字节直接当 Usage ID，得到 0x05/0x06 → 无对应键（用户反馈「收到消息但不切歌」）。
  */
 class ConsumerKeysTest {
+    /** 描述符/报文原文按字节直书，便于与日志十六进制逐字节比对。 */
+    private fun hex(text: String): ByteArray =
+        text
+            .split(" ")
+            .filter { it.isNotBlank() }
+            .map { it.toInt(16).toByte() }
+            .toByteArray()
+
     /** 奥迪 /info hidDevices[0].hidDescriptor 原文（46B）。 */
     private val audiDescriptor =
-        byteArrayOf(
-            0x05,
-            0x0c,
-            0x09,
-            0x01,
-            0xa1.toByte(),
-            0x01,
-            0x15,
-            0x00,
-            0x25,
-            0x08,
-            0x05,
-            0x0c,
-            0x0a,
-            0x00,
-            0x00, // Usage 0x0000
-            0x0a,
-            0xb0.toByte(),
-            0x00, // Play
-            0x0a,
-            0xb1.toByte(),
-            0x00, // Pause
-            0x0a,
-            0xb3.toByte(),
-            0x00, // FastForward
-            0x0a,
-            0xb4.toByte(),
-            0x00, // Rewind
-            0x0a,
-            0xb5.toByte(),
-            0x00, // ScanNextTrack
-            0x0a,
-            0xb6.toByte(),
-            0x00, // ScanPreviousTrack
-            0x0a,
-            0xb9.toByte(),
-            0x00, // Stop
-            0x0a,
-            0xbc.toByte(),
-            0x00, // Repeat
-            0x75,
-            0x08,
-            0x95.toByte(),
-            0x01,
-            0x81.toByte(),
-            0x00,
-            0xc0.toByte(),
+        hex(
+            "05 0c 09 01 a1 01 15 00 25 08 05 0c 0a 00 00 00 0a b0 00 0a b1 00 0a b3 00 0a b4 00 0a b5 00 0a b6 " +
+                "00 0a b9 00 0a bc 00 75 08 95 01 81 00 c0",
         )
 
     @Test
@@ -102,44 +66,9 @@ class ConsumerKeysTest {
         // telephony 描述符（Telephony 页 0x0B）不能被当成媒体键——其 usage 0xB3 若误判
         // 会发出「快进」。
         val telephonyDescriptor =
-            byteArrayOf(
-                0x05,
-                0x0b,
-                0x09,
-                0x07,
-                0xa1.toByte(),
-                0x01,
-                0x15,
-                0x00,
-                0x25,
-                0x11,
-                0x05,
-                0x0b,
-                0x09,
-                0x00,
-                0x09,
-                0x20,
-                0x09,
-                0x21,
-                0x09,
-                0x26,
-                0x09,
-                0x2f,
-                0x09,
-                0xb0.toByte(),
-                0x09,
-                0xb1.toByte(),
-                0x09,
-                0xb2.toByte(),
-                0x09,
-                0xb3.toByte(),
-                0x75,
-                0x08,
-                0x95.toByte(),
-                0x01,
-                0x81.toByte(),
-                0x00,
-                0xc0.toByte(),
+            hex(
+                "05 0b 09 07 a1 01 15 00 25 11 05 0b 09 00 09 20 09 21 09 26 09 2f 09 b0 09 b1 09 b2 09 b3 75 08 95 " +
+                    "01 81 00 c0",
             )
         assertNull(ConsumerKeys.parseDescriptor(telephonyDescriptor))
     }
@@ -148,47 +77,9 @@ class ConsumerKeysTest {
     fun diplayMediaDescriptorUsesIndexSemantics() {
         // DiPlay（测试台）media 描述符：Usage 数组 6 项，报告值同为下标
         val diplayMedia =
-            byteArrayOf(
-                0x05,
-                0x0c,
-                0x09,
-                0x01,
-                0xa1.toByte(),
-                0x01,
-                0x15,
-                0x00,
-                0x25,
-                0x06,
-                0x05,
-                0x0c,
-                0x0a,
-                0x00,
-                0x00, // 0x0000
-                0x0a,
-                0xb0.toByte(),
-                0x00, // Play
-                0x0a,
-                0xb1.toByte(),
-                0x00, // Pause
-                0x0a,
-                0xcd.toByte(),
-                0x00, // Play/Pause toggle
-                0x0a,
-                0xb5.toByte(),
-                0x00, // ScanNextTrack
-                0x0a,
-                0xb6.toByte(),
-                0x00, // ScanPreviousTrack
-                0x0a,
-                0x9e.toByte(),
-                0x02, // 0x029e（记录）
-                0x75,
-                0x08,
-                0x95.toByte(),
-                0x01,
-                0x81.toByte(),
-                0x00,
-                0xc0.toByte(),
+            hex(
+                "05 0c 09 01 a1 01 15 00 25 06 05 0c 0a 00 00 00 0a b0 00 0a b1 00 0a cd 00 0a b5 00 0a b6 00 0a 9e " +
+                    "02 02 75 08 95 01 81 00 c0",
             )
         val map = ConsumerKeys.parseDescriptor(diplayMedia)!!
         assertEquals(0xB0, map.usageFor(1))
@@ -214,35 +105,8 @@ class ConsumerKeysTest {
     fun descriptorWithoutConsumerPageReturnsNull() {
         // 奥迪触摸屏（uuid=1）描述符：Generic Desktop / Digitizer，无 Consumer 页
         val touchDescriptor =
-            byteArrayOf(
-                0x05,
-                0x0d,
-                0x09,
-                0x04,
-                0xa1.toByte(),
-                0x01,
-                0x05,
-                0x0d,
-                0x09,
-                0x22,
-                0xa1.toByte(),
-                0x02,
-                0x05,
-                0x0d,
-                0x09,
-                0x33,
-                0x15,
-                0x00,
-                0x25,
-                0x01,
-                0x75,
-                0x01,
-                0x95.toByte(),
-                0x01,
-                0x81.toByte(),
-                0x02,
-                0xc0.toByte(),
-                0xc0.toByte(),
+            hex(
+                "05 0d 09 04 a1 01 05 0d 09 22 a1 02 05 0d 09 33 15 00 25 01 75 01 95 01 81 02 c0 c0",
             )
         assertNull(ConsumerKeys.parseDescriptor(touchDescriptor))
     }
@@ -255,5 +119,46 @@ class ConsumerKeysTest {
                 ConsumerKeys.nameOf(usage).startsWith("未知"),
             )
         }
+    }
+
+    // ---- 本田 HFT（Alpine 8A250-30A）：位图（Variable）报告 ----
+
+    /**
+     * 车机 0x6800 StartHID 里带的描述符（33B），`81 02` = Data/Variable/Absolute：
+     * 5 个 usage 各占 1 bit，末尾 `75 03 95 01 81 03` 是 3 bit 补齐。
+     */
+    private val hondaDescriptor =
+        hex(
+            "05 0c 09 01 a1 01 15 00 25 01 75 01 95 05 09 b0 09 b1 09 b5 09 b6 09 b9 81 02 75 03 95 01 81 03 c0",
+        )
+
+    @Test
+    fun hondaDescriptorIsBitmapWithFiveUsages() {
+        val map = ConsumerKeys.parseDescriptor(hondaDescriptor)!!
+        assertFalse("`81 02` 是位图报告，不是 Array", map.isArray)
+        assertEquals(listOf(0xB0, 0xB1, 0xB5, 0xB6, 0xB9), map.usages)
+    }
+
+    @Test
+    fun hondaBitmapReportsDecodeToMediaKeys() {
+        val map = ConsumerKeys.parseDescriptor(hondaDescriptor)!!
+        // 实测报文：按住「下一首」连推 0x04，松开推 0x00
+        assertEquals(listOf(0xB5), map.usagesFor(byteArrayOf(0x04)))
+        assertEquals(listOf(0xB6), map.usagesFor(byteArrayOf(0x08)))
+        assertEquals(listOf(0xB0), map.usagesFor(byteArrayOf(0x01)))
+        assertEquals(listOf(0xB1), map.usagesFor(byteArrayOf(0x02)))
+        assertEquals(listOf(0xB9), map.usagesFor(byteArrayOf(0x10)))
+        assertEquals(emptyList<Int>(), map.usagesFor(byteArrayOf(0x00)))
+        // 旧实现把 0x04 直接当 Usage ID → 无对应键，这正是「按键到了但不切歌」的根因
+        assertEquals(0, ConsumerKeys.keyCodeFor(0x04))
+        assertEquals(KeyEvent.KEYCODE_MEDIA_NEXT, ConsumerKeys.keyCodeFor(map.usagesFor(byteArrayOf(0x04))[0]))
+    }
+
+    @Test
+    fun audiArrayReportStillWorksThroughUsagesFor() {
+        val map = ConsumerKeys.parseDescriptor(audiDescriptor)!!
+        assertEquals(listOf(0xB5), map.usagesFor(byteArrayOf(0x05)))
+        assertEquals(listOf(0xB6), map.usagesFor(byteArrayOf(0x06)))
+        assertEquals(emptyList<Int>(), map.usagesFor(byteArrayOf(0x00)))
     }
 }

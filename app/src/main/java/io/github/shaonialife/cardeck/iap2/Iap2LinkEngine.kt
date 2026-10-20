@@ -196,6 +196,38 @@ class Iap2LinkEngine(
     }
 
     /**
+     * 补发协商开场：marker + 本表同步包（允许从 [State.NEGOTIATING] 再次触发）。
+     *
+     * 用于「对端只发 marker、不发同步包」的形态——它在等**我们**的会话表。
+     * Honda HFT（Alpine 8A250-30A）2026-10-20 事件通道实测：车机在 60 秒里发了
+     * 60 个 marker `FF 55 02 00 EE 10`，一条 FF5A 同步包都没有（说明它卡在探测态），
+     * 而我们此前只回 marker，于是车机一直重发、链路永远建不起来。
+     * 对照同一条车机的蓝牙 iAP2 链路：手机首帧正是「marker + FF5A SYN」，车机
+     * 50ms 内即回自己的会话表——事件通道上补齐同一组合即可推进。
+     */
+    fun initiate(nowMillis: Long) {
+        if (state == State.DEAD) return
+        originatedSyn = true
+        if (state == State.IDLE) state = State.NEGOTIATING
+        appendOutput(MARKER)
+        markerDeadline = nowMillis + MARKER_RESEND_MILLIS
+        sendSynchronization()
+        syncDeadline = nowMillis + SYNC_RESEND_MILLIS
+    }
+
+    /**
+     * 停止协商期的自动重发（marker / 同步包），状态保持不变。
+     *
+     * 用于「对端一直不回同步包」的场景：控制通道上一旦无限 500ms 打点，会把对端
+     * CarPlay 栈刷懵（2026-10-11 事件通道实测过的坑），所以由上层按轮次重开、轮次
+     * 用尽后显式停手。
+     */
+    fun stopNegotiationRetries() {
+        markerDeadline = null
+        syncDeadline = null
+    }
+
+    /**
      * 应答者模式：只发 marker，**不发 SYN**——等对端（车机）自己发 SYN 再 ACK+回显。
      * 奥迪事件通道虚拟链路实测（2026-10-11）：车机发 marker 开场后由它发起 SYN；
      * 我们主动发 SYN（且被 500ms 重发洪水放大）会把车机 CarPlay 栈打懵——

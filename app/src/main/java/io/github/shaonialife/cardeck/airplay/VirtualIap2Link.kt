@@ -5,6 +5,7 @@ import io.github.shaonialife.cardeck.iap2.Iap2Csm
 import io.github.shaonialife.cardeck.iap2.Iap2LinkEngine
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.MfiLengthMemory
+import io.github.shaonialife.cardeck.input.ConsumerKeys
 import java.security.SecureRandom
 import java.util.TimeZone
 import java.util.UUID
@@ -24,7 +25,9 @@ import java.util.UUID
  *  - **旧事件形态 / 明文会话**：marker 一问一答回显（保持历史行为）。
  *
  * 车机→手机的链路字节统一从事件通道 iAPSendMessage 进来（[onCarBytes]）；
- * 手机→车机按形态分流（隧道 TCP / 控制通道 POST / 事件通道 POST）。
+ * 手机→车机按形态分流（隧道 TCP / 控制通道 POST <-- 默认）。**方向不能对调**：
+ * 出站写在事件通道上车机不读（Frida 结论；2026-10-20 Honda HFT 实测复现——
+ * 出站改到事件通道后，车机 20 分钟内一条 FF5A 同步包都没回，只按 1Hz 重发 marker）。
  */
 class VirtualIap2Link(
     private val log: (String) -> Unit,
@@ -65,6 +68,55 @@ class VirtualIap2Link(
     private var mib3MarkerIgnores = 0
     private var mib3DeferredLogs = 0
     private var mib3WirelessSessionId: String? = null
+
+    /**
+     * 事件通道链路模式（2026-10-20 Honda HFT 实测新增）。
+     *
+     * 车机在**事件通道**上以发起方姿态反复发 SYN marker（`FF 55 02 00 EE 10`，
+     * 每秒一次、连续上百次），等的是我们对它回一个 marker 才会继续发同步包。
+     * 而 [armMib3] 的 detect 走的是**控制通道**——车机看不到，于是永远重发。
+     *
+     * 连续第 [EVENT_LINK_MARKER_THRESHOLD] 个 marker 起判定它确实在等回应，
+     * 切到本模式：出入站都走事件通道，marker 应答 + 同步包协商即可建链。
+     * 链路建立后车机才会发 0x5000（NowPlaying 订阅）、0x6800（StartHID）、
+     * 0x6802（HID 报告 = 方向盘/面板媒体键）——切歌按键的载体就在这里。
+     */
+    private var eventLinkArmed = false
+    private var eventLinkMarkers = 0
+    private var eventCsmStarted = false
+
+    /**
+     * 控制通道协商轮次（2026-10-20 Honda HFT 定案后新增）。
+     *
+     * 车机的 marker 从**事件通道入站**，但它的 iAP2 栈只从**控制通道**（RTSP
+     * POST /command 的 iAPSendMessage）读我们发的字节——项目原有 Frida 结论就写着
+     * 「写在事件通道上时车机根本不读」。r5/r6 把出站也挪到事件通道后，车机连一条
+     * FF5A 同步包都不回、1Hz 重发 marker 到天亮，正是这一条被踩中。
+     *
+     * 现在出站回归控制通道：每轮 [armMib3] / [restartControlNegotiation] 发一次
+     * 「marker + 本表会话表」，引擎内部按 500ms/1s 重发；[CONTROL_SYN_ROUND_MILLIS]
+     * 无进展就进入下一轮，最多 [MAX_CONTROL_SYN_ROUNDS] 轮，之后停在 NEGOTIATING
+     * 静默等待（不再打点，避免把车机栈刷懵）。
+     */
+    private var controlSynRounds = 0
+    private var controlSynRoundStartedAtMs = 0L
+    private var controlSynGaveUp = false
+
+    /** 未处理的控制会话消息计数（媒体键排查的观测点，见 [maybeRespondControlCsmLocked]）。 */
+    private var unknownCsmIds = 0
+
+    /** 上一次记录过的链路状态（只在对日志里出现一次状态迁移）。 */
+    private var lastLinkState = Iap2LinkEngine.State.IDLE
+
+    // ---- 车机 HID 媒体键（0x6802）状态 ----
+    /** 上一次报文里按下的 Usage 集合（用于判定「新按下」，松开后自动清空）。 */
+    private var lastHidUsages: Set<Int> = emptySet()
+
+    /** 当前这批按键的起始时刻（连续同一按键超过 [HID_HOLD_REPEAT_MILLIS] 才允许连发）。 */
+    private var hidHoldStartedAtMs = 0L
+
+    /** 已打印的参数明细帧数（只打前几帧，之后按需打动作）。 */
+    private var hidReportFrames = 0
 
     // ---- MIB3 隧道 MFi 挑战（按车机持久化记忆；与蓝牙链路**独立记**——同一台车
     // 两条链路的认证后端可能不同，实测 MMI 3315 蓝牙认 32B 而 Frida 隧道是 20B） ----
@@ -113,7 +165,12 @@ class VirtualIap2Link(
     /**
      * MIB3 布防（屏幕流 SETUP 成功后调用，且仅一次）：主动向**控制通道**发一次 DETECT。
      * 必须等 SETUP 完成后再发——早发会在 SETUP 交换期间被冲掉（Frida 结论）；此后
-     * 车机的 marker 都是探测重发，按真机行为忽略。
+     * 车机的 marker 都是探测重发，真机（MIB3）回一次 SYN 就不再重发。
+     *
+     * 注意这里**只发裸 marker**：MIB3 的时序是「它回 SYN → 我们回 SYN|ACK」，
+     * 提前把会话表拍过去反而会打乱它的状态机（见 [Iap2LinkEngine.startResponder]
+     * 的实测记录）。车机若像 Honda HFT 那样反复重发 marker，才由
+     * [startControlRoundLocked] 升级成「marker + 本表会话表」并重试。
      */
     fun armMib3() {
         synchronized(lock) {
@@ -123,6 +180,21 @@ class VirtualIap2Link(
             sendControlIap(Iap2LinkEngine.MARKER)
             log("IAPLINK: MIB3 detect 已发（控制通道 iAPSendMessage）——等待车机 SYN")
         }
+    }
+
+    /**
+     * 开一轮控制通道协商：marker + 本表同步包（会话 10/11/12），刷新引擎重发节拍。
+     */
+    private fun startControlRoundLocked(reason: String) {
+        val now = nowMillis()
+        controlSynRounds++
+        controlSynRoundStartedAtMs = now
+        engine.initiate(now)
+        log(
+            "IAPLINK: 控制通道 marker + 本表同步包（第 $controlSynRounds/$MAX_CONTROL_SYN_ROUNDS 轮，$reason）" +
+                "——等车机同步包（FF5A）",
+        )
+        drainLocked()
     }
 
     /** 车机链路字节入口（事件通道 iAPSendMessage 的 data）。 */
@@ -136,11 +208,46 @@ class VirtualIap2Link(
                     bytes[1] == 0x55.toByte()
             if (isMarker && tunnelWriter() == null) {
                 if (mib3Armed) {
-                    // MIB3 布防后：marker 是车机的探测重发，真机行为是忽略
-                    // （它要的是我们经控制通道主动 announce 的那次 detect）
                     mib3MarkerIgnores++
-                    if (mib3MarkerIgnores <= 3 || mib3MarkerIgnores % 20 == 0) {
-                        log("IAPLINK: 车机 marker（#$mib3MarkerIgnores）——MIB3 忽略（等 SYN）")
+                    val now = nowMillis()
+                    // 车机反复发 SYN marker = 它还没拿到我们的会话表。链路字节**必须**走
+                    // 控制通道（事件通道它不读），所以这里不是换通道，而是按轮次重开协商。
+                    if (!eventLinkArmed && mib3MarkerIgnores >= EVENT_LINK_MARKER_THRESHOLD) {
+                        eventLinkArmed = true
+                        log(
+                            "IAPLINK: 车机连续发 SYN marker ×$mib3MarkerIgnores" +
+                                "（它在等我们的会话表）→ 控制通道补发协商轮次",
+                        )
+                        startControlRoundLocked("车机 marker 重发")
+                    } else if (eventLinkArmed) {
+                        eventLinkMarkers++
+                        if (engine.state != Iap2LinkEngine.State.NORMAL && !controlSynGaveUp) {
+                            val stale = now - controlSynRoundStartedAtMs >= CONTROL_SYN_ROUND_MILLIS
+                            when {
+                                !stale -> Unit
+                                controlSynRounds >= MAX_CONTROL_SYN_ROUNDS -> {
+                                    controlSynGaveUp = true
+                                    engine.stopNegotiationRetries()
+                                    log(
+                                        "IAPLINK: 控制通道 $MAX_CONTROL_SYN_ROUNDS 轮协商无应答——停止自动重发，" +
+                                            "链路停在 ${engine.state}（车机若发 0x1D01 会自动继续）",
+                                    )
+                                }
+
+                                else -> startControlRoundLocked("上一轮 ${CONTROL_SYN_ROUND_MILLIS}ms 无应答")
+                            }
+                        }
+                        // 引擎节拍线程也会重发，这里把待发字节立刻冲出去
+                        drainLocked()
+                        if (eventLinkMarkers <= 3 || eventLinkMarkers % 20 == 0) {
+                            log(
+                                "IAPLINK: 车机 marker（#$eventLinkMarkers）链路状态=${engine.state}" +
+                                    "（控制通道第 $controlSynRounds 轮）",
+                            )
+                        }
+                        return
+                    } else if (mib3MarkerIgnores <= 3) {
+                        log("IAPLINK: 车机 marker（#$mib3MarkerIgnores）——凑够 $EVENT_LINK_MARKER_THRESHOLD 个后补发协商")
                     }
                 } else {
                     // 布防前（屏幕 SETUP 未完成）：不回应——真机在 SETUP 前不 detect，
@@ -158,12 +265,20 @@ class VirtualIap2Link(
         }
     }
 
-    /** 链路字节出站：隧道 TCP（DiPlay）→ 控制通道 POST（MIB3）→ 事件通道（旧形态）。 */
+    /**
+     * 链路字节出站：隧道 TCP（DiPlay）→ 控制通道 POST /command（MIB3 / Honda HFT）→
+     * 事件通道（旧明文形态兜底）。
+     *
+     * **分工是固定的**：车机的链路字节从事件通道 `iAPSendMessage` **入站**，我们的
+     * 出站字节只能写控制通道——写在事件通道上时车机不读（Frida 结论，2026-10-20
+     * Honda HFT 再次实测：出站挪到事件通道后，车机 20 分钟里一条 FF5A 都没回）。
+     */
     private fun sendLinkBytes(bytes: ByteArray) {
         if (bytes.isEmpty()) return
         val tunnel = tunnelWriter()
         when {
             tunnel != null -> tunnel.writeIapBytes(bytes)
+            eventLinkArmed -> sendControlIap(bytes)
             mib3Armed -> sendControlIap(bytes)
             else -> sendEventIap(bytes)
         }
@@ -186,6 +301,15 @@ class VirtualIap2Link(
                         tunnelEchoDelivered = true
                         log("IAPLINK: ✓ 同步回显已写入隧道（链路协商完成，发送端 CSM 就绪）")
                     }
+                }
+            }
+
+            eventLinkArmed -> {
+                // 入站事件通道 / 出站控制通道：应答、同步包、CSM 一律写控制通道
+                sendControlIap(out)
+                if (pendingEchoFlush) {
+                    pendingEchoFlush = false
+                    log("IAPLINK: ✓ SYN|ACK 已投递控制通道——链路协商完成，启动控制会话")
                 }
             }
 
@@ -218,11 +342,20 @@ class VirtualIap2Link(
                 }
             }
         }
+        noteLinkStateLocked()
         // 先冲刷（回显必须先行送达对端），再启动 CSM；超时换档可能新排队帧，最后再冲一次
         flushOutputLocked()
         maybeStartControlCsmLocked()
         checkMfiTimeoutLocked()
         flushOutputLocked()
+    }
+
+    /** 链路状态迁移只在日志里出现一次（IDLE→NEGOTIATING→NORMAL 是按键通路是否打通的分水岭）。 */
+    private fun noteLinkStateLocked() {
+        val state = engine.state
+        if (state == lastLinkState) return
+        lastLinkState = state
+        log("IAPLINK: 链路状态 → $state（NORMAL 才可能收到车机 0x6800/0x6802 媒体键）")
     }
 
     /** MFi 挑战静默超时：记入该车机的记忆并换下一档重试（节拍线程每 200ms 驱动一次）。 */
@@ -288,6 +421,10 @@ class VirtualIap2Link(
         if (onTunnel) {
             if (tunnelCsmStarted || !tunnelEchoDelivered) return
             tunnelCsmStarted = true
+        } else if (eventLinkArmed) {
+            // 车机发起方形态：出站走控制通道，只要已采纳对端会话表即可开工
+            if (eventCsmStarted || engine.peerSynchronization == null) return
+            eventCsmStarted = true
         } else {
             if (!mib3Armed || mib3CsmStarted || !mib3SynAckQueued) return
             mib3CsmStarted = true
@@ -328,7 +465,8 @@ class VirtualIap2Link(
      */
     private fun maybeRespondControlCsmLocked(frame: Iap2Csm.Frame) {
         val onTunnel = tunnelWriter() != null
-        val mib3 = mib3Armed && !onTunnel
+        // 车机发起方形态复用 MIB3 那套识别/MFi 骨架（出站同样走控制通道）
+        val mib3 = (mib3Armed || eventLinkArmed) && !onTunnel
         if (!onTunnel && !mib3) return
         val ids = Iap2MessageIds
         when (frame.messageId) {
@@ -345,6 +483,25 @@ class VirtualIap2Link(
                         "name=${params[0]?.value?.decodeToString()?.trimEnd('\u0000')} " +
                         "model=${params[1]?.value?.decodeToString()?.trimEnd('\u0000')}",
                 )
+                // 参 6/7 = 车机声明「它会发 / 它可收」的消息清单。媒体键排查就靠这两行：
+                // 若 0x6800/0x6802 不在发送清单里，说明这台车机根本不用 iAP2 HID 送按键，
+                // 不必再在这条通路上耗（改查蓝牙/AVRCP 侧）。
+                params[6]?.value?.let { raw ->
+                    val sends = u16List(raw)
+                    log(
+                        "IAPLINK: 车机发送清单(${sends.size})=" +
+                            sends.joinToString(" ") { "0x%04x".format(it) } +
+                            " 含HID0x6800=${sends.contains(Iap2MessageIds.START_HID)}" +
+                            " 含0x6802=${sends.contains(Iap2MessageIds.ACCESSORY_HID_REPORT)}",
+                    )
+                }
+                params[7]?.value?.let { raw ->
+                    val receives = u16List(raw)
+                    log(
+                        "IAPLINK: 车机可收清单(${receives.size})=" +
+                            receives.joinToString(" ") { "0x%04x".format(it) },
+                    )
+                }
                 if (mib3) {
                     // 记忆键 = 车机身份 + " tunnel"：与蓝牙链路的记忆互不污染
                     mfiIdentity = mfiIdentityOf(params) + " tunnel"
@@ -433,7 +590,98 @@ class VirtualIap2Link(
                 log("IAPLINK: MIB3 0x5000 → 0x5001（空态）——仪表盘媒体数据待接")
             }
 
-            else -> Unit // 0xEA02/0xA101/0xFFFB 等只链路 ACK（引擎自动）
+            ids.START_HID -> {
+                // 车机声明「我要开始发 HID 报告了」，通常带描述符（决定报告字节语义）
+                val params = Iap2Csm.parseParams(frame.body)
+                val descriptor = params.map { it.value }.firstOrNull { it.size > 8 }
+                if (descriptor != null) {
+                    hidDescriptor = descriptor
+                    log(
+                        "IAPLINK: 车机 0x6800 StartHID 描述符 ${descriptor.size}B hex=" +
+                            descriptor.joinToString(" ") { "%02x".format(it) }.take(120),
+                    )
+                } else {
+                    log("IAPLINK: 车机 0x6800 StartHID（无描述符）参数=${params.map { it.id }}")
+                }
+            }
+
+            ids.ACCESSORY_HID_REPORT -> {
+                // 方向盘/面板媒体键。
+                //
+                // 2026-10-20 本田 HFT 实测帧（11B）：
+                //   00 06 00 00 00 03 | 00 05 00 01 04
+                //   param id=0 值 00 03（报告类型/描述，恒定）← 之前被当成报告值
+                //   param id=1 值 04（真正的 HID 报文）
+                // 旧代码取「第一个 1~8 字节的 param」→ 永远拿到 00 03，位图里一位都不置，
+                // 于是日志一直打 `usage=无 keyCode=0`，按键到了却点不出任何动作。
+                val params = Iap2Csm.parseParams(frame.body)
+                val report = hidReportFromParams(params)
+                val keyMap = hidDescriptor?.let(ConsumerKeys::parseDescriptor)
+                val usages =
+                    when {
+                        report == null -> emptyList()
+                        keyMap != null -> keyMap.usagesFor(report)
+                        // 无描述符：退化为「单字节即 Usage ID」
+                        else -> listOf(report[0].toInt() and 0xFF).filter { it != 0 }
+                    }
+                if (hidReportFrames < HID_REPORT_VERBOSE_FRAMES) {
+                    hidReportFrames++
+                    log(
+                        "IAPLINK: 车机 0x6802 params=" +
+                            params.joinToString(",") { "${it.id}=" + it.value.joinToString("") { b -> "%02x".format(b) } } +
+                            " 报告=" + (report?.joinToString(" ") { "%02x".format(it) } ?: "空") +
+                            " 位图=" + (keyMap?.isArray?.let { if (it) "Array" else "Variable" } ?: "无描述符"),
+                    )
+                }
+                fireHidKeysLocked(usages)
+            }
+
+            else -> {
+                // 未处理的消息也留痕：车机若用非常规 ID 下发媒体键/按键，这里能第一时间
+                // 在日志里看到对应消息号（切歌按键排查的关键观测点）
+                unknownCsmIds++
+                if (unknownCsmIds <= 20) {
+                    log(
+                        "IAPLINK: 未处理的 CSM 0x${frame.messageId.toString(16)} " +
+                            "(${Iap2MessageIds.nameOf(frame.messageId)}) ${frame.body.size}B",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 把一批「本次按下的 Usage」转成 Android 媒体键注入。
+     *
+     * 车机的 HID 报告是**状态式**的：按住会以 ~10Hz 连推同一个位图，松开推 0x00。
+     * 因此只在「新出现」时触发一次（边沿触发），否则一次长按会跳掉几十首歌；
+     * 只有在同一按键持续按住超过 [HID_HOLD_REPEAT_MILLIS] 时才允许再触发，
+     * 保持方向盘长按「连续切歌」的手感。
+     */
+    private fun fireHidKeysLocked(usages: List<Int>) {
+        val now = nowMillis()
+        if (usages.isEmpty()) {
+            lastHidUsages = emptySet()
+            hidHoldStartedAtMs = 0L
+            return
+        }
+        val fresh = usages.filter { it !in lastHidUsages }
+        val repeat =
+            fresh.isEmpty() &&
+                hidHoldStartedAtMs > 0 &&
+                now - hidHoldStartedAtMs >= HID_HOLD_REPEAT_MILLIS
+        lastHidUsages = usages.toSet()
+        if (fresh.isNotEmpty()) hidHoldStartedAtMs = now
+        if (fresh.isEmpty() && !repeat) return
+        if (repeat) hidHoldStartedAtMs = now
+        val firing = if (fresh.isNotEmpty()) fresh else usages
+        for (usage in firing) {
+            val keyCode = ConsumerKeys.keyCodeFor(usage)
+            log(
+                "IAPLINK: 车机媒体键 ${ConsumerKeys.nameOf(usage)}(0x%02x) → keyCode=".format(usage) +
+                    (if (keyCode != 0) "$keyCode 已注入" else "无对应 Android 键（忽略）"),
+            )
+            if (keyCode != 0) onMediaKey?.invoke(keyCode)
         }
     }
 
@@ -484,6 +732,12 @@ class VirtualIap2Link(
         return Iap2Csm.param(0, seconds) + Iap2Csm.param(1, tz) + Iap2Csm.param(2, byteArrayOf(dst.toByte()))
     }
 
+    /** 大端 u16 数组（识别信息里的消息 ID 清单）。 */
+    private fun u16List(bytes: ByteArray): List<Int> =
+        (0 until bytes.size / 2).map {
+            ((bytes[it * 2].toInt() and 0xFF) shl 8) or (bytes[it * 2 + 1].toInt() and 0xFF)
+        }
+
     /** 0x1D01 身份参数（name/model/manufacturer）→ 记忆键素材（NUL 去净、空档跳过）。 */
     private fun mfiIdentityOf(params: Map<Int, Iap2Csm.Param>): String =
         listOf(0, 1, 2)
@@ -516,6 +770,17 @@ class VirtualIap2Link(
     /** 引擎回调：EA 会话（2 号）数据帧——触摸 HID 的高概率载体。 */
     var onEaData: ((ByteArray) -> Unit)? = null
 
+    /**
+     * 引擎回调：iAP2 控制会话下发的 HID 报告解析出的 Android 媒体键。
+     *
+     * 车机方向盘/面板的上一曲、下一曲在 CarPlay 里走 `0x6802 AccessoryHIDReport`，
+     * 只有 iAP2 链路真正建立后才会来（见 [eventLinkArmed]）。
+     */
+    var onMediaKey: ((Int) -> Unit)? = null
+
+    /** 车机在 0x6800 StartHID 里给出的 HID 描述符（解析报告用；null = 未提供）。 */
+    private var hidDescriptor: ByteArray? = null
+
     fun handleEaData(bytes: ByteArray) {
         eaCount++
         val hex = bytes.joinToString(" ") { "%02x".format(it) }
@@ -530,6 +795,46 @@ class VirtualIap2Link(
         val TUNNEL_MFI_BASELINE = listOf(20, 32, 16)
         val TUNNEL_MFI_WINDOWS = mapOf(20 to 6_000L, 32 to 3_000L, 16 to 3_000L)
         const val TUNNEL_MFI_SILENT_WINDOW_MS = 1_500L
+
+        /**
+         * 车机在事件通道上连续发到第几个 SYN marker 才判定「它在等我们回 marker」。
+         * 真机（MIB3）在我们主动 detect 后就不再重发；Honda HFT 实测连发上百次，
+         * 取 2 既能避开 MIB3 的一次探测重发，又不会让车机白等太久。
+         */
+        const val EVENT_LINK_MARKER_THRESHOLD = 2
+
+        /**
+         * 控制通道协商：每轮多久无进展就重开下一轮，最多几轮。
+         * 车机 marker 是 1Hz，4s 一轮 ⇒ 每轮能收到 4 次重发机会；5 轮 ≈ 20s，
+         * 之后停手静默等待（它真发 0x1D01 仍会被正常处理）。
+         */
+        const val CONTROL_SYN_ROUND_MILLIS = 4_000L
+        const val MAX_CONTROL_SYN_ROUNDS = 5
+
+        /**
+         * 0x6802 AccessoryHIDReport 的报文参数号。
+         *
+         * 本田 HFT 实测：param 0 = 报告类型/描述（`00 03`，永远不变），
+         * param 1 = 真正的 HID 报文（如 `04` = 下一首）。取错参数号等于所有按键都解码成「无」。
+         */
+        const val HID_REPORT_DATA_PARAM = 1
+
+        /** 参数明细只打前几帧（之后每帧都会触发按键动作，日志已足够）。 */
+        const val HID_REPORT_VERBOSE_FRAMES = 8
+
+        /** 同一按键持续按住多久才允许再次触发（模拟长按连发，短按绝不重复）。 */
+        const val HID_HOLD_REPEAT_MILLIS = 1_500L
+
+        /**
+         * 0x6802 的参数表 → HID 报文。
+         *
+         * 优先取 param [HID_REPORT_DATA_PARAM]；缺省（个别车机只给一个参数）时退回
+         * 「最后一个 1~8 字节的参数」——注意**不能取第一个**：本田 HFT 的 param 0 恒为
+         * `00 03`（报告类型），当成报文值会让所有按键都解成「无」。
+         */
+        fun hidReportFromParams(params: List<Iap2Csm.Param>): ByteArray? =
+            params.firstOrNull { it.id == HID_REPORT_DATA_PARAM }?.value?.takeIf { it.isNotEmpty() }
+                ?: params.lastOrNull { it.value.isNotEmpty() && it.value.size <= 8 }?.value
 
         // ---- MIB3 消息号（无正式名/未入 Iap2MessageIds 的小集合） ----
         const val MFI_AUTH_SERIAL = 0xAA06

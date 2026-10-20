@@ -41,6 +41,31 @@ object ConsumerKeys {
                 reportValue
             }
         }
+
+        /**
+         * HID 报文 → 本次**按下**的 Usage 集合。
+         *
+         * 两种报告语义必须分开，混用会一个键都点不出来：
+         *  - Array（`81 00`）：字节值是 usages 下标，一次只可能有一个值；
+         *  - Variable / 位图（`81 02`）：**每个 usage 占 1 bit**，report 里按位展开。
+         *
+         * 本田 HFT（Alpine 8A250-30A）的 StartHID 描述符正是位图：
+         * `… 75 01 95 05 09 B0 09 B1 09 B5 09 B6 09 B9 81 02 …` → 1 字节报告，
+         * bit0=播放(0xB0)、bit1=暂停(0xB1)、bit2=下一首(0xB5)、bit3=上一首(0xB6)、
+         * bit4=停止(0xB9)；报告 0x04 = 下一首、0x00 = 全部松开。
+         */
+        fun usagesFor(report: ByteArray): List<Int> {
+            if (report.isEmpty()) return emptyList()
+            if (isArray) return listOfNotNull(usageFor(report[0].toInt() and 0xFF))
+            val pressed = ArrayList<Int>(usages.size)
+            usages.forEachIndexed { index, usage ->
+                val byteIndex = index / 8
+                if (byteIndex >= report.size || usage == 0) return@forEachIndexed
+                val bit = (report[byteIndex].toInt() shr (index % 8)) and 0x01
+                if (bit == 1) pressed += usage
+            }
+            return pressed
+        }
     }
 
     /**
@@ -97,9 +122,11 @@ object ConsumerKeys {
                 type == 0 && tag == 0xC -> {
                     if (inConsumerApp) return KeyMap(usages, isArray)
                 }
-                // 主项：Input——bit1=0 表示 Array（值是下标），=1 表示 Variable（值是位图）
+                // 主项：Input——bit1=0 表示 Array（值是下标），=1 表示 Variable（值是位图）。
+                // bit0=1 是 Constant（描述符尾部的补齐位，如 `75 03 95 01 81 03`），
+                // 不参与按键语义，不能让它覆盖前面的真实报告格式。
                 type == 0 && tag == 0x8 -> {
-                    isArray = (value and 0x02) == 0
+                    if ((value and 0x01) == 0) isArray = (value and 0x02) == 0
                 }
             }
         }

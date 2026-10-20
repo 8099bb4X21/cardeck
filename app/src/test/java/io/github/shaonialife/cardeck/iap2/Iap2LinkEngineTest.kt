@@ -25,6 +25,59 @@ class Iap2LinkEngineTest {
         assertTrue(phone.peerSynchronization?.sessions?.any { it.id == Iap2LinkEngine.SESSION_CONTROL } == true)
     }
 
+    /**
+     * 事件通道形态：车机只反复发 marker、一条同步包都不发（Honda HFT 2026-10-20 实测
+     * 60 秒 60 个 marker），说明它卡在探测态、在等**我们**的会话表。
+     * 已处于 NEGOTIATING 时 [Iap2LinkEngine.initiate] 必须仍能发出「marker + FF5A SYN」，
+     * 双方随即收敛到 NORMAL——这是切歌按键通路的入口。
+     */
+    @Test
+    fun initiateFromNegotiatingSendsMarkerAndSynThenReachesNormal() {
+        val phone = Iap2LinkEngine()
+        val accessory = Iap2LinkEngine()
+        // 双方都是静默待命（只发 marker 不发起协商）
+        phone.enterNegotiating()
+        accessory.enterNegotiating()
+
+        phone.initiate(0)
+        val out = phone.takeOutput()
+        assertArrayEquals("首帧必须是 marker", Iap2LinkEngine.MARKER, out.copyOfRange(0, 6))
+        val frames = parseFrames(out)
+        assertEquals("marker 之后必须紧跟一条同步包", 1, frames.size)
+        assertTrue("同步包 control 必须带 SYN 位（0x80）", frames[0].control and 0x80 != 0)
+
+        // 车机侧收到「marker + 本表 SYN」→ 回 SYN|ACK（这就是日志里应当出现的推进）
+        accessory.feed(out, tick())
+        assertEquals("车机侧收到我们的会话表后必须进入 NORMAL", Iap2LinkEngine.State.NORMAL, accessory.state)
+        phone.feed(accessory.takeOutput(), tick())
+        assertEquals("实际 phone=${phone.state}", Iap2LinkEngine.State.NORMAL, phone.state)
+        assertTrue(
+            "双方都必须采纳对方的会话表",
+            phone.peerSynchronization != null && accessory.peerSynchronization != null,
+        )
+    }
+
+    /**
+     * 轮次用尽后必须能停手：控制通道上无限 500ms 打点会把车机 CarPlay 栈刷懵，
+     * 所以上层按轮次重开、轮次用尽后调 [Iap2LinkEngine.stopNegotiationRetries]。
+     * 停手后不得再产出任何出站字节，状态保持 NEGOTIATING（等车机自己发 CSM）。
+     */
+    @Test
+    fun stopNegotiationRetriesSilencesResends() {
+        val phone = Iap2LinkEngine()
+        phone.enterNegotiating()
+        phone.initiate(0)
+        phone.takeOutput()
+
+        phone.advanceTime(1_000L)
+        assertTrue("未停手时必须仍在重发 marker/同步包", phone.takeOutput().isNotEmpty())
+
+        phone.stopNegotiationRetries()
+        phone.advanceTime(60_000L)
+        assertTrue("停手后不得再有任何出站字节", phone.takeOutput().isEmpty())
+        assertEquals(Iap2LinkEngine.State.NEGOTIATING, phone.state)
+    }
+
     @Test
     fun controlPayloadRoundTripBothDirections() {
         val phone = Iap2LinkEngine()

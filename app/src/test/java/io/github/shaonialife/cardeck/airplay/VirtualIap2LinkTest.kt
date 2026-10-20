@@ -157,13 +157,37 @@ class VirtualIap2LinkTest {
         assertTrue(h.eventSent.isEmpty())
     }
 
+    /**
+     * Honda HFT（2026-10-20 实测）：车机在事件通道上 1Hz 反复发 marker，说明它卡在
+     * 探测态、在等**我们**的会话表。连着第 2 个 marker 起必须升级为「marker + 本表
+     * 同步包」，且**只能走控制通道**——出站写在事件通道上车机不读（r6 踩过的坑）。
+     */
     @Test
-    fun armedMarkersAreIgnoredWhileWaitingForSyn() {
+    fun repeatedMarkersUpgradeToControlChannelHandshake() {
         val h = Harness()
         h.link.armMib3()
-        val sentBefore = h.controlSent.size
-        repeat(3) { h.link.onCarBytes(Iap2LinkEngine.MARKER) }
-        assertEquals(sentBefore, h.controlSent.size)
+        val detect = h.controlSent.size
+        // 第 1 个：还不判定（MIB3 会再发一次探测重发）
+        h.link.onCarBytes(Iap2LinkEngine.MARKER)
+        assertEquals("首个 marker 不应额外发字节", detect, h.controlSent.size)
+        // 第 2 个：升级为 marker + 同步包
+        h.link.onCarBytes(Iap2LinkEngine.MARKER)
+        val sent = h.controlSent.drop(detect)
+        assertTrue("重复 marker 后必须补发协商字节", sent.isNotEmpty())
+        val payload = sent.fold(ByteArray(0)) { acc, bytes -> acc + bytes }
+        assertTrue(
+            "补发的第一批必须含 marker（FF 55）",
+            payload.size >= 6 && payload[0] == 0xFF.toByte() && payload[1] == 0x55.toByte(),
+        )
+        assertTrue(
+            "marker 之后必须紧跟 FF5A 会话表（车机等的就是它）",
+            payload.size >= 12 && payload[6] == 0xFF.toByte() && payload[7] == 0x5A.toByte(),
+        )
+        assertTrue(
+            "会话表必须带 SYN 位（0x80）",
+            (payload[10].toInt() and 0x80) != 0,
+        )
+        assertTrue("出站绝不能落到事件通道", h.eventSent.isEmpty())
     }
 
     @Test
@@ -271,5 +295,26 @@ class VirtualIap2LinkTest {
                 .map { it.second }
                 .containsAll(listOf(0xAA05, 0x4E0C, 0xFFFA)),
         )
+    }
+
+    /**
+     * 0x6802 取参数：本田 HFT 实测帧 `00 06 00 00 00 03 | 00 05 00 01 04`。
+     *
+     * param 0 恒为 `00 03`（报告类型），param 1 才是 HID 报文（0x04 = 下一首）。
+     * 旧实现取「第一个短参数」→ 永远拿到 00 03 → 位图全 0 → 按键点不出动作。
+     */
+    @Test
+    fun hidReportComesFromParamOneNotParamZero() {
+        // 单行书写：ktlint 对该规则要求「多行则一参数一行」，单行更贴近原始帧的可读形式
+        val body = byteArrayOf(0x00, 0x06, 0x00, 0x00, 0x00, 0x03, 0x00, 0x05, 0x00, 0x01, 0x04)
+        val report = VirtualIap2Link.hidReportFromParams(Iap2Csm.parseParams(body))
+        assertEquals(listOf<Byte>(0x04), report?.toList())
+    }
+
+    @Test
+    fun hidReportFallsBackToLastShortParamWhenOnlyOneGiven() {
+        val body = byteArrayOf(0x00, 0x05, 0x00, 0x00, 0x08)
+        val report = VirtualIap2Link.hidReportFromParams(Iap2Csm.parseParams(body))
+        assertEquals(listOf<Byte>(0x08), report?.toList())
     }
 }
