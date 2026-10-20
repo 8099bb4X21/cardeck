@@ -238,32 +238,86 @@ object BinaryPlist {
 
     // ---- 解析 ----
 
+    /** 解析结果 + 恢复说明（发生过裁剪时 note 非空，正常解析为 null）。 */
+    class ParseResult(
+        val value: Any?,
+        val note: String?,
+    )
+
+    /**
+     * 容错解析：先按标准布局解析；失败时依次裁掉尾部 1~8 字节重试。
+     *
+     * 车机的 RTSP 报文有时在 `Content-Length` 之外还带尾随字节（CRLF / 填充），
+     * bplist 的 trailer 是**从末尾倒数 32 字节**定位的，多一个字节就整体错位——
+     * 表现为「body 明明是合法 bplist00 却解析失败」。裁尾重试能把这种报文救回来，
+     * 且失败时抛出的是原始异常的详细信息（trailer 摘要已带在 message 里）。
+     */
+    fun parseRecovered(bytes: ByteArray): ParseResult {
+        val first = runCatching { parse(bytes) }
+        first.getOrNull()?.let { return ParseResult(it, null) }
+        if (first.isSuccess) return ParseResult(null, null)
+        val failure = first.exceptionOrNull() ?: IllegalArgumentException("解析失败")
+        if (bytes.size >= 48) {
+            for (trim in 1..8) {
+                if (bytes.size - trim < 40) break
+                val attempt = runCatching { parse(bytes.copyOfRange(0, bytes.size - trim)) }
+                if (attempt.isSuccess) {
+                    return ParseResult(attempt.getOrThrow(), "尾部多 $trim 字节（裁掉后解析成功）")
+                }
+            }
+        }
+        throw failure as? IllegalArgumentException
+            ?: IllegalArgumentException("${failure.javaClass.simpleName}: ${failure.message}")
+    }
+
     fun parse(bytes: ByteArray): Any? {
-        require(bytes.size >= 40) { "plist 太短（${bytes.size} 字节）" }
-        require(
-            bytes[0] == 0x62.toByte() &&
-                bytes[1] == 0x70.toByte() &&
-                bytes[2] == 0x6C.toByte() &&
-                bytes[3] == 0x69.toByte() &&
-                bytes[4] == 0x73.toByte() &&
-                bytes[5] == 0x74.toByte() &&
-                bytes[6] == 0x30.toByte() &&
-                bytes[7] == 0x30.toByte(),
-        ) { "不是 bplist00" }
+        if (bytes.size < 40) throw IllegalArgumentException("plist 太短（${bytes.size} 字节）")
+        val magic = "bplist00".toByteArray(Charsets.US_ASCII)
+        if (!bytes.copyOfRange(0, 8).contentEquals(magic)) {
+            throw IllegalArgumentException(
+                "不是 bplist00（首 8 字节 " + bytes.take(8).joinToString(" ") { "%02x".format(it) } + "）",
+            )
+        }
 
         // 尾部 32 字节 trailer：unused(6) offsetIntSize(1) objectRefSize(1) numObjects(8) topObject(8) offsetTableOffset(8)
         val offsetIntSize = u8(bytes[bytes.size - 26])
         val objectRefSize = u8(bytes[bytes.size - 25])
-        val numObjects = readUint(bytes, bytes.size - 24, 8).toInt()
-        val topObject = readUint(bytes, bytes.size - 16, 8).toInt()
-        val offsetTableOffset = readUint(bytes, bytes.size - 8, 8).toInt()
-        require(topObject < numObjects) { "topObject 越界" }
+        val numObjects = readUint(bytes, bytes.size - 24, 8)
+        val topObject = readUint(bytes, bytes.size - 16, 8)
+        val offsetTableOffset = readUint(bytes, bytes.size - 8, 8)
+        val trailer =
+            "trailer{offsetIntSize=$offsetIntSize objectRefSize=$objectRefSize numObjects=$numObjects " +
+                "topObject=$topObject offsetTableOffset=$offsetTableOffset body=${bytes.size}B}"
+        if (offsetIntSize !in 1..8 || objectRefSize !in 1..8) {
+            throw IllegalArgumentException("trailer 字段不合法 $trailer")
+        }
+        if (numObjects <= 0 || numObjects > MAX_OBJECTS) {
+            throw IllegalArgumentException("对象数非法 $trailer")
+        }
+        if (topObject >= numObjects) throw IllegalArgumentException("根对象下标越界 $trailer")
+        if (offsetTableOffset < 9 ||
+            offsetTableOffset + numObjects * offsetIntSize > bytes.size - 32
+        ) {
+            throw IllegalArgumentException("偏移表越界 $trailer")
+        }
 
+        val count = numObjects.toInt()
+        val tableOffset = offsetTableOffset.toInt()
         val offsets =
-            IntArray(numObjects) { index ->
-                readUint(bytes, offsetTableOffset + index * offsetIntSize, offsetIntSize).toInt()
+            IntArray(count) { index ->
+                readUint(bytes, tableOffset + index * offsetIntSize, offsetIntSize).toInt()
             }
-        return parseObject(bytes, offsets[topObject], objectRefSize, offsets)
+        return try {
+            parseObject(bytes, offsets[topObject.toInt()], objectRefSize, offsets)
+        } catch (error: IllegalArgumentException) {
+            throw error
+        } catch (error: IndexOutOfBoundsException) {
+            throw IllegalArgumentException("读取越界（$trailer，${error.message}）")
+        } catch (error: NegativeArraySizeException) {
+            throw IllegalArgumentException("长度字段为负（$trailer）")
+        } catch (error: OutOfMemoryError) {
+            throw IllegalArgumentException("长度字段过大（$trailer）")
+        }
     }
 
     private fun parseObject(
@@ -297,6 +351,9 @@ object BinaryPlist {
                     else -> null
                 }
 
+            0x3 -> // 日期：CFAbsoluteTime（2001-01-01 起算的秒数），按 Double 原样返回
+                Double.fromBits(readUint(bytes, offset + 1, 8))
+
             0x4 -> { // data
                 val (count, start) = elementCount(bytes, offset, info)
                 bytes.copyOfRange(start, start + count)
@@ -312,7 +369,19 @@ object BinaryPlist {
                 String(bytes, start, count * 2, Charsets.UTF_16BE)
             }
 
-            0x8 -> readUint(bytes, offset + 1, refSize) // UID
+            0x7 -> { // UTF-8 字符串（bplist 0x7 号类型，部分编码器会写）
+                val (count, start) = elementCount(bytes, offset, info)
+                String(bytes, start, count, Charsets.UTF_8)
+            }
+
+            // UID：长度由 info 决定（info+1 字节），**不是** refSize——按 refSize 读会在
+            // refSize>1 时多吃掉后续字节，把整条 plist 的对象指针读歪。
+            0x8 -> readUint(bytes, offset + 1, info + 1)
+
+            0xB -> { // UUID（16 字节定长）
+                val size = info + 1
+                bytes.copyOfRange(offset + 1, minOf(offset + 1 + size, bytes.size))
+            }
 
             0xA, 0xC -> { // array / set
                 val (count, start) = elementCount(bytes, offset, info)
@@ -349,31 +418,42 @@ object BinaryPlist {
         info: Int,
     ): Pair<Int, Int> {
         if (info != 0xF) return info to offset + 1
+        if (offset + 1 >= bytes.size) {
+            throw IllegalArgumentException("长度字节缺失（offset=$offset body=${bytes.size}B）")
+        }
         val intMarker = u8(bytes[offset + 1])
-        require(intMarker ushr 4 == 0x1) { "期望长度 int 对象，得到 0x${intMarker.toString(16)}" }
+        if (intMarker ushr 4 != 0x1) {
+            throw IllegalArgumentException(
+                "期望长度 int 对象，得到 0x${intMarker.toString(16)}（offset=$offset " +
+                    "上下文=" + bytes.copyOfRange(offset, minOf(offset + 8, bytes.size))
+                        .joinToString(" ") { "%02x".format(it) } + "）",
+            )
+        }
         val intSize = 1 shl (intMarker and 0xF)
         // 扩展长度必须按**无符号**读：DiPlay 发 182B 的 data 时写 0xB6，按有符号读成
-        // -74，copyOfRange(51, -23) 直接抛 IAE——整条 iAPSendMessage 命令被当
+        // -74，copyOfRange(51, -23) 直接抛 IAE——整条 iAPSendMessage 命令会被当
         // 「无法识别」丢弃（2026-10-20 实测定位，与整数负号扩展是同一族 bug）
-        val count = readUint(bytes, offset + 2, intSize).toInt()
-        return count to offset + 2 + intSize
+        val count = readUint(bytes, offset + 2, intSize)
+        if (count < 0 || count > MAX_OBJECTS) {
+            throw IllegalArgumentException("长度字段非法（count=$count offset=$offset）")
+        }
+        return count.toInt() to offset + 2 + intSize
     }
 
-    private fun readSigned(
-        bytes: ByteArray,
-        offset: Int,
-        size: Int,
-    ): Long {
-        var value = if (size > 0 && bytes[offset].toInt() and 0x80 != 0) -1L else 0L
-        repeat(size) { value = (value shl 8) or u8(bytes[offset + it]).toLong() }
-        return value
-    }
+    private const val MAX_OBJECTS = 1 shl 20
 
     private fun readUint(
         bytes: ByteArray,
         offset: Int,
         size: Int,
     ): Long {
+        if (size < 0 || size > 8) throw IllegalArgumentException("读取宽度非法（size=$size offset=$offset）")
+        if (offset < 0 || offset + size > bytes.size) {
+            throw IllegalArgumentException(
+                "读取越界（offset=$offset size=$size body=${bytes.size}B）——" +
+                    "trailer 与报文实际长度不一致时会出现",
+            )
+        }
         var value = 0L
         repeat(size) { value = (value shl 8) or u8(bytes[offset + it]).toLong() }
         return value
