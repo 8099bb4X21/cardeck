@@ -283,7 +283,12 @@ object BinaryPlist {
                     else -> null
                 }
 
-            0x1 -> readSigned(bytes, offset + 1, 1 shl info)
+            // 整数一律按**无符号**解读：接收端（车机）会把位图/微秒/采样率写进
+            // 2 字节 int，值超过 32767 时按有符号读会变成负数（实测 44100 → -21436、
+            // 35000us → -30536、0x8854 → -30636）。位图字段一旦被符号扩展，高 16 位
+            // 全部变成 1，任何 >bit15 的格式位都会「看起来被声明」——协商就会挑到
+            // 车机根本不支持的格式。
+            0x1 -> readUint(bytes, offset + 1, 1 shl info)
 
             0x2 ->
                 when (info) {
