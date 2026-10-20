@@ -1192,8 +1192,10 @@ class AirPlayClient(
     }
 
     /** 应答体的十六进制前缀（诊断用，截断到 24 字节）。 */
-    private fun hexPrefix(bytes: ByteArray): String =
-        bytes.take(24).joinToString(" ") { "%02x".format(it) } + if (bytes.size > 24) "…" else ""
+    private fun hexPrefix(
+        bytes: ByteArray,
+        limit: Int = 24,
+    ): String = bytes.take(limit).joinToString(" ") { "%02x".format(it) } + if (bytes.size > limit) "…" else ""
 
     /** 应答体是否是 iAP2 链路帧（marker 0xFF55 / 同步包 0xFF5A）。 */
     private fun looksLikeIapLink(bytes: ByteArray): Boolean =
@@ -1909,7 +1911,13 @@ class AirPlayClient(
                             val parsed =
                                 try {
                                     BinaryPlist.parse(message.body)
-                                } catch (_: IllegalArgumentException) {
+                                } catch (error: Exception) {
+                                    // 解析器对畸形 body 可能抛任意运行时异常（实测
+                                    // StringIndexOutOfBounds）——绝不能让它逃出去杀死
+                                    // 事件读线程（触摸/保活全丢、会话随后被拆）
+                                    if (badEventCommands == 0) {
+                                        log("EVENT: 命令解析异常 - ${error.javaClass.simpleName}: ${error.message}")
+                                    }
                                     null
                                 }
                             val command = parsed as? Map<*, *>
@@ -1922,7 +1930,7 @@ class AirPlayClient(
                                     log(
                                         "EVENT: 命令无法识别 [$firstLine] body=${message.body.size}B " +
                                             "解析=${parsed?.javaClass?.simpleName ?: "失败"} " +
-                                            "hex=" + hexPrefix(message.body),
+                                            "hex=" + hexPrefix(message.body, 96),
                                     )
                                 }
                                 continue
