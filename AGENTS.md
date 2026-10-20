@@ -434,6 +434,13 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   无法读取）；② 视频/音频/keepAlive 的 host 一律取 `client.currentEndpoint`（配对期间
   mDNS 刷新过的真实连接地址），不要用解析阶段的 `effectiveEndpoint` 旧值。
   单测 `nulPaddedAddressesAreStrippedCompletely` 用真实填充宽度锁住这一行为。
+- **回退（应用侧 PUBLIC 屏）形态也必须建地图屏**（2026-10-20 华为 Mate30Pro/EMUI12
+  实测）：EMUI 对 shell 侧 `createVirtualDisplay` **静默返回 null**（不抛异常）——受信
+  创建整体失败落回退分支，而回退分支历史上只建 dock/app/appHi 三屏、无地图，仪表盘
+  永远没有地图 tile（日志特征：`三屏创建(回退)` + 每轮 `地图屏未创建`）。修复后回退
+  分支同样建地图屏；**resize 分流**：受信形态走 shell `svc.resizeDisplay`，回退形态
+  必须用应用侧 `VirtualDisplay.resize()`（shell 对他人创建的 display 无 resize 权限，
+  token 属主校验）。诊断约定：受信创建失败要逐屏留痕（哪块屏 -1），不能只留「回退」。
 - **UserService 虚拟屏跨版本残留：三层收口**（2026-10-16 定谳，「重启后检测到残留屏、
   点清理却释放 0/N」根因）：Shizuku 按「组件+进程名+版本(APK lastUpdateTime)」复用常驻
   shell 进程——重装 APK 起新进程，旧进程 `am force-stop` 杀不掉（实测）、Shizuku 也不

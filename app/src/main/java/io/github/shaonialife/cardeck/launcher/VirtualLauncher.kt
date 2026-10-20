@@ -286,6 +286,9 @@ object VirtualLauncher {
     private var dockDisplay: VirtualDisplay? = null
     private var appDisplay: VirtualDisplay? = null
     private var appHiDisplay: VirtualDisplay? = null
+
+    /** 回退形态的地图屏句柄（受信形态经 shell 创建，无本进程句柄）。 */
+    private var mapDisplay: VirtualDisplay? = null
     private var composer: DualDisplayComposer? = null
 
     /** 当前活动应用屏 ID（TouchRouter 注入目标）。 */
@@ -527,6 +530,16 @@ object VirtualLauncher {
                         }
                         viaService = true
                     } else {
+                        // 逐屏留痕：EMUI 等 ROM 对 shell 侧 createVirtualDisplay 是**静默
+                        // 返回 null**（不抛异常）——整体回退时不打这条，日志里只剩
+                        // 「回退」两个字，无法判断是哪块屏被拒（华为 Mate30Pro/EMUI12
+                        // 2026-10-20 实测定位）
+                        if (dockId < 0) {
+                            log("LAUNCHER: 受信屏 CarPlayDock 创建失败（createVirtualDisplay 返回 null——ROM 限制 shell 侧虚拟屏？）")
+                        }
+                        if (appId < 0) {
+                            log("LAUNCHER: 受信屏 CarPlayApp 创建失败（同上）")
+                        }
                         // 半成功：释放已建的
                         if (dockId >= 0) runCatching { svc!!.releaseDisplay(dockId) }
                         if (appId >= 0) runCatching { svc!!.releaseDisplay(appId) }
@@ -600,6 +613,32 @@ object VirtualLauncher {
                     appHiDisplayW = appHiWidth
                     appHiDisplayH = appHiHeight
                 }
+                // 地图屏同样建（应用侧 PUBLIC）：地图启动走 shell `am start --display`，
+                // 不需要受信；resize 用应用侧公开 API（见 resizeMapDisplay）。
+                // 回退形态曾完全不建地图屏——受信创建在 EMUI12 上静默失败后，仪表盘
+                // 就永远没有地图 tile（2026-10-20 华为 Mate30Pro 实测）。
+                if (mapSurface != null) {
+                    mapDisplay =
+                        dm.createVirtualDisplay(
+                            "CarPlayMap",
+                            appWidth,
+                            appHeightPx,
+                            MAP_DISPLAY_DPI,
+                            mapSurface,
+                            DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
+                                DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                            null,
+                            null,
+                        )
+                    val fallbackMapId = mapDisplay?.display?.displayId ?: -1
+                    if (fallbackMapId >= 0) {
+                        mapDisplayId = fallbackMapId
+                        mapDisplayW = appWidth
+                        mapDisplayH = appHeightPx
+                    } else {
+                        log("LAUNCHER: 地图屏（回退）创建失败——仪表盘无地图 tile")
+                    }
+                }
                 dockDisplayId = dockDisplay?.display?.displayId ?: -1
                 appDisplayId = appDisplay?.display?.displayId ?: -1
                 appDisplayW = appWidth
@@ -607,7 +646,8 @@ object VirtualLauncher {
                 log(
                     "LAUNCHER: 三屏创建(回退) dock=$dockDisplayId(${dockWidthPx}px) " +
                         "app=$appDisplayId(${appWidth}x$appHeightPx @${appNativeDensity}dpi) " +
-                        "appHi=$appHiDisplayId(${appHiWidth}x$appHiHeight @${appHiDensity}dpi scale=x$appScaleFactor)",
+                        "appHi=$appHiDisplayId(${appHiWidth}x$appHiHeight @${appHiDensity}dpi scale=x$appScaleFactor) " +
+                        "map=$mapDisplayId(${mapDisplayW}x$mapDisplayH)——受信屏不可用，已回退应用侧 PUBLIC 屏",
                 )
             }
             displaysCreated[0] = dockDisplayId >= 0 && appDisplayId >= 0
@@ -713,6 +753,8 @@ object VirtualLauncher {
         appDisplay = null
         runCatching { appHiDisplay?.release() }
         appHiDisplay = null
+        runCatching { mapDisplay?.release() }
+        mapDisplay = null
         dockDisplayId = -1
         appDisplayId = -1
         appHiDisplayId = -1
@@ -878,11 +920,20 @@ object VirtualLauncher {
         val w = if (fullscreen) appAreaWidth else mapTileWidth
         val h = if (fullscreen) appAreaHeight else mapTileHeight
         if (w <= 0 || h <= 0 || (w == mapDisplayW && h == mapDisplayH)) return
-        val svc =
-            CarInputClient.service
-                ?: return
         runCatching {
-            if (svc.resizeDisplay(id, w, h, MAP_DISPLAY_DPI)) {
+            val applied =
+                if (displaysViaService) {
+                    // 受信形态：shell 侧 resize
+                    val svc = CarInputClient.service ?: return@runCatching
+                    svc.resizeDisplay(id, w, h, MAP_DISPLAY_DPI)
+                } else {
+                    // 回退形态：屏由本应用创建，直接用应用侧公开 API——shell 对
+                    // 他人创建的 display 没有 resize 权限（token 属主校验）
+                    val display = mapDisplay ?: return@runCatching
+                    display.resize(w, h, MAP_DISPLAY_DPI)
+                    true
+                }
+            if (applied) {
                 mapDisplayW = w
                 mapDisplayH = h
                 // 消费端 buffer 尺寸必须同步——否则新尺寸内容画进旧 buffer 左上区域
