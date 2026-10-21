@@ -100,6 +100,12 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        // 协议层回放测试驱动真实 AirPlayClient，request() 里的 SystemClock 等
+        // android 调用在 JVM 上返回默认值即可（否则 "not mocked" 直接炸）
+        unitTests.isReturnDefaultValues = true
+    }
+
     lint {
         // 新代码引入 lint 问题（error 级）直接使构建失败；存量问题在基线文件中豁免。
         //  ./gradlew :app:lintDebug          —— 检查（pre-commit 钩子提交前自动执行）
