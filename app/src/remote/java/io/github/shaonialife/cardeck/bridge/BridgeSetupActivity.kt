@@ -14,11 +14,18 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import io.github.shaonialife.cardeck.ui.DarkMessageDialog
 import io.github.shaonialife.cardeck.util.Bg
+import java.io.File
+import java.lang.ref.WeakReference
 
 /**
  * 远程调试设置页（remote 变体的第二个桌面入口）：
  * 填服务器地址与配对码 → 连接；展示连接状态；引导悬浮窗/安装权限。
+ *
+ * 兼任调试弹窗宿主：APK 安装确认、重装后续接询问等**必须用正规弹窗**
+ * （DarkMessageDialog）——悬浮窗易被忽略（用户实测反馈）。App 后台时由
+ * [ReinstallFlow]/[BridgeApp] 带参拉起本页（EXTRA_PROMPT），onCreate/onNewIntent 弹。
  */
 class BridgeSetupActivity : AppCompatActivity() {
     private val refresh = Handler(Looper.getMainLooper())
@@ -57,12 +64,17 @@ class BridgeSetupActivity : AppCompatActivity() {
                 setText(BridgePrefs.serverUrl(this@BridgeSetupActivity))
                 imeOptions = EditorInfo.IME_ACTION_NEXT
                 setSingleLine()
+                // 主题默认字色是黑，深色窗口上不可见（用户实测），必须显式给亮色
+                setTextColor(0xFFE0E0E5.toInt())
+                setHintTextColor(0xFF8A9099.toInt())
             }
         val codeInput =
             EditText(this).apply {
                 hint = "6 位配对码（服务器控制台显示）"
                 setText(BridgePrefs.pairCode(this@BridgeSetupActivity))
                 setSingleLine()
+                setTextColor(0xFFE0E0E5.toInt())
+                setHintTextColor(0xFF8A9099.toInt())
             }
         val connect =
             Button(this).apply {
@@ -94,6 +106,20 @@ class BridgeSetupActivity : AppCompatActivity() {
                 setOnClickListener {
                     BridgePrefs.setAutoConnect(this@BridgeSetupActivity, false)
                     BridgeClient.stop()
+                }
+            }
+        val openMain =
+            Button(this).apply {
+                text = "打开主界面"
+                setOnClickListener {
+                    runCatching {
+                        startActivity(
+                            Intent().setClassName(
+                                packageName,
+                                "io.github.shaonialife.cardeck.MainActivity",
+                            ),
+                        )
+                    }
                 }
             }
         val installPerm =
@@ -143,21 +169,112 @@ class BridgeSetupActivity : AppCompatActivity() {
                 gravity = Gravity.START
                 addView(connect)
                 addView(disconnect)
+                addView(openMain)
             },
             installPerm,
             statusText!!,
             label(""),
             note,
         ).forEach { view -> root.addView(view) }
+
+        handlePromptIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handlePromptIntent(intent)
     }
 
     override fun onResume() {
         super.onResume()
+        resumedRef = WeakReference(this)
         refresh.post(ticker)
     }
 
     override fun onPause() {
         super.onPause()
+        if (resumedRef?.get() === this) resumedRef = null
         refresh.removeCallbacks(ticker)
+    }
+
+    /** 带参拉起时弹对应的正规弹窗（App 后台时安装确认/重装续接走这条路）。 */
+    private fun handlePromptIntent(intent: Intent?) {
+        when (intent?.getStringExtra(EXTRA_PROMPT)) {
+            "install" -> {
+                val path = intent.getStringExtra("apkPath") ?: return
+                val version = intent.getStringExtra("version") ?: "?"
+                promptInstall(File(path), version)
+            }
+            "resume" -> promptResume()
+        }
+    }
+
+    /** 新版本安装确认（正规弹窗；悬浮窗形式已被用户反馈否决）。 */
+    fun promptInstall(
+        file: File,
+        version: String,
+    ) {
+        if (!file.exists()) return
+        DarkMessageDialog.show(
+            this,
+            title = "安装调试新版本",
+            message =
+                "v$version（${file.length() / 1024 / 1024}MB）已下载并校验通过。\n" +
+                    "安装将断开当前车机连接，完成后会询问是否继续调试。",
+            actions =
+                listOf(
+                    DarkMessageDialog.Action("取消") {},
+                    DarkMessageDialog.Action(
+                        "安装",
+                        emphasis = DarkMessageDialog.Emphasis.PRIMARY,
+                    ) {
+                        ReinstallFlow.installNow(this, file)
+                    },
+                ),
+        )
+    }
+
+    /** 重装后的续接询问。 */
+    fun promptResume() {
+        DarkMessageDialog.show(
+            this,
+            title = "继续进入调试模式？",
+            message = "调试版已更新完成。继续后将自动连回调试服务器。",
+            actions =
+                listOf(
+                    DarkMessageDialog.Action("以后再说") {
+                        BridgePrefs.setResumePending(this@BridgeSetupActivity, false)
+                    },
+                    DarkMessageDialog.Action(
+                        "继续",
+                        emphasis = DarkMessageDialog.Emphasis.PRIMARY,
+                    ) {
+                        BridgePrefs.setResumePending(this@BridgeSetupActivity, false)
+                        Bg.run("bridge-start") { BridgeClient.start(this@BridgeSetupActivity) }
+                    },
+                ),
+        )
+    }
+
+    companion object {
+        private const val EXTRA_PROMPT = "prompt"
+
+        /** 当前已 resume 的实例（弱引用防泄漏）：调试弹窗需要有前台的 Activity 宿主。 */
+        @Volatile
+        private var resumedRef: WeakReference<BridgeSetupActivity>? = null
+
+        fun resumed(): BridgeSetupActivity? = resumedRef?.get()
+
+        /** 供 App 后台场景带参拉起本页并弹续接询问。 */
+        fun startForResume(context: android.content.Context) {
+            runCatching {
+                context.startActivity(
+                    Intent()
+                        .setClassName(context.packageName, ReinstallFlow.SETUP_ACTIVITY)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        .putExtra(EXTRA_PROMPT, "resume"),
+                )
+            }
+        }
     }
 }

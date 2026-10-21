@@ -13,20 +13,14 @@ class BridgeApp : SenderApp() {
     override fun onCreate() {
         super.onCreate()
         DebugFileLog.append(this, "BRIDGE: 远程调试变体启动（${io.github.shaonialife.cardeck.BuildConfig.VERSION_NAME}）")
+        // 先清掉卡死的旧安装会话（防堵后续安装），再决定连接/续接
+        Bg.run("bridge-clean-sessions") { ReinstallFlow.abandonStaleSessions(this) }
 
-        // 重装后的续接：上次安装前置位 → 询问是否继续进入调试模式
+        // 重装后的续接：上次安装前置位 → 拉起设置页弹「继续进入调试模式？」
+        // （正规弹窗而非悬浮窗——悬浮窗易被忽略，用户实测反馈）
         if (BridgePrefs.resumePending(this)) {
             DebugFileLog.append(this, "BRIDGE: 检测到重装前标记——询问是否继续调试")
-            val ctx = this
-            BridgeOverlay.show(
-                ctx,
-                "继续进入调试模式？",
-                buttonText = "继续",
-                onClick = {
-                    BridgePrefs.setResumePending(ctx, false)
-                    Bg.run("bridge-start") { BridgeClient.start(ctx) }
-                },
-            )
+            BridgeSetupActivity.startForResume(this)
         } else if (BridgePrefs.autoConnect(this) && BridgePrefs.serverUrl(this).isNotBlank()) {
             Bg.run("bridge-start") { BridgeClient.start(this) }
         }

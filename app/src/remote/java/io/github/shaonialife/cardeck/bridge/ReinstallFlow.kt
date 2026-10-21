@@ -3,6 +3,7 @@ package io.github.shaonialife.cardeck.bridge
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInstaller
 import android.os.Handler
 import android.os.Looper
 import io.github.shaonialife.cardeck.SessionController
@@ -23,6 +24,25 @@ import java.security.MessageDigest
 object ReinstallFlow {
     private val main = Handler(Looper.getMainLooper())
 
+    /** 设置页组件（绝对类名，am/intent 用；applicationId 后缀不影响）。 */
+    const val SETUP_ACTIVITY = "io.github.shaonialife.cardeck.bridge.BridgeSetupActivity"
+
+    /**
+     * 清理本应用名下卡死的安装会话。旧版本收不到 PENDING_USER_ACTION 广播
+     * （receiver 无 intent-filter）时，确认无人拉起、会话永远停在 Active，
+     * 还会堵住后续安装（2026-10-21 实测：会话挂死后连续两次安装「成功」却没装上）。
+     * App 启动时调用，只影响自己创建的会话。
+     */
+    fun abandonStaleSessions(context: Context) {
+        runCatching {
+            val installer = context.packageManager.packageInstaller
+            installer.mySessions.forEach { info ->
+                runCatching { installer.abandonSession(info.sessionId) }
+                DebugFileLog.append(context, "BRIDGE: 清理遗留安装会话 ${info.sessionId}")
+            }
+        }
+    }
+
     fun offer(
         context: Context?,
         url: String,
@@ -33,7 +53,8 @@ object ReinstallFlow {
         if (url.isBlank()) return
         DebugFileLog.append(ctx, "BRIDGE: 收到新版本推送 v$version，开始下载 $url")
         Bg.run("bridge-apk-download") {
-            val file = download(ctx, url)
+            // 大包跨公网传输可能中途断流（蜂窝弱信号实测），重试一次
+            val file = download(ctx, url) ?: download(ctx, url)
             if (file == null) {
                 DebugFileLog.append(ctx, "BRIDGE: APK 下载失败：$url")
                 return@run
@@ -45,18 +66,40 @@ object ReinstallFlow {
                 return@run
             }
             DebugFileLog.append(ctx, "BRIDGE: 新版本 v$version 就绪（${file.length() / 1024 / 1024}MB，sha256 ✓）")
-            main.post {
-                BridgeOverlay.show(
-                    ctx,
-                    "调试新版本 v$version 已就绪",
-                    buttonText = "安装",
-                    onClick = { installNow(ctx, file) },
-                )
+            promptInstallReady(ctx, file, version)
+        }
+    }
+
+    /**
+     * 新版本就绪后的安装确认：**正规弹窗**（DarkMessageDialog），不用悬浮窗——
+     * 悬浮窗易被忽略且点按目标小（用户实测反馈）。前台没有自己的 Activity 时
+     * 带参拉起设置页，由它在 onCreate/onNewIntent 里弹。
+     */
+    private fun promptInstallReady(
+        ctx: Context,
+        file: File,
+        version: String,
+    ) {
+        main.post {
+            val activity = BridgeSetupActivity.resumed()
+            if (activity != null) {
+                activity.promptInstall(file, version)
+            } else {
+                runCatching {
+                    ctx.startActivity(
+                        Intent()
+                            .setClassName(ctx.packageName, SETUP_ACTIVITY)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            .putExtra("prompt", "install")
+                            .putExtra("apkPath", file.absolutePath)
+                            .putExtra("version", version),
+                    )
+                }
             }
         }
     }
 
-    private fun installNow(
+    fun installNow(
         ctx: Context,
         file: File,
     ) {
@@ -67,7 +110,12 @@ object ReinstallFlow {
         Bg.run("bridge-install") {
             try {
                 val installer = ctx.packageManager.packageInstaller
-                val session = installer.openSession(0)
+                // 必须先 createSession 拿到会话 id 再 openSession——直接 openSession(0)
+                // 会抛 SecurityException「Caller has no access to session 0」
+                // （2026-10-21 真机实测：悬浮窗点了没反应，安装从未发起）
+                val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+                val sessionId = installer.createSession(params)
+                val session = installer.openSession(sessionId)
                 session.openWrite("apk", 0, file.length()).use { out ->
                     file.inputStream().use { it.copyTo(out) }
                 }
@@ -96,16 +144,25 @@ object ReinstallFlow {
         url: String,
     ): File? {
         return try {
-            val connection = URL(url).openConnection() as HttpURLConnection
+            val target = URL(url)
+            // 优先绑定蜂窝网络下载：会话进行中推新版本时，进程默认网络在车机热点上
+            // （无互联网），HttpURLConnection 默认路由必然失败
+            val connection =
+                (
+                    BridgeClient
+                        .internetNetwork()
+                        ?.let { net -> runCatching { net.openConnection(target) }.getOrNull() }
+                        ?: target.openConnection()
+                ) as HttpURLConnection
             connection.connectTimeout = 10_000
             connection.readTimeout = 60_000
             connection.instanceFollowRedirects = true
             if (connection.responseCode !in 200..299) return null
-            val target = File(ctx.cacheDir, "bridge-update.apk")
+            val file = File(ctx.cacheDir, "bridge-update.apk")
             connection.inputStream.use { input ->
-                target.outputStream().use { output -> input.copyTo(output) }
+                file.outputStream().use { output -> input.copyTo(output) }
             }
-            target
+            file
         } catch (error: Exception) {
             DebugFileLog.append(ctx, "BRIDGE: 下载异常 - ${error.message}")
             null

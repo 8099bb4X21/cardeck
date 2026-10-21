@@ -761,6 +761,17 @@ class MainActivity : AppCompatActivity() {
             showDisclaimer(requireAcceptance = false)
         }
 
+        // ---- 远程调试入口：仅 remote 调试包存在该组件时显示（正式包 resolve 为 null，恒隐藏；
+        // 主代码不引用任何 bridge 类，靠组件探测实现 flavor 差异，调试代码零混入正式产物）----
+        val bridgeSetup =
+            Intent().setClassName(packageName, "io.github.shaonialife.cardeck.bridge.BridgeSetupActivity")
+        if (packageManager.resolveActivity(bridgeSetup, 0) != null) {
+            findViewById<LinearLayout>(R.id.btnBridgeSetup).visibility = View.VISIBLE
+            findViewById<LinearLayout>(R.id.btnBridgeSetup).setOnClickListener {
+                startActivity(bridgeSetup)
+            }
+        }
+
         // ---- Shizuku 状态行：未就绪时点它直接看引导（与「启动连接」被拦下同一套文案）----
         findViewById<LinearLayout>(R.id.rowShizuku).setOnClickListener {
             val state = ShizukuGate.state(this)

@@ -35,6 +35,10 @@ object BridgeClient {
     @Volatile
     private var ws: WsClient? = null
 
+    /** 蜂窝互联网通道：车机会话期间进程网络被绑到车机热点，调试桥必须走它。 */
+    @Volatile
+    private var route: InternetRoute? = null
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /** 环形日志缓冲（断线重连后按 seq 回补给服务端）。 */
@@ -53,6 +57,8 @@ object BridgeClient {
         installTap()
         if (running) return
         running = true
+        // 蜂窝通道必须先就位：首次连接就可能发生在车机会话里（进程网络已被绑走）
+        route = InternetRoute(context.applicationContext).also { it.start() }
         Thread({ runLoop() }, "bridge-client").apply {
             isDaemon = true
             start()
@@ -61,9 +67,15 @@ object BridgeClient {
 
     fun stop() {
         running = false
+        route?.stop()
+        route = null
         ws?.close(1000, "客户端停止")
         setState("已断开")
     }
+
+    /** 蜂窝互联网通道（供 APK 下载等复用）：车机会话期间进程默认网络被绑到
+     *  车机热点（无互联网），不走它的一切联网操作都会失败。 */
+    fun internetNetwork(): android.net.Network? = route?.current()
 
     private fun setState(text: String) {
         stateText = text
@@ -98,6 +110,10 @@ object BridgeClient {
                     object : WsClient.Listener {
                         override fun onOpen() {
                             setState("已连接，配对中…")
+                            // 协议由设备侧驱动：先发 hello（含配对码），服务端校验后才回
+                            // welcome——若等 welcome 再发 hello 会与服务端互等死锁，
+                            // 状态永远停在「配对中…」（首台真机实测踩到）
+                            sendHello()
                         }
 
                         override fun onText(text: String) = onServerMessage(text)
@@ -106,6 +122,8 @@ object BridgeClient {
                             setState("连接断开：$reason")
                         }
                     },
+                    // 每次重连读当前值：会话中途蜂窝才注册上也能在下一轮接上
+                    route?.current(),
                 )
             ws = client
             setState("连接中…")
@@ -141,7 +159,6 @@ object BridgeClient {
             "welcome" -> {
                 if (msg.optBoolean("ok")) {
                     setState("已连接（${msg.optLong("pairedAt")}）")
-                    sendHello()
                     // 全量回补：服务端按 seq 去重并留环形缓冲
                     sendLogBatch(since = 0)
                 } else {

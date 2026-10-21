@@ -643,6 +643,34 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   ① remote 变体的 Shizuku/通知使用权需单独授权（新包名）；② 重装前必须先
   `SessionController.disconnect` 释放虚拟屏（否则安装确认弹窗落车机侧没人点得到）；
   ③ 命令白名单扩充走 `BridgeCommands` 单点评审，禁止任意 shell。
+- **远程调试桥真机联调五雷**（2026-10-21 全链路打通时逐一定谳，含组件命名/网络/安装三族）：
+  ① **`.rd` 包下自启组件必须写「applicationId/绝对类名」**：`am -n` 只认带斜杠的规范，
+  相对类名按 applicationId 展开成不存在的 `…rd.launcher.DockActivity`、纯类名直接
+  `Bad component name`——两形态都让 dock/grid 启动失败、车机黑屏 0fps（standard 包
+  applicationId==命名空间从不暴露）。组件名一律 `X::class.java.name` 拼接，勿用
+  `context.packageName + 相对路径`。
+  ② **车机会话期间进程网络被绑到车机热点（无互联网）**，调试桥 WS/APK 下载在
+  「加入热点」毫秒级断掉——`InternetRoute`（remote）跟踪蜂窝网络兜底，socket/DNS
+  显式走蜂窝（`Network.socketFactory`/`getAllByName`）；但**默认网络 VALIDATED 时优先
+  默认**（室内 WiFi 环境强走蜂窝反而断流）。
+  ③ **WS 死连接**：蜂窝/NAT 静默断链无 FIN，读线程永久阻塞、重连循环卡死（实测断后
+  4 分钟不重连、桥侧设备假在线）——25s 心跳 ping + 75s soTimeout 必备。
+  ④ **握手协议由设备侧驱动**：先发 hello（含配对码）服务端才回 welcome，等 welcome
+  再发 hello = 互等死锁。
+  ⑤ **桥的 stdin 必须接 FIFO 而非 /dev/null**，否则 MCP（stdio）无法接收指令，
+  notify/cmd 全部不可用；`~/bin/cardeck-debug-up.sh` 已固化该模式。
+- **Honor 推送安装（PackageInstaller）的坑，四条全踩**（2026-10-21）：
+  ① 会话必须 `createSession` 拿 id 再 `openSession`——直接 `openSession(0)` 抛
+  「Caller has no access to session 0」；② 状态接收器在 manifest 里**必须带
+  intent-filter**（自定义 action 无过滤器 = 广播永远投递不到，PENDING_USER_ACTION
+  无人拉起、会话永挂 Active，还会堵死后续安装——App 启动时 `abandonStaleSessions`
+  自愈清理）；③ **相同 versionCode 的推送安装 Honor 直接「假成功」**（显示安装成功
+  但包不动，adb 路径无此行为）——**推送新包必须升 versionCode**（本项目由
+  appVersionName 推导，改版本号即可）；④ `adb install -r` 装的字节相同包在
+  PackageInstaller 眼里也不算数，测试推送闭环时**不要先 adb 装同一个文件**。
+  安装确认/续接询问用 DarkMessageDialog 正规弹窗（悬浮窗会被忽略，用户实测），
+  前台无 Activity 时带参拉起 BridgeSetupActivity 由它弹；调试包 manifest 开
+  `usesCleartextTraffic`（桥可能是纯 HTTP 部署）。
 - **仪表盘分屏拖拽（2026-10-22 落地）的四个跨会话结论**：
   ① **视觉与触达分层**：中缝视觉宽（`DASH_GAP_PX=24`）与把手触达宽
   （`DASH_HANDLE_TOUCH_PX=60`）是两个常量——把手/粘性路由域比缝宽、两侧压在

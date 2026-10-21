@@ -4,9 +4,12 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.SecureRandom
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLSocketFactory
 
 /**
@@ -24,6 +27,9 @@ import javax.net.ssl.SSLSocketFactory
 class WsClient(
     private val url: String,
     private val listener: Listener,
+    /** 显式联网通道（蜂窝）。车机会话期间进程默认路由被绑到无互联网的车机热点，
+     *  必须从该网络建 socket + 解析 DNS 才能保持调试桥在线（见 [InternetRoute]）。 */
+    private val network: android.net.Network? = null,
 ) {
     interface Listener {
         fun onOpen()
@@ -63,14 +69,31 @@ class WsClient(
                 ?: throw IOException("端口解析失败：$url")
         val path = hostPortPath.second.ifBlank { "/" }
 
-        val raw =
-            if (secure) {
-                val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-                factory.createSocket().also { s ->
-                    s.connect(InetSocketAddress(host, port), 8_000)
+        // 指定了网络时，DNS 也必须走该网络——系统默认 DNS 会落在车机热点上，解析公网域名失败
+        val address =
+            network?.let { n -> runCatching { n.getAllByName(host).firstOrNull() }.getOrNull() }
+                ?: InetAddress.getByName(host)
+        val plain =
+            network?.socketFactory?.createSocket()?.also { s ->
+                s.connect(InetSocketAddress(address, port), 8_000)
+            }
+                ?: run {
+                    val s =
+                        if (secure) {
+                            (SSLSocketFactory.getDefault() as SSLSocketFactory).createSocket()
+                        } else {
+                            Socket()
+                        }
+                    s.connect(InetSocketAddress(address, port), 8_000)
+                    s
                 }
+        val raw =
+            if (secure && network != null) {
+                // 已连接的明文 socket 上叠 TLS（host 用于 SNI；autoClose 关明文层）
+                (SSLSocketFactory.getDefault() as SSLSocketFactory)
+                    .createSocket(plain, host, port, true)
             } else {
-                Socket().also { it.connect(InetSocketAddress(host, port), 8_000) }
+                plain
             }
         raw.tcpNoDelay = true
         val input = BufferedInputStream(raw.getInputStream())
@@ -96,7 +119,26 @@ class WsClient(
         }
         alive = true
         listener.onOpen()
-        readLoop(input)
+        // 死连接检测：25s 心跳 + 75s 读超时。蜂窝/NAT 静默断链（无 FIN）时 read
+        // 永远阻塞、重连循环跟着卡死——2026-10-21 实测断后 4 分钟不重连，桥侧
+        // 设备长期「离线」。心跳周期远小于读超时，健康连接不会误杀。
+        socket?.soTimeout = 75_000
+        val heartbeat =
+            HEARTBEAT.scheduleAtFixedRate(
+                {
+                    if (!alive) return@scheduleAtFixedRate
+                    runCatching { sendFrame(OPCODE_PING, ByteArray(0), mask = true) }
+                        .onFailure { runCatching { socket?.close() } }
+                },
+                25,
+                25,
+                TimeUnit.SECONDS,
+            )
+        try {
+            readLoop(input)
+        } finally {
+            heartbeat.cancel(false)
+        }
     }
 
     private fun readUntilHeaderEnd(input: BufferedInputStream): String? {
@@ -284,5 +326,11 @@ class WsClient(
         const val OPCODE_CLOSE = 0x8
         const val OPCODE_PING = 0x9
         const val OPCODE_PONG = 0xA
+
+        /** 心跳调度器（单线程守护：连接数量级=1，不值得按连接建线程）。 */
+        val HEARTBEAT =
+            Executors.newSingleThreadScheduledExecutor { r ->
+                Thread(r, "ws-heartbeat").apply { isDaemon = true }
+            }
     }
 }
