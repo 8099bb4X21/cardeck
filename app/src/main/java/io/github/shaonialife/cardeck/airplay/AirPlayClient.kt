@@ -101,6 +101,19 @@ class AirPlayClient(
     var pairSetupRejected: Boolean = false
         private set
 
+    /**
+     * 配对期间**任意阶段**出现 403（pair-setup / pair-verify / 认证段）。
+     *
+     * 真机抓包定谳（2026-10-21 奥迪 MMI 3315_5GHz sysdiagnose）：真 iPhone 首次
+     * 连接在 pair-verify 通过后被车机 403 拒（MFi 认证段），车机 **18~20s 自行重发
+     * ctrl 邀请、第二次即成**，全程不断蓝牙。所以任何 403 都意味着「iAP2 信任已
+     * 建立的车机在等自己的状态机就绪」——此时断 BT 或降级明文会话都是反向操作，
+     * 正确姿势是窗口内保持原流程重试（主控按本标志避开两条歧路）。
+     */
+    @Volatile
+    var pairingForbidden: Boolean = false
+        private set
+
     /** 本轮是否真正开始过配对（TCP 连上过接收端）。DiPlay 断链 hack 的启用条件。 */
     @Volatile
     var attemptedPairing: Boolean = false
@@ -247,7 +260,10 @@ class AirPlayClient(
                     } catch (error: IOException) {
                         val message = error.message.orEmpty()
                         val forbidden = message.contains("403")
-                        if (forbidden) pairSetupRejected = true
+                        if (forbidden) {
+                            pairSetupRejected = true
+                            pairingForbidden = true
+                        }
                         val unsupported = PAIRING_UNSUPPORTED_STATUS.any { message.contains(it) }
                         log(
                             "AIRPLAY: pair-setup " +
@@ -283,6 +299,9 @@ class AirPlayClient(
                 return keys
             } catch (error: IOException) {
                 val message = error.message.orEmpty()
+                // verify/认证段的 403 与 pair-setup 403 同源（车机信任已建立），
+                // 见 pairingForbidden 注释：标记后主控不再断 BT / 不降级明文
+                if (message.contains("403")) pairingForbidden = true
                 log("AIRPLAY: 配对第 $attempt 次尝试失败 - $message")
                 if (PAIRING_UNSUPPORTED_STATUS.any { message.contains(it) }) {
                     pairingUnsupported = true
@@ -290,7 +309,10 @@ class AirPlayClient(
                     close()
                     return null
                 }
-                Thread.sleep(500)
+                // 403 退避（真机抓包：车机首连被拒后需 18~20s 才进入可接受状态，
+                // 期间高频重试除徒增车机负载外可能一直重置其就绪状态机）；
+                // 其余失败维持快速轮询等端口开放
+                Thread.sleep(if (message.contains("403")) 5_000 else 500)
             }
         }
         log("AIRPLAY: 配对最终失败（接收端 RTSP 无应答）")

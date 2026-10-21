@@ -587,3 +587,40 @@ down in ~12s with no picture."
 
 **AADisplay 参考索引**：`carplay/protocol/WifiIap2Link.kt`（时序+常量）、
 `CarPlayRtspSession.kt:642`（控制通道 POST /command 写法）、`docs/AUDI_CARPLAY_CONNECT_ANALYSIS.md`。
+
+## §13 真机 iPhone sysdiagnose 对照（2026-10-21/17，两车三份抓包）
+
+来源：iOS 24A446（18.x）sysdiagnose 的 unified log（airplayd/mDNSResponder），验证手段
+`/usr/bin/log show --archive system_logs.logarchive --predicate ...`（zsh 内建 `log` 会顶掉，必须全路径）。
+
+### 13a. 奥迪 MMI 3315_5GHz ——「首连必拒、重邀即成」
+
+两份抓包（同车，14:24/14:32）一致的时间线：
+
+1. BT 供应链自动入网（airplayd 记 `CarPlay UUID` 有值）→ 约 **21s 后**车机首次 ctrl 邀请
+   （`HandleControlServerEvent command 'connect'`）；
+2. 连 `[fe80::…%en0]:7000`（**IPv6 link-local**，1022ms）→ pair-verify M1-M4 **32ms 成功**；
+3. **MFi 认证段被 403 拒**（`MFi failed: 200403 Forbidden → Stage 1 failed → StartupFailed`）
+   ——**真 iPhone 首次连接同样被拒**，属车机固有状态而非客户端问题；
+4. **车机 18~20s 后自行重发邀请**，第二次 verify 16ms、MFi（challenge 64B / 证书 607B）
+   通过，Stage 1/2 → 授权 → 开流。全程**不断蓝牙、不换网络**；
+5. 成功会话里 **`iAPChannel` FeatureKey 协商结果 = 0**（WiFi iAP2 隧道未启用）——
+   与我们「MIB3 必须建隧道」的结论相悖，改隧道策略前必须真车 A/B；
+6. 杂项：SETUP 应答可不带 streamID（iPhone 自动补 0）；RECORD 往返 17ms；流级心跳
+   Standard 2017ms；会话级 keepAlive 10s（LowPower）。
+
+落地（2026-10-22）：`AirPlayClient.pairingForbidden`（任意段 403 标记）→ 主控不再走
+「断 BT 第二阶段」、不再降级 et=NONE；配对循环 403 后退避 5s（车机就绪窗 ~20s，
+高频重试可能一直重置其状态机）。
+
+### 13b. 一汽大众探歌 23 款（VW WLAN）——「手动入网永远无效」
+
+- 2.4G `VW WLAN` 手动加入 ×5 轮：`CarPlay UUID: N/A`、**`_airplay._tcp` 全程零 mDNS
+  应答**、无邀请，iPhone 等 67s 退网，循环；
+- BT 供应链就绪后自动加入 `VW WLAN_5GHz`（带 UUID）→ **77ms 后**车机邀请 →
+  `fe80::…:7000`（1831ms）→ verify 21ms → MFi 成功 → 正常推流 3 分钟（无 403）；
+- 车机 SETUP 应答带 viewAreas/initialViewArea 结构但未声明 feature（iPhone 仅告警容忍）。
+
+结论：该车型只对「iAP2 配供应链带出的那次入网」激活 CarPlay 栈——系统里保存过/手动
+连过车机热点都会堵死连接（我们的「同 SSID 已保存弹窗清理」对此车是关键步骤），
+且必须严格用 0x5703 下发的 SSID（双频 SSID，成功路径是 `_5GHz`）。

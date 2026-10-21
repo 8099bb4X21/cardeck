@@ -1718,10 +1718,14 @@ object SessionController {
                         sessionStarting.set(false)
                         return@run
                     }
-                    if (keys == null && !noPairing && !client.pairSetupRejected && client.attemptedPairing) {
+                    if (keys == null && !noPairing && !client.pairSetupRejected && !client.pairingForbidden && client.attemptedPairing) {
                         // 第二阶段（仅测试台 DiPlay）：复现「BT 控制已结束」状态再试一次。
                         // 真车（Audi）绝不能断 BT——真无线 CarPlay 的 BT 控制通道全程保活，
                         // 断开会让车机拆掉整轮 AirPlay 窗口（实车实测）。
+                        // pairingForbidden（任意段 403，含 verify/认证段——2026-10-21 真机
+                        // sysdiagnose 定谳：首连被 403 是车机固有状态，它 18~20s 后自动
+                        // 重邀、第二次即成）时同样禁用：断 BT 会让车机整栈重建、恰好错过
+                        // 即将到来的重邀窗口。
                         // 门槛：仅当本轮真的连上过接收端 RTSP（attemptedPairing）才用此 hack；
                         // 端点未解析（无 IP）/端口未开时绝不值得断 BT（2026-10-11 踩过：
                         // mDNS 失败也触发 detach，白白拆掉车机窗口）。
@@ -1742,8 +1746,12 @@ object SessionController {
                     //  - 配对彻底失败但 RTSP 确实连上过（有些车只认明文会话，
                     //    pair-setup/pair-verify 全拒——catplay 正是「先试明文、失败才配对」，
                     //    我们反过来：优先配对（保住 DiPlay/已知车机），失败后降级明文兜底）。
+                    //  - **403 证据（pairingForbidden）除外**：真机抓包（2026-10-21 奥迪
+                    //    sysdiagnose）证明该状态下车机在等自身就绪、~20s 后重邀即成——
+                    //    明文会话必被拒，且会白白消耗车机的重邀窗口，不降级。
                     val plainSession =
-                        keys == null && (client.pairingUnsupported || client.attemptedPairing)
+                        keys == null && !client.pairingForbidden &&
+                            (client.pairingUnsupported || client.attemptedPairing)
                     if (plainSession) {
                         phaseHint = "建立明文会话…"
                         appendLog(

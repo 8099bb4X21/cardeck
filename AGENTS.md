@@ -587,6 +587,17 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   大包改走 `adb push + pm install`。
   几何推导集中在 `VirtualLauncher.dashSplitGeom` 纯函数（`DashSplitMathTest` 钉死
   四方一致性），改分屏相关代码勿在四处重新裸算。
+- **真机 iPhone sysdiagnose 对照（2026-10-21，docs/PROTOCOL-NOTES.md §13）**：两车三份
+  抓包（iOS 18，`/usr/bin/log show --archive` 读 unified log）定了四条铁律：
+  ① **奥迪 MMI 3315_5GHz 首连 403 是车机固有状态**——真 iPhone 在 pair-verify 通过后
+  照样被 MFi 段 403 拒，车机 18~20s **自动重邀、第二次即成**；正确恢复 = 保持 BT、
+  原流程退避重试（已落地：`pairingForbidden` 禁断-BT-hack、禁明文降级、403 退避 5s）。
+  ② 探歌类车机**只认 iAP2 配供应链带出的入网**：手动/系统保存过车机热点 = 永远无
+  邀请无 mDNS（同 SSID 清理弹窗对此车是关键）；双频 SSID 必须用 0x5703 指定的那个。
+  ③ 该奥迪成功会话 **iAPChannel 协商 = 0**（真 iPhone 未启 WiFi 隧道）——「MIB3 必须
+  建隧道」结论存疑，动隧道前先真车 A/B。
+  ④ 两车成功路径全是 **IPv6 link-local :7000** + pair-verify + MFi（标准 MODERN 形态，
+  无特殊协议）；SETUP 应答可无 streamID（我们只读 dataPort 天然兼容）。
 - **车机画像（ReceiverProfile）：版本/能力信号统一收口**（2026-10-20）：`iap2/ReceiverProfile`
   纯函数聚合三处信号——0x1D01 身份+收/发双清单、mDNS features/srcvers——产出
   era（三时代）/wifiGen（新旧 WiFi 协议）判定，**依据随日志输出**（`PROFILE:` 行，
