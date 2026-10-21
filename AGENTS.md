@@ -8,12 +8,12 @@ AirPlay（配对/控制/事件/流）→ 视频 + 音频推流。
 ## 常用命令
 
 ```bash
-./gradlew assembleDebug                 # 构建
-./gradlew testDebugUnitTest             # 单元测试（协议层/编解码为主）
-./gradlew :app:lintDebug                # Android Lint（存量问题在基线，新问题会失败）
+./gradlew assembleStandardDebug         # 构建（日常包；远程调试版为 assembleRemoteDebug）
+./gradlew testStandardDebugUnitTest     # 单元测试（协议层/编解码为主）
+./gradlew :app:lintStandardDebug        # Android Lint（存量问题在基线，新问题会失败）
 ./gradlew spotlessApply                 # 代码格式化（ktlint official 风格，规则在 .editorconfig）
 adb -s <serial> shell am force-stop io.github.shaonialife.cardeck   # 安装前必须先杀应用
-adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s <serial> install -r app/build/outputs/apk/standard/debug/app-standard-debug.apk
 ```
 
 **安装流程（重要）**：会话进行中直接 `adb install` 时，系统安装确认弹窗会落到车机侧
@@ -49,9 +49,9 @@ UserService 子进程持有，**父应用卸载后该进程仍存活**，4 块�
 ```bash
 # 1) 改 app/build.gradle.kts 的 appVersionName（versionCode 自动推导）
 # 2) 用正式密钥构建（需仓库根目录有 keystore.properties + .jks，均已 gitignore）
-./gradlew :app:assembleRelease
+./gradlew :app:assembleStandardRelease
 # 3) 验证签名的 CN 不是 "Android Debug"（必须是自己的证书，见下）
-$ANDROID_HOME/build-tools/<ver>/apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk
+$ANDROID_HOME/build-tools/<ver>/apksigner verify --print-certs app/build/outputs/apk/standard/release/app-standard-release.apk
 # 4) 打 tag 并发布（APK 重命名成 CarDeck-<版本>.apk，备注里写 SHA-256 与签名指纹）
 git tag -a v0.1.0 -m "CarDeck 0.1.0"; git push origin v0.1.0
 gh release create v0.1.0 CarDeck-0.1.0.apk --title "..." --notes-file notes.md --latest
@@ -632,6 +632,17 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
     点「请求授权」无响应，在 Shizuku 里「停止」再「启动」后一次成功）。
   - 卡片文案要区分三种空：授权缺失（显示「未授予通知使用权」）、有会话但暂停、
     完全无会话（后两者都是「未在播放」）。
+- **远程调试桥：remote flavor 与外层 cardeck-bridge 仓库**（2026-10-20 落地，设计全文
+  `docs/REMOTE-DEBUG-DESIGN.md`）：bridge 维度 flavor（standard=日常/发布，包名不变；
+  remote=`.rd` 后缀、调试桥代码只在 `app/src/remote/`、依赖走 `remoteDebugImplementation`
+  ——一行不进 standard 产物）。**构建任务名已 flavor 化**（assembleStandardDebug /
+  lintStandardDebug / testStandardDebugUnitTest，pre-commit 钩子已同步）。App 与业务的
+  耦合面仅两处：`DebugFileLog.tap`（main 侧日志序号+钩子）与 `BridgeCommands`（白名单
+  命令，只调 SessionController 公开 API）。服务端在外层独立仓库 `../cardeck-bridge`
+  （MIT，Node/TS，WS+MCP 单进程；`.npmrc` 固定公有源防公司源污染）。硬约定：
+  ① remote 变体的 Shizuku/通知使用权需单独授权（新包名）；② 重装前必须先
+  `SessionController.disconnect` 释放虚拟屏（否则安装确认弹窗落车机侧没人点得到）；
+  ③ 命令白名单扩充走 `BridgeCommands` 单点评审，禁止任意 shell。
 - **仪表盘分屏拖拽（2026-10-22 落地）的四个跨会话结论**：
   ① **视觉与触达分层**：中缝视觉宽（`DASH_GAP_PX=24`）与把手触达宽
   （`DASH_HANDLE_TOUCH_PX=60`）是两个常量——把手/粘性路由域比缝宽、两侧压在
@@ -732,6 +743,19 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   车机 15s 看门狗），已接控制通道、事件通道、视频数据口三处。**API 坑**：
   `ParcelFileDescriptor.fromSocket` 在 API 29 前返回 socket 自身 fd 的包装，close 会把
   原 socket 一起关掉——29+ 才用它取副本，26~28 反射 `Socket.getFileDescriptor$()`。
+- **车型重放回归（录制→重放测试）**（2026-10-20 落地）：防「改 A 车型回归 B 车型」。
+  管线：`tools/extract_car_fixtures.py` 从运行日志提取 `RAW rx/tx`（蓝牙链路）与
+  `IAPLINK rx`（隧道 CSM）成 JSONL fixture（`app/src/test/resources/carplay/fixtures/`，
+  **默认 gitignore**——含真实地址/热点名，入册需逐条评审脱敏）→
+  `replay/BtLinkReplayTest`（真实 Iap2LinkChannel+Iap2SenderSession 全栈重放）与
+  `replay/TunnelReplayTest`（VirtualIap2Link 控制会话重放）断言「录制的应答序列
+  ⊆ 回放序列（有序前缀/子序列）」。**录制即测试**：每次实车排障后跑一遍提取器，
+  fixture 库滚雪球。三条硬教训：① RAW 转储预算按字节计（已提 4096B/方向，旧日志
+  512B 连识别帧都盖不住）；② **帧长完整 ≠ 字节完好**——预算截断会把不同 read 的
+  尾巴拼成「长度恰好完整」的伪帧，载荷校验和不过、引擎静默丢弃，提取器必须按引擎
+  同款校验（帧头 9B 求和=0、载荷+尾校验求和=0）逐帧验证后再裁剪；③ 断言分级
+  （`rxHasIdent`）：识别帧幸存才做全量断言，否则只断言链路层（SYN/采纳/0x1D00），
+  隧道层用有序子序列（放行有意新增如 MIB3 突发，捕捉少答/乱序）。
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
   32B/20B、0x4301 有无、ctrl 邀请死锁等），细节见 `docs/PROTOCOL-NOTES.md` §9，
   改协议代码前先对照。**0x5702 的外部佐证**在 §5b（catplay / xcertplay /
