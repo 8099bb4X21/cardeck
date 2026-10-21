@@ -15,7 +15,7 @@ import io.github.shaonialife.cardeck.util.DebugFileLog
  * 一个套接字异常不应毁掉全部链路与前台服务）。
  * 各线程自身仍应尽量用 try/catch 精确处理；这里是最后防线。
  */
-class SenderApp : Application() {
+open class SenderApp : Application() {
     override fun onCreate() {
         super.onCreate()
         // 会话日志起点标记：日志文件跨进程累积（2MB 上限），导出默认只取本次启动

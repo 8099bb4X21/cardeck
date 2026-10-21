@@ -45,8 +45,8 @@ fi
 
 # 2) Lint：仅当暂存了源码/资源/构建脚本（存量问题已在 lint-baseline.xml 豁免）
 if printf '%s\n' "$STAGED" | grep -qE '^(app/src/|[^ ]*\.gradle\.kts$|gradle\.properties$)'; then
-    echo "▶ 提交前检查：Android Lint（lintDebug）..."
-    if ./gradlew --console=plain -q :app:lintDebug; then
+    echo "▶ 提交前检查：Android Lint（lintStandardDebug）..."
+    if ./gradlew --console=plain -q :app:lintStandardDebug; then
         echo "✓ lint 通过"
     else
         echo ""

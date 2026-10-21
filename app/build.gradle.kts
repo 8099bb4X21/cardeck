@@ -55,6 +55,20 @@ android {
         }
     }
 
+    // bridge 维度：standard=日常/发布（包名不变，Shizuku 授权按包名授予勿动）；
+    // remote=远程调试版（独立包名 .rd，可与日常版并存安装，调试桥代码只进此变体）
+    flavorDimensions += "bridge"
+    productFlavors {
+        create("standard") {
+            dimension = "bridge"
+        }
+        create("remote") {
+            dimension = "bridge"
+            applicationIdSuffix = ".rd"
+            versionNameSuffix = "-rd"
+        }
+    }
+
     buildTypes {
         release {
             // **不做代码混淆**：本项目依赖反射（SystemProperties、Shizuku API）与
@@ -82,6 +96,8 @@ android {
 
     buildFeatures {
         aidl = true
+        // remote 变体读 BuildConfig.VERSION_NAME 上报服务器（AGP 8 默认关闭）
+        buildConfig = true
     }
 
     lint {
@@ -106,4 +122,7 @@ dependencies {
     implementation("dev.rikka.shizuku:provider:13.1.5")
 
     testImplementation("junit:junit:4.13.2")
+    // 本地单测里 Android 的 org.json 是 stub（方法全抛 not mocked）：
+    // 用同 API 的参考实现替换（replay fixture 与 nav 解析测试都需要）
+    testImplementation("org.json:json:20240303")
 }

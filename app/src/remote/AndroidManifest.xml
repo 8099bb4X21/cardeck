@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- remote 变体叠加：远程调试桥专属权限与组件。只在 remote 变体合并，日常/发布包无此文件。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 重装闭环：PackageInstaller 发起安装（系统仍会弹确认） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application
+        android:name=".bridge.BridgeApp"
+        tools:replace="android:name">
+
+        <!-- 第二个桌面入口「CarDeck 远程调试」：填服务器地址与配对码 -->
+        <activity
+            android:name=".bridge.BridgeSetupActivity"
+            android:exported="true"
+            android:label="CarDeck 远程调试"
+            android:theme="@style/Theme.CarPlaySender">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <receiver
+            android:name=".bridge.InstallReceiver"
+            android:exported="false" />
+    </application>
+</manifest>

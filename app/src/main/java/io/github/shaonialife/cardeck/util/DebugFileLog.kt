@@ -18,6 +18,21 @@ object DebugFileLog {
     private val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
     /**
+     * 调试桥 tap：每条落盘的日志同步交给监听者（**远程调试变体**在 Application 里安装；
+     * 日常/发布变体恒为 null，零开销）。seq 单调递增——断线重连按 seq 回补。
+     * 监听者在写锁外被调用、异常被吞：绝不能让它拖慢或打断文件写入。
+     */
+    @Volatile
+    var tap: ((seq: Long, line: String) -> Unit)? = null
+
+    private val sequence =
+        java.util.concurrent.atomic
+            .AtomicLong(0)
+
+    /** 最近一条已落盘日志的序号（0 = 本进程尚无日志）。 */
+    val lastSeq: Long get() = sequence.get()
+
+    /**
      * 「本次进程启动」标记行。日志文件跨进程保留（最多 2MB），用户反馈问题时
      * 历史轮次的日志会把真正有用的部分淹没——导出默认只取最后一条标记之后的内容。
      * 标记本身写进文件而不是只记内存偏移：文件可能被 2MB 截断，偏移会失效。
@@ -85,6 +100,10 @@ object DebugFileLog {
                         .append(message)
                         .append('\n')
                 }
+            }
+            tap?.let { listener ->
+                val line = "[" + timestamp.format(Date()) + "] " + message
+                runCatching { listener(sequence.incrementAndGet(), line) }
             }
         } catch (_: Throwable) {
         }
