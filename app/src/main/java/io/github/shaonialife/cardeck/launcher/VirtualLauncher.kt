@@ -14,6 +14,8 @@ import io.github.shaonialife.cardeck.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
 import io.github.shaonialife.cardeck.media.NotificationAccess
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
+import io.github.shaonialife.cardeck.render.DASH_GAP_PX
+import io.github.shaonialife.cardeck.render.DASH_HANDLE_TOUCH_PX
 import io.github.shaonialife.cardeck.render.DualDisplayComposer
 import io.github.shaonialife.cardeck.render.OverlayCard
 import io.github.shaonialife.cardeck.shizuku.CarInputClient
@@ -62,6 +64,59 @@ object VirtualLauncher {
 
     /** 超采样后的应用屏高度上限（px；控制 GPU/内存开销）。 */
     private const val SUPERSAMPLE_MAX_HEIGHT = 1620
+
+    // ---- 仪表盘分屏（拖拽把手）----
+    // 比例 = tile 主轴长占「可用长度」（应用区主轴 − 两端边距 − 把手宽）的比例。
+
+    /** 默认比例：0.5 恰使把手中心落在应用区正中（见 dashSplitGeom 注释）。 */
+    const val DASH_SPLIT_DEFAULT_FRACTION = 0.5f
+
+    /** 比例钳制域：任一卡最小占 20%，防拖成一条线（按钮/圆角全挤没）。 */
+    const val DASH_SPLIT_MIN_FRACTION = 0.2f
+
+    const val DASH_SPLIT_MAX_FRACTION = 0.8f
+
+    private const val PREF_KEY_DASH_SPLIT = "dashSplitFraction"
+
+    fun clampDashSplitFraction(fraction: Float): Float = fraction.coerceIn(DASH_SPLIT_MIN_FRACTION, DASH_SPLIT_MAX_FRACTION)
+
+    /** 分屏几何（应用区坐标系：横屏原点=dock 右缘，竖屏原点=流顶缘）。 */
+    data class DashSplitGeom(
+        val fraction: Float,
+        /** tile 主轴长（横=mapTileWidth、竖=mapTileHeight）。 */
+        val tileLen: Int,
+        /** tile 把手侧边缘（composer override 同语义）。 */
+        val tileEdge: Float,
+        /** 把手中心。 */
+        val splitCenter: Float,
+        /** 对侧卡（音乐卡）内容侧起始。 */
+        val otherStart: Float,
+    )
+
+    /**
+     * 分屏几何纯函数（单测钉死）：可用长度 = 主轴 − 边距×2 − 把手宽；
+     * tileLen = 比例×可用；把手中心 = 边距 + tileLen + 半把手（0.5 时恰在
+     * 应用区正中，与旧行为的中线分屏视觉一致）；音乐卡起始 = 边距 + tileLen + 把手宽。
+     */
+    fun dashSplitGeom(
+        appMainLen: Int,
+        fraction: Float,
+    ): DashSplitGeom {
+        val usable = (appMainLen - CARD_MARGIN_PX * 2 - DASH_GAP_PX.toInt()).coerceAtLeast(1)
+        val clamped = clampDashSplitFraction(fraction)
+        val tileLen = (clamped * usable).toInt()
+        val edge = CARD_MARGIN_PX + tileLen
+        return DashSplitGeom(
+            fraction = clamped,
+            tileLen = tileLen,
+            tileEdge = edge.toFloat(),
+            splitCenter = edge + DASH_GAP_PX / 2f,
+            otherStart = edge + DASH_GAP_PX,
+        )
+    }
+
+    /** 分屏主轴长度（应用区坐标系）：横=appAreaWidth、竖=appAreaHeight。 */
+    private fun splitMainLen(): Int = if (dockAtBottom) appAreaHeight else appAreaWidth
 
     val runningApps = LinkedHashSet<ComponentName>()
 
@@ -182,6 +237,19 @@ object VirtualLauncher {
     @Volatile
     var mapTileHeight: Int = 0
         private set
+
+    /**
+     * 仪表盘分屏把手中心（流像素，顶部原点；横屏=x、竖屏=y）。<0 = 未 attach。
+     * 拖动中由 [previewDashSplit] 连续预览，松手 [commitDashSplit] 落定并派生
+     * [mapTileWidth]/[mapTileHeight]。几何推导全部经 [dashSplitGeom] 纯函数。
+     */
+    @Volatile
+    var dashSplitPos: Float = -1f
+        private set
+
+    /** 当前生效的分屏比例（attach 从偏好恢复，commit 写回）。 */
+    @Volatile
+    private var dashSplitFraction = DASH_SPLIT_DEFAULT_FRACTION
 
     /** 应用区尺寸（全屏形态的地图屏目标尺寸）。 */
     @Volatile
@@ -370,15 +438,25 @@ object VirtualLauncher {
         val appPortraitDensity =
             (appWidth / LETTERBOX_TARGET_DP * 160f).toInt().coerceIn(160, 640)
         // 地图屏：按应用区全尺寸创建，分屏/全屏间动态 resize（见 resizeMapDisplay）。
-        // tile 尺寸 = SPLIT 绘制矩形，边距统一用契约值 CARD_MARGIN_PX（勿再裸写数字）：
-        //  横屏：左半卡片（宽=应用区/2-24，即左右留 16、右缘收半边距 8；高=上下留 16）
-        //  竖屏：上半卡片（地图上/音乐下，各占应用区高一半，四周留 16、中缝 16）
+        // tile 尺寸 = SPLIT 绘制矩形，边距统一用契约值 CARD_MARGIN_PX（勿再裸写数字）。
+        // 分屏比例由用户拖动把手调整（持久化偏好）；几何推导集中在 [dashSplitGeom]
+        // 纯函数（单测钉死四方一致性）。tile 主轴长（横=宽、竖=高）=比例×可用长度。
+        dashSplitFraction =
+            context
+                .getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .getFloat(PREF_KEY_DASH_SPLIT, DASH_SPLIT_DEFAULT_FRACTION)
+                .let(::clampDashSplitFraction)
         if (dockAtBottom) {
+            val geom = dashSplitGeom(appHeightPx, dashSplitFraction)
             mapTileWidth = appWidth - CARD_MARGIN_PX * 2
-            mapTileHeight = (appHeightPx - CARD_MARGIN_PX * 3) / 2
+            mapTileHeight = geom.tileLen
+            dashSplitPos = geom.splitCenter
         } else {
-            mapTileWidth = appWidth / 2 - CARD_MARGIN_PX * 3 / 2
+            val geom = dashSplitGeom(appWidth, dashSplitFraction)
+            mapTileWidth = geom.tileLen
             mapTileHeight = appHeightPx - CARD_MARGIN_PX * 2
+            // 横屏应用区从 dock 右缘起（竖屏 x 原点即流原点，无偏移）
+            dashSplitPos = geom.splitCenter + dockWidthPx
         }
         // 横屏应用屏的密度选择（2026-10-11 实测标定）：
         // 竖屏锁定应用（如头条）在横屏屏上被系统 letterbox 成窄条窗口，窗口逻辑宽度
@@ -663,6 +741,8 @@ object VirtualLauncher {
                 appWidth,
                 appHeightPx,
             )
+            // 分屏把手位置推给合成器（覆盖默认中线公式；拖动时 previewDashSplit 持续更新）
+            composer.setTileEdgeOverride(dashSplitPos - DASH_GAP_PX / 2f)
             if (!displaysCreated[0]) {
                 log("LAUNCHER: 虚拟屏创建失败")
                 detach()
@@ -762,6 +842,7 @@ object VirtualLauncher {
         mapDisplayId = -1
         mapTileWidth = 0
         mapTileHeight = 0
+        dashSplitPos = -1f
         mapDisplayW = 0
         mapDisplayH = 0
         appDisplayW = 0
@@ -907,6 +988,114 @@ object VirtualLauncher {
         } else {
             LetterboxHintController.clear()
         }
+    }
+
+    /**
+     * 拖动中预览分屏位置：**只改合成器绘制矩形**（地图纹理整幅拉伸渲染，不动
+     * buffer、不动虚拟屏）——拖动流畅、不触发地图应用配置变更。松手才
+     * [commitDashSplit] 真实 resize。
+     *
+     * @param streamPos 把手中心（流像素，顶部原点；横屏 x / 竖屏 y），内部钳制
+     */
+    fun previewDashSplit(streamPos: Float) {
+        val clamped = clampDashSplitStream(streamPos) ?: return
+        composer?.setTileEdgeOverride(clamped - DASH_GAP_PX / 2f)
+    }
+
+    /**
+     * 松手落定：钳制 → 更新把手位置与 tile 派生尺寸 → 真实 resize 地图屏（含
+     * 消费端 buffer 同步）→ 持久化比例 → 通知（音乐卡壁纸切片重切）。
+     *
+     * @return 钳制后的把手中心（流像素）——UI 据此校正 margin，防显示与状态漂移
+     */
+    fun commitDashSplit(streamPos: Float): Float {
+        val clamped = clampDashSplitStream(streamPos) ?: return dashSplitPos
+        val geom =
+            dashSplitGeom(
+                splitMainLen(),
+                (clamped - splitMainOffset() - CARD_MARGIN_PX - DASH_GAP_PX / 2f) / splitUsableLen(),
+            )
+        dashSplitPos = clamped
+        dashSplitFraction = geom.fraction
+        if (dockAtBottom) mapTileHeight = geom.tileLen else mapTileWidth = geom.tileLen
+        composer?.setTileEdgeOverride(clamped - DASH_GAP_PX / 2f)
+        if (!mapFullscreen) resizeMapDisplay(false)
+        notifyMapLayout()
+        appContextRef
+            ?.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            ?.edit()
+            ?.putFloat(PREF_KEY_DASH_SPLIT, dashSplitFraction)
+            ?.apply()
+        logSink?.invoke(
+            "LAUNCHER: 仪表盘分屏落定 ${if (dockAtBottom) "地图高" else "地图宽"}=" +
+                "${if (dockAtBottom) mapTileHeight else mapTileWidth}px（比例 " +
+                String.format("%.2f", dashSplitFraction) + "）",
+        )
+        return clamped
+    }
+
+    /** 当前把手中心换算到应用屏像素（GridActivity 布局用；未 attach 返回 -1）。 */
+    fun dashSplitScreenPos(): Float = if (dashSplitPos < 0) -1f else dashSplitPos * gridScale()
+
+    /** 把手中心·应用屏像素（应用区坐标系，已扣 dock 偏移；把手 DOWN 起点，<0=未 attach）。 */
+    fun dashHandleCenterScreen(): Float = if (dashSplitPos < 0) -1f else (dashSplitPos - splitMainOffset()) * gridScale()
+
+    /** 音乐卡内容侧起始·应用屏像素（横=左缘、竖=顶缘；<0=未 attach）。 */
+    fun dashMusicStartScreen(): Int =
+        if (dashSplitPos < 0) {
+            -1
+        } else {
+            ((dashSplitPos - splitMainOffset() + DASH_GAP_PX / 2f) * gridScale()).toInt()
+        }
+
+    /** [previewDashSplit] 的应用屏像素入参版（把手拖动直调，内部换回流像素）。 */
+    fun previewDashSplitScreen(centerScreen: Float) {
+        previewDashSplit(splitMainOffset() + centerScreen / gridScale().coerceAtLeast(1e-6f))
+    }
+
+    /** [commitDashSplit] 的应用屏像素入参版；返回钳制后的把手中心（应用屏像素）。 */
+    fun commitDashSplitScreen(centerScreen: Float): Float =
+        (
+            commitDashSplit(splitMainOffset() + centerScreen / gridScale().coerceAtLeast(1e-6f)) -
+                splitMainOffset()
+        ) * gridScale()
+
+    /**
+     * 触点是否落在分屏把手条内（流像素坐标）——TouchRouter 粘性路由判定用：
+     * 按下命中即整条触摸流固定路由应用屏（拖动中把手落后手指、坐标越界也不改投，
+     * 否则跨屏重注会掐断拖拽并误触地图，2026-10-21 方案评审定谳）。
+     */
+    fun dashHandleHit(
+        x: Float,
+        y: Float,
+    ): Boolean {
+        if (dashSplitPos < 0 || !dashboardMode || mapFullscreen) return false
+        val half = DASH_HANDLE_TOUCH_PX / 2f
+        return if (dockAtBottom) {
+            y in dashSplitPos - half..dashSplitPos + half
+        } else {
+            x in dashSplitPos - half..dashSplitPos + half
+        }
+    }
+
+    /** 流坐标把手中心 → 应用区坐标系偏移（横屏减 dock 宽；竖屏 y 原点即流原点）。 */
+    private fun splitMainOffset(): Float = if (dockAtBottom) 0f else dockWidthPx.toFloat()
+
+    /** 主轴可用长度 = 应用区主轴 − 两端边距 − 中缝宽（与 dashSplitGeom 同式）。 */
+    private fun splitUsableLen(): Int = (if (dockAtBottom) appAreaHeight else appAreaWidth) - CARD_MARGIN_PX * 2 - DASH_GAP_PX.toInt()
+
+    /**
+     * 钳制流坐标把手中心；未 attach 返回 null。
+     * 边界必须按**比例钳制域**（20%~80%）换算——按 [边距, 边距+可用] 钳等于允许
+     * 比例 [0,1]，卡片能被拉成一条线（2026-10-22 用户实测「拉到 0」根因）。
+     */
+    private fun clampDashSplitStream(streamPos: Float): Float? {
+        val usable = splitUsableLen()
+        if (usable <= 0) return null
+        val base = splitMainOffset() + CARD_MARGIN_PX + DASH_GAP_PX / 2f
+        val min = base + DASH_SPLIT_MIN_FRACTION * usable
+        val max = base + DASH_SPLIT_MAX_FRACTION * usable
+        return streamPos.coerceIn(min, max)
     }
 
     /**

@@ -26,6 +26,21 @@ import java.util.concurrent.atomic.AtomicBoolean
 const val CARD_MARGIN_PX = 16
 
 /**
+ * 仪表盘分屏中缝宽（流像素）——地图 tile 与音乐卡之间**视觉**缝隙，几何契约同
+ * [CARD_MARGIN_PX]：tile 内容侧边缘 = 把手中心 − DASH_GAP_PX/2，音乐卡内容侧
+ * 边缘 = 把手中心 + DASH_GAP_PX/2（VirtualLauncher.dashSplitGeom 统一推导）。
+ */
+const val DASH_GAP_PX = 24f
+
+/**
+ * 分屏把手**触达**宽（流像素）：把手 View 宽度与 TouchRouter 粘性路由域按此值，
+ * 比 [DASH_GAP_PX] 宽——两侧各溢出 (TOUCH−GAP)/2 压在卡片上扩大触控目标
+ * （音乐卡侧把手叠在其上层；地图侧溢出段被 tile 盖住不可见但可触摸——
+ * 视觉与触摸分层，2026-10-22 用户反馈「中缝太宽」的解法）。
+ */
+const val DASH_HANDLE_TOUCH_PX = 60f
+
+/**
  * 双虚拟屏 GL 合成器：dock 屏 + 应用屏（原生 / 超采样两块，按活动切换）→ 拼接输出到编码器输入 Surface。
  *
  * 三路 SurfaceTexture 作为各虚拟屏的输出；GL 线程轮询新帧标志，有新帧即重绘合成画面。
@@ -43,6 +58,19 @@ class DualDisplayComposer(
     /** 仪表盘↔桌面滑动进度（0=tile 原位，1=完全滑出左侧），由 GridActivity 随滑动驱动。 */
     @Volatile
     var tileSlideFraction: Float = 0f
+
+    /**
+     * 地图 tile 把手侧边缘覆盖值（流像素，顶部原点；横屏=tile 右缘 x、竖屏=tile
+     * 下缘 y）。>0 时替代 SPLIT 公式值——拖动分屏把手时由 VirtualLauncher 逐帧写入，
+     * **只改绘制矩形（纹理整幅拉伸），不动 buffer、不动虚拟屏**；松手 commit 才真实
+     * resize。≤0 = 用默认中线公式。语义与 [tileSlideFraction] 同类：连续视觉态。
+     */
+    @Volatile
+    private var tileEdgeOverride = -1f
+
+    fun setTileEdgeOverride(edgePx: Float) {
+        tileEdgeOverride = edgePx
+    }
 
     /**
      * 目标帧率（30/60，合成出帧节奏上限；「显示」设置运行中实时切换）。
@@ -557,20 +585,25 @@ class DualDisplayComposer(
                         drawInput(map!!, 0f, outWidth.toFloat(), dockH.toFloat(), outHeight.toFloat())
                     } else {
                         // 上半卡片：左右留 16、顶留 16；pager 水平滑动 → tile 向左滑出（跟手）
+                        // tileEdgeOverride = tile 把手侧边缘（顶部原点 y，即 tile 下缘）；
+                        // GL y = outHeight − 顶部 y（底部原点换算，勿翻转——坐标系约定见类注释）
                         val tileH = (outHeight - dockH) / 2f - CARD_MARGIN_PX * 1.5f
+                        val handleEdge =
+                            if (tileEdgeOverride > 0f) tileEdgeOverride else CARD_MARGIN_PX + tileH
                         val slide = tileSlideFraction * outWidth
                         val nowMs = android.os.SystemClock.uptimeMillis()
                         if (nowMs - lastPortraitTileDiag > 5_000) {
                             lastPortraitTileDiag = nowMs
                             VirtualLauncher.logSink?.invoke(
-                                "COMPOSER: 竖屏 tile 绘制 tileH=$tileH slide=$slide frames=${map!!.frameCount}",
+                                "COMPOSER: 竖屏 tile 绘制 tileH=$tileH handleEdge=$handleEdge " +
+                                    "slide=$slide frames=${map!!.frameCount}",
                             )
                         }
                         drawInputUV(
                             map!!,
                             CARD_MARGIN_PX - slide,
                             outWidth - CARD_MARGIN_PX - slide,
-                            outHeight - CARD_MARGIN_PX - tileH,
+                            outHeight - handleEdge,
                             (outHeight - CARD_MARGIN_PX).toFloat(),
                             cornerRadius = TILE_CORNER_RADIUS,
                         )
@@ -602,16 +635,22 @@ class DualDisplayComposer(
                         drawInput(map!!, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
                     } else {
                         // 卡片形态：四周留边 + 圆角（与音乐卡一致）。
-                        // 中缝=CARD_MARGIN_PX（16）：tile 右缘与音乐卡左缘各收半边距（8），
-                        // 否则两边各 16px 叠加出 32px 的中缝、比外侧 16px 边距宽一倍不协调。
+                        // 分屏把手拖动期间 tileEdgeOverride（tile 右缘 x）替代公式值：
+                        // 只改绘制矩形、纹理整幅拉伸（不动 buffer/虚拟屏），松手才 resize。
                         // tileSlideFraction：随 pager 滑动把 tile 平移出/入左侧（视觉跟手）。
                         val half = (outWidth - dockW) / 2f
                         val tileW = half - CARD_MARGIN_PX - CARD_MARGIN_PX / 2f
+                        val x1 =
+                            if (tileEdgeOverride > 0f) {
+                                tileEdgeOverride
+                            } else {
+                                dockW + CARD_MARGIN_PX + tileW
+                            }
                         val slide = tileSlideFraction * (outWidth - dockW)
                         drawInputUV(
                             map!!,
                             dockW + CARD_MARGIN_PX - slide,
-                            dockW + CARD_MARGIN_PX + tileW - slide,
+                            x1 - slide,
                             CARD_MARGIN_PX.toFloat(),
                             (outHeight - CARD_MARGIN_PX).toFloat(),
                             cornerRadius = TILE_CORNER_RADIUS,

@@ -40,6 +40,9 @@ object TouchRouter {
     /** 叠加卡片手势状态（卡片命中后独占触摸，不再注入应用）。 */
     private var overlayPressed = false
 
+    /** 分屏把手粘性路由状态（命中把手条后整条触摸流固定路由应用屏）。 */
+    private var splitHandlePressed = false
+
     /**
      * MOVE 注入节流：0 = 关闭；>0 时距上次注入不足该毫秒数的 move
      * 直接合并丢弃（down/up 边界事件与跨屏切换永不节流，最终位置由 up 携带）。
@@ -130,7 +133,27 @@ object TouchRouter {
         var localX = 0
         var localY = 0
         var routedToMap = false
-        if (launcher.dockAtBottom) {
+        // 分屏把手粘性路由：按下落在把手条内 → 整条触摸流固定路由应用屏（Grid 所在屏）
+        // 直至抬起。快拖时把手落后手指、坐标会越出把手条（甚至越过地图 tile 边缘），
+        // 按坐标逐帧改判会跨屏重注（pointerUp 应用屏 + pointerDown 地图屏），掐断拖拽
+        // 并给地图误触一下（2026-10-21 方案评审定谳）。模式同上方 overlay 卡手势独占。
+        val handlePin =
+            splitHandlePressed ||
+                (contact.down && !pressed && launcher.dashHandleHit(px.toFloat(), py.toFloat()))
+        if (handlePin) {
+            splitHandlePressed = contact.down
+            inDock = false
+            targetDisplay =
+                if (launcher.gridDisplayId >= 0) launcher.gridDisplayId else launcher.activeAppDisplayId()
+            if (launcher.dockAtBottom) {
+                localX = px
+                localY = py
+            } else {
+                val scale = launcher.gridScale().coerceAtLeast(1f)
+                localX = ((px - dockW) * scale).toInt()
+                localY = (py * scale).toInt()
+            }
+        } else if (launcher.dockAtBottom) {
             val appH = launcher.appHeightPx
             inDock = py >= appH
             // 地图 tile（应用区上半；全屏=应用区全部）。触摸/流坐标顶部起算：
@@ -268,6 +291,7 @@ object TouchRouter {
         pressed = false
         pressedDisplay = -1
         overlayPressed = false
+        splitHandlePressed = false
         cancelMapTileTap()
         tapDragSlot = -1
         coordScaleX = 1f

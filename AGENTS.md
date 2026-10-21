@@ -569,6 +569,24 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
     点「请求授权」无响应，在 Shizuku 里「停止」再「启动」后一次成功）。
   - 卡片文案要区分三种空：授权缺失（显示「未授予通知使用权」）、有会话但暂停、
     完全无会话（后两者都是「未在播放」）。
+- **仪表盘分屏拖拽（2026-10-22 落地）的四个跨会话结论**：
+  ① **视觉与触达分层**：中缝视觉宽（`DASH_GAP_PX=24`）与把手触达宽
+  （`DASH_HANDLE_TOUCH_PX=60`）是两个常量——把手/粘性路由域比缝宽、两侧压在
+  卡片上（地图侧溢出段被 tile 盖住**不可见但可触摸**：触摸路由与 GL 合成本就是
+  两层）。一体宽 44px 的首版被用户反馈「中缝太宽」。
+  ② **拖动中只改绘制矩形、松手才 resize**：composer `tileEdgeOverride` 只改 SPLIT
+  目标矩形（纹理整幅 UV 拉伸），commit 才走 `resizeMapDisplay`（真实 resize 触发
+  地图应用配置变更）。**限位钳制必须按比例域换算边界**——按位置域 [边距, 边距+可用]
+  钳等于允许比例 [0,1]，用户实测能拉到 0。
+  ③ **快拖防断流要粘性路由**：把手落后手指时坐标会越出命中域，TouchRouter 按坐标
+  逐帧改判会跨屏重注（掐断拖拽+误触地图）；按下命中把手条即整流固定路由应用屏
+  （`dashHandleHit` + `splitHandlePressed`，同 overlay 卡手势独占模式）。
+  ④ 车机虚拟屏持有焦点时，**`am start` 不带 `--display` 会落到聚焦的虚拟屏**
+  （用户车机画面闪出调试 UI 实测）——会话中启动手机侧 Activity 必须显式
+  `--display 0`；无线 adb 的**流式安装协议会静默挂起**（push 76MB/s 证明传输无碍），
+  大包改走 `adb push + pm install`。
+  几何推导集中在 `VirtualLauncher.dashSplitGeom` 纯函数（`DashSplitMathTest` 钉死
+  四方一致性），改分屏相关代码勿在四处重新裸算。
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
   32B/20B、0x4301 有无、ctrl 邀请死锁等），细节见 `docs/PROTOCOL-NOTES.md` §9，
   改协议代码前先对照。
