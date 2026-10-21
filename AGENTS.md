@@ -587,6 +587,17 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   大包改走 `adb push + pm install`。
   几何推导集中在 `VirtualLauncher.dashSplitGeom` 纯函数（`DashSplitMathTest` 钉死
   四方一致性），改分屏相关代码勿在四处重新裸算。
+- **车机画像（ReceiverProfile）：版本/能力信号统一收口**（2026-10-20）：`iap2/ReceiverProfile`
+  纯函数聚合三处信号——0x1D01 身份+收/发双清单、mDNS features/srcvers——产出
+  era（三时代）/wifiGen（新旧 WiFi 协议）判定，**依据随日志输出**（`PROFILE:` 行，
+  判错可回溯）。两个接线点：`Iap2SenderSession.logIdentification`（BT 侧）与
+  `SessionController.onCarPlayEndpoint` 端点诊断后（mDNS 侧）。硬约束：
+  ① **按能力分支，不按版本号/品牌硬编码**（srcvers 只做先验，清单与实测行为才是
+  分派依据——HID 描述符教训的推广）；② **「清单未声明」不等于「不支持」**：奥迪
+  稀疏清单（2+5 项）不列 0x57xx 但旧协议实测工作——wifiGen=NEW 要求清单完整
+  （合计 ≥10 项，iD9 形态）仍无 0x5703/0x5702，稀疏清单判 UNKNOWN 走旧协议
+  （0x5703 有超时兜底）；③ identityKey 存原文（与 0x1D01 逐字一致），持久化键的
+  清洗由 MfiLengthMemory.receiverKey 负责——后续 Memory 并表共用此键。
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
   32B/20B、0x4301 有无、ctrl 邀请死锁等），细节见 `docs/PROTOCOL-NOTES.md` §9，
   改协议代码前先对照。

@@ -16,6 +16,7 @@ import io.github.shaonialife.cardeck.bt.TargetDevicePrefs
 import io.github.shaonialife.cardeck.capture.HiddenDisplaySource
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
+import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import io.github.shaonialife.cardeck.input.ConsumerKeys
 import io.github.shaonialife.cardeck.input.TouchReports
 import io.github.shaonialife.cardeck.input.TouchRouter
@@ -1588,6 +1589,17 @@ object SessionController {
                     false -> "未声明（按 pre-HomeKit 明文会话处理）"
                     null -> "未知（按需配对）"
                 },
+        )
+        // 车机画像（信号收口点）：mDNS 侧信号到达——era 判定 + 依据一行可解释
+        appendLog(
+            ReceiverProfile.describe(
+                ReceiverProfile.classify(
+                    ReceiverProfile.Signals(
+                        features = endpoint.advertisedFeatures,
+                        srcvers = endpoint.sourceVersion,
+                    ),
+                ),
+            ),
         )
         // 先绑网络再解析端点：mDNS 组播跟随 bindProcessToNetwork 的网络，解析放前面
         // 只会拿到旧网络的结果（此前靠 resolveEndpointHost 内部重试掩盖，白等数秒）。

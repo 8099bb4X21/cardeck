@@ -875,6 +875,21 @@ class Iap2SenderSession(
             accessoryReceiveIds = receives.toSet()
             receiveListDeclared = true
             log("iap2 0x1d01 车机可收清单(${receives.size})=" + receives.joinToString(" ") { "0x%04x".format(it) })
+            // 车机画像（信号收口点）：身份 + 双清单 → era/wifiGen 一行判定，
+            // 依据随行——判错时从这里回溯是哪条信号误导（铁律：按能力不按品牌）
+            log(
+                ReceiverProfile.describe(
+                    ReceiverProfile.classify(
+                        ReceiverProfile.Signals(
+                            name = name,
+                            model = model,
+                            manufacturer = manufacturer,
+                            sendIds = sends?.toSet(),
+                            receiveIds = receives.toSet(),
+                        ),
+                    ),
+                ),
+            )
             log(
                 "iap2 0x1d01 协议代际：请求 WiFi 配置(0x5702)=" +
                     (
