@@ -200,15 +200,34 @@ class Iap2SenderSession(
         send(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
         log("iap2 tx=0xaa05 authentication-succeeded（自报）")
 
+        // ---- 设备状态问候（须紧跟 0xAA05：车机据此判定 accessory 就绪）----
+        sendDeviceStateGreetings()
+
         // ---- EA 会话启动（MFi 认证完成后）----
         // 奥迪 0x1D01 声明 de.audi.mmicconnectdatatransfer / com.audi.cpp.eadata0/1
         // 三个 EA 协议；触摸 HID 相关数据经 EA 会话。认证前发送会噎死 DiPlay（见上）。
         for ((protocolId, name) in eaProtocols) {
             sendFireAndForget(
                 Iap2MessageIds.EA_OPEN_SESSION,
-                Iap2Csm.u8(0, protocolId) + Iap2Csm.u16(1, protocolId),
+                // param 1 = EA 协议名（UTF-8 字符串）；发成协议号时车机不回 0xEA03
+                Iap2Csm.u8(0, protocolId) + Iap2Csm.string(1, name),
             )
             log("iap2 tx=0xea00 startEASession protocol=$protocolId name=$name")
+        }
+        // EA 会话状态（0xEA03）：短窗口确认，避免挤占后续 0x5703 的等待时间。
+        if (eaProtocols.isNotEmpty() &&
+            accessoryDeclaresSend(Iap2MessageIds.EA_SESSION_STATUS) != false
+        ) {
+            val status =
+                expectOrNull(
+                    Iap2MessageIds.EA_SESSION_STATUS,
+                    wifiRescueDeadline(deadline, 500L),
+                )
+            if (status != null) {
+                log("iap2 rx=0xea03 EA 会话已打开（${status.body.size}B）")
+            } else {
+                log("iap2 0xea03 未到（EA 会话未确认）——继续 WiFi 交换")
+            }
         }
 
         // ---- 订阅与 HID：0x6800 是可选步骤 ----
@@ -236,12 +255,33 @@ class Iap2SenderSession(
                 null
             } else {
                 send(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
-                val wifiConfiguration = expectOrNull(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION, deadline)
+                // 0x5703 分段等待：先重发问候、再重发 0x5702，最后才放弃走 0x4300/0x4301。
+                var wifiConfiguration =
+                    expectOrNull(
+                        Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION,
+                        wifiRescueDeadline(deadline, 1_500L),
+                    )
+                if (wifiConfiguration == null) {
+                    sendDeviceStateGreetings(force = true)
+                    log("iap2 0x5703 1.5s 未到——重发设备状态问候，继续等待")
+                    wifiConfiguration =
+                        expectOrNull(
+                            Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION,
+                            wifiRescueDeadline(deadline, 1_300L),
+                        )
+                }
+                if (wifiConfiguration == null) {
+                    send(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
+                    log("iap2 0x5702 重发一次（首次仅链路 ACK）")
+                    wifiConfiguration =
+                        expectOrNull(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION, deadline)
+                }
                 if (wifiConfiguration == null) {
                     log("iap2 0x5703 未在窗口内到达——改走 0x4300/0x4301（新版协议自带 AP 信息）")
                     null
                 } else {
-                    val parsed = parseWifiConfiguration(wifiConfiguration)
+                    // 显式断言：上面按分段等待赋值过 3 次，避免依赖 var 的智能转换
+                    val parsed = parseWifiConfiguration(wifiConfiguration!!)
                     log(
                         "iap2 rx=0x5703 ssid=${parsed.ssid} channel=${parsed.channel} " +
                             "security=${parsed.securityType} psk=${if (parsed.passphrase.isEmpty()) "(空)" else "***"}",
@@ -254,30 +294,10 @@ class Iap2SenderSession(
                 }
             }
 
-        // ---- 设备状态问候（对照真 iPhone 实录：0x4E0D/0x4E0A/0x4E09/0x4E0B → 0x4300）----
+        // ---- 设备状态问候（0x4E0D/0x4E0A/0x4E09/0x4E0B → 0x4300）----
         // Audi MIB3 实测：缺这批消息时，车机对 0x4300 只回链路 ACK、不出 0x4301。
-        send(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE, Iap2Csm.u8(0, 1))
-        send(Iap2MessageIds.DEVICE_LANGUAGE_UPDATE, Iap2Csm.string(0, "zh-CN"))
-        send(Iap2MessageIds.DEVICE_INFORMATION_UPDATE, Iap2Csm.string(0, deviceName))
-        val epochSeconds = System.currentTimeMillis() / 1000L
-        val timezoneMinutes =
-            java.util.TimeZone
-                .getDefault()
-                .getOffset(System.currentTimeMillis()) / 60_000
-        send(
-            Iap2MessageIds.DEVICE_TIME_UPDATE,
-            Iap2Csm.param(0, u64Bytes(epochSeconds)) +
-                Iap2Csm.u16(1, timezoneMinutes and 0xFFFF) +
-                Iap2Csm.u8(2, 0),
-        )
-        send(
-            Iap2MessageIds.DEVICE_UUID_UPDATE,
-            Iap2Csm.string(0, deviceUuid()),
-        )
-        log(
-            "iap2 tx=0x4e0d/0x4e0a/0x4e09/0x4e0b/0x4e0c 设备状态问候" +
-                "（name=$deviceName mac=$bluetoothMac）",
-        )
+        // 幂等：0x5703 等待期间可能已提前发过（见 wifiRescueDeadline 处）。
+        sendDeviceStateGreetings()
 
         // ---- CarPlay 会话启动 ----
         // 两种对端形态：
@@ -559,6 +579,46 @@ class Iap2SenderSession(
             }
         }
     }
+
+    /** 设备状态问候只发一次；[force] = true 时再发一轮（0x5703 等待期间的补救）。 */
+    private var greetingsSent = false
+
+    /**
+     * 设备状态问候：0x4E0D 无线会话标识 / 0x4E0A 语言 / 0x4E09 设备名 /
+     * 0x4E0B 设备时间 / 0x4E0C 设备 UUID。必须紧跟 0xAA05 发送。
+     */
+    private fun sendDeviceStateGreetings(force: Boolean = false) {
+        if (greetingsSent && !force) return
+        greetingsSent = true
+        send(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE, Iap2Csm.u8(0, 1))
+        send(Iap2MessageIds.DEVICE_LANGUAGE_UPDATE, Iap2Csm.string(0, "zh-CN"))
+        send(Iap2MessageIds.DEVICE_INFORMATION_UPDATE, Iap2Csm.string(0, deviceName))
+        val epochSeconds = System.currentTimeMillis() / 1000L
+        val timezoneMinutes =
+            java.util.TimeZone
+                .getDefault()
+                .getOffset(System.currentTimeMillis()) / 60_000
+        send(
+            Iap2MessageIds.DEVICE_TIME_UPDATE,
+            Iap2Csm.param(0, u64Bytes(epochSeconds)) +
+                Iap2Csm.u16(1, timezoneMinutes and 0xFFFF) +
+                Iap2Csm.u8(2, 0),
+        )
+        send(
+            Iap2MessageIds.DEVICE_UUID_UPDATE,
+            Iap2Csm.string(0, deviceUuid()),
+        )
+        log(
+            "iap2 tx=0x4e0d/0x4e0a/0x4e09/0x4e0b/0x4e0c 设备状态问候" +
+                "（name=$deviceName mac=$bluetoothMac）",
+        )
+    }
+
+    /** 分段等待用的截止时刻：取「整体 deadline」与「再等 millis 毫秒」的较小值。 */
+    private fun wifiRescueDeadline(
+        deadlineNanos: Long,
+        millis: Long,
+    ): Long = minOf(deadlineNanos, System.nanoTime() + millis * 1_000_000L)
 
     private fun send(
         messageId: Int,
