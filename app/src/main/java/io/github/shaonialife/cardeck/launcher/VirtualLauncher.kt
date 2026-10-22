@@ -833,10 +833,12 @@ object VirtualLauncher {
         }
         appContextRef = null
         watchdogActive = false
-        // 还原 letterbox 宽高比为系统默认（不把会话调参留在系统里）
-        runCatching {
-            Shell
-                .exec("cmd window reset-letterbox-style aspectRatio")
+        // 还原 letterbox 宽高比为系统默认（不把会话调参留在系统里）。
+        // **必须后台执行**：这是一条 shell 命令（超时上限 6s），而 detach 可能被主线程
+        // 或 Shizuku 回调线程触发；2026-10-22 K60E 日志里就有「SHELL: ⚠ 主线程调用
+        // shell（第 1 次）cmd=cmd window reset-letterbox-style aspectRatio」。
+        Bg.run("letterbox-reset") {
+            runCatching { Shell.exec("cmd window reset-letterbox-style aspectRatio") }
         }
         runCatching { composer?.stop() }
         composer = null

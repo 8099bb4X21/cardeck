@@ -51,7 +51,17 @@ class HiddenDisplaySource(
                 return false
             }
         }
-        CarInputClient.ensure(context)
+        // 等 UserService 真正就绪再建屏：会话在 RECORD 后立刻 attach，服务可能还在
+        // spawn（调试包加载 dex 更慢）。立刻判「不可用」会白白回退到应用侧 PUBLIC 屏
+        // ——那条路径对 UserService 依赖更重，服务没起来就彻底没有触摸（2026-10-22 K60E）。
+        // 本方法已在后台线程（VideoSender.start 回调）执行，阻塞等待是安全的。
+        val svc = CarInputClient.awaitReady(context, USER_SERVICE_WAIT_MS)
+        if (svc == null) {
+            log(
+                "SHIZUKU: UserService 在 ${USER_SERVICE_WAIT_MS}ms 内未就绪" +
+                    "——将回退应用侧 PUBLIC 屏（触摸可能不可用，请检查 Shizuku 是否被系统冻结）",
+            )
+        }
         // 双屏启动器：GL 合成器（dock 屏 + 应用屏）→ 编码 Surface
         val ok =
             VirtualLauncher.attach(
@@ -74,4 +84,13 @@ class HiddenDisplaySource(
     }
 
     override fun release() = detach()
+
+    private companion object {
+        /**
+         * 等 UserService 就绪的上限。取值权衡：太短会误判「不可用」而回退公屏（丢触摸），
+         * 太长会推迟首帧。车机侧对屏幕流 SETUP→激活有看门狗，但 RECORD 已完成、
+         * 视频数据口也已连上，这里多等 3s 不影响会话存活。
+         */
+        const val USER_SERVICE_WAIT_MS = 3_000L
+    }
 }
