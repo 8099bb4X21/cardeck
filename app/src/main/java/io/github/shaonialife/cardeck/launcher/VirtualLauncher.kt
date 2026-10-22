@@ -761,11 +761,15 @@ object VirtualLauncher {
                 "LAUNCHER: letterbox 宽高比=$LETTERBOX_ASPECT_RATIO " +
                     "appDensity=${appNativeDensity}dpi appHiDensity=${appHiDensity}dpi",
             )
-            // 组件名取自运行时包名（不要硬编码）：改 applicationId 后自动跟随
+            // 自启组件必须写成「applicationId/绝对类名」：`am -n` 只认带斜杠的规范，
+            // 且相对类名按 applicationId 展开——.rd 调试包（applicationId 后缀）下
+            // `pkg/.launcher.DockActivity` 会指向不存在的类、纯类名直接被拒
+            // （Bad component name），两种写法都让 dock/grid 启动失败、车机黑屏
+            // 0fps（2026-10-21 .rd 包实测）。绝对类名取自 Class 引用，随重构自动跟随。
             val selfPkg = context.packageName
-            val dockOk = startOn(dockDisplayId, "$selfPkg/.launcher.DockActivity")
+            val dockOk = startOn(dockDisplayId, "$selfPkg/${DockActivity::class.java.name}")
             gridDisplayId = if (appHiDisplayId >= 0) appHiDisplayId else appDisplayId
-            val gridOk = startOn(gridDisplayId, "$selfPkg/.launcher.GridActivity")
+            val gridOk = startOn(gridDisplayId, "$selfPkg/${GridActivity::class.java.name}")
             appContextRef = context.applicationContext
             log("LAUNCHER: dock=$dockOk grid=$gridOk gridDisplay=$gridDisplayId")
             // 桌面在超采样屏时默认活动屏 = 超采样屏（启动即显示桌面）
@@ -880,16 +884,19 @@ object VirtualLauncher {
         return result.ok && result.output.contains("Starting:", ignoreCase = true)
     }
 
-    /** 回桌面：GridActivity 任务带回前台（后台应用保留）；合成器切回桌面所在屏。 */
-    fun goGrid(): Boolean {
+    /** 回桌面：GridActivity 任务带回前台（后台应用保留）；合成器切回桌面所在屏。
+     *
+     *  shell 启动必须异步：调用方（dock 回桌面/桌面 pager 落定）都在主线程，
+     *  同步等 shell 最坏 8s 超时足以 ANR（2026-10-21 实测触发主线程调用告警）。 */
+    fun goGrid() {
         val grid = if (gridDisplayId >= 0) gridDisplayId else appDisplayId
-        val pkg = appContextRef?.packageName ?: return false
-        val ok = startOn(grid, "$pkg/.launcher.GridActivity")
+        val pkg = appContextRef?.packageName ?: return
+        Bg.run("go-grid") {
+            if (!startOn(grid, "$pkg/${GridActivity::class.java.name}")) Log.w(TAG, "回桌面失败")
+        }
         composer?.requestActiveApp(appHiDisplayId >= 0 && grid == appHiDisplayId)
         // 桌面上的提示没有意义（顶层不是第三方应用），直接收起
         LetterboxHintController.clear()
-        if (!ok) Log.w(TAG, "回桌面失败")
-        return ok
     }
 
     // ---- 仪表盘（分屏）与 home 键模式循环 ----

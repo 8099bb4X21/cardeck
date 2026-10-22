@@ -15,3 +15,6 @@ reference/
 keystore.properties
 *.jks
 *.keystore
+
+# 车型重放 fixtures（含真实地址/热点名，逐条评审后才入册）
+app/src/test/resources/carplay/fixtures/*.jsonl
