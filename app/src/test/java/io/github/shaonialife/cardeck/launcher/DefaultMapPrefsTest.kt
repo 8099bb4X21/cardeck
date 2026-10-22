@@ -79,11 +79,14 @@ class MapLaunchCandidatesTest {
     }
 
     @Test
-    fun baiduCarEditionPrefersNaviAutoActivity() {
-        // 百度车机版（com.baidu.naviauto）此前完全不在白名单里——车机上装了也用不了地图屏
+    fun baiduCarEditionUsesLauncherEntryOnly() {
+        // 百度车机版（com.baidu.naviauto）不设显式主界面入口：实测 22.0.1 的包内
+        // 没有地图主界面 Activity，地图由 mapautosdk 在 launcher 的 DefaultActivity
+        // 内渲染。曾误写成 .NaviAutoActivity（不存在），am start 直接报
+        // "Activity class does not exist"——不再保留该候选。
         assertEquals(
-            listOf("com.baidu.naviauto/.NaviAutoActivity", "com.baidu.naviauto/.Launcher"),
-            mapLaunchCandidates("com.baidu.naviauto", "com.baidu.naviauto/.Launcher"),
+            listOf("com.baidu.naviauto/.SlashActivity.DefaultActivity"),
+            mapLaunchCandidates("com.baidu.naviauto", "com.baidu.naviauto/.SlashActivity.DefaultActivity"),
         )
     }
 
