@@ -18,6 +18,8 @@ internal fun Iap2LinkChannel.runSenderSession(
     onWifiCredentials: (Iap2SenderSession.WifiConfiguration) -> Unit,
     onEndpointUpdate: (Iap2SenderSession.CarPlayEndpoint) -> Unit,
     onLinkClosed: () -> Unit = {},
+    /** 本进程已知的车机热点 SSID（无新凭据时沿用，避免每轮拆链）。 */
+    knownCarSsid: () -> String? = { null },
 ) {
     val session =
         Iap2SenderSession(
@@ -27,6 +29,7 @@ internal fun Iap2LinkChannel.runSenderSession(
             DeviceIdentity.deviceName(context),
             onWifiCredentials,
             onEndpointUpdate,
+            knownCarSsid,
             // MFi 挑战长度按车机身份持久化（省掉 20B 静默 6 秒的试探）
             context.applicationContext,
         )

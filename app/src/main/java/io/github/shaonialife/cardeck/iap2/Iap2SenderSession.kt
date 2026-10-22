@@ -40,6 +40,16 @@ class Iap2SenderSession(
      */
     private val onEndpointUpdate: ((CarPlayEndpoint) -> Unit)? = null,
     /**
+     * 本进程已知的车机热点 SSID（上一轮 0x5703/0x4301 或已成功入网的那个）。
+     *
+     * 用途：本轮既没拿到 0x5703、8 秒内也没等到 0x4301 时，**不要直接拆链**——
+     * 只要手机已经在（或知道）车机热点上，就可以合成 `airPlayPort=0` 的端点，
+     * 让主控绑定当前网络后用 mDNS/网关继续等（晚到的 0x4301 仍会热更新端点）。
+     * 2026-10-22 奥迪日志：手机第 2 轮起就在车机热点上，却因为「没有凭据」每轮
+     * 8 秒自杀一次，把车机侧的邀请窗口反复清零。
+     */
+    private val knownCarSsid: (() -> String?)? = null,
+    /**
      * 仅用于 MFi 挑战长度的按车机持久化记忆（[MfiLengthMemory]）。null = 只用进程内
      * 内存表（单测/纯 JVM），不影响协议流程。
      */
@@ -112,6 +122,15 @@ class Iap2SenderSession(
     /** 识别帧是否真的带了接收清单（空清单与「未提供」必须区分）。 */
     private var receiveListDeclared = false
 
+    /**
+     * 车机画像的 WiFi 代际判定（[ReceiverProfile.classify] 的输出，0x1D01 到达时算一次）。
+     * WiFi 凭据交换的分派**只认它**，不要再用「清单里有没有 0x5702」直接判：
+     * 奥迪 MMI 3315 的清单（发 2 项/收 5 项）不含 0x5702，但它实际完整支持
+     * 0x5702→0x5703，且**要靠收到 0x5702 才把 AirPlay 服务拉起来**——按清单硬拦
+     * 会走进「端口 7000 全程 ECONNREFUSED」的死局（2026-10-22 真车日志定谳）。
+     */
+    private var wifiGen: ReceiverProfile.WifiGen = ReceiverProfile.WifiGen.UNKNOWN
+
     /** 车机是否声明会发某消息；null = 未提供清单（未知，按保守策略等待）。 */
     private fun accessoryDeclaresSend(messageId: Int): Boolean? = if (accessorySendIds.isEmpty()) null else messageId in accessorySendIds
 
@@ -128,6 +147,13 @@ class Iap2SenderSession(
          * bring-up 只有几十秒预算，且实测应答都在毫秒级。
          */
         const val START_SESSION_WAIT_NANOS = 3_000_000_000L
+
+        /**
+         * 等 0x5703 的窗口。**短**：奥迪 MMI 3315 八轮实测 0x5702→0x5703 应答
+         * 122/136/166/166/198/246/266/368ms，1.5s 有 4 倍余量；对不支持旧协议的
+         * 车机（BMW iD9 走 NEW 分支压根不发）这一等也只是 1.5s，不拖累 bring-up。
+         */
+        const val WIFI_CONFIG_WAIT_NANOS = 1_500_000_000L
 
         /**
          * 新协议车机（没有 0x5703，AP 信息只在 0x4301 里）的等待窗口。
@@ -217,28 +243,56 @@ class Iap2SenderSession(
         awaitOptionalHid(deadline)
 
         // ---- WiFi 配置交换（两代协议）----
-        // 旧协议（0x5702 → 0x5703）：手机请求，车机回 AP 明文——Audi MIB3 走这条。
+        // 旧协议（0x5702 → 0x5703）：手机请求，车机回 AP 明文。
         // 新协议（0x4300 → 0x4301）：**AP 信息由 0x4301 自带**（Addendum 新版的
-        // WirelessCarPlayParams），BMW iD9 走这条——它在 0x1D01 里既不声明能收 0x5702，
-        // 也不声明会发 0x5703。旧流程对这类车机会在 0x5703 上死等 10 秒后拆链
-        // （2026-10-19 BMW92438 实车日志：每轮都是「等待 0x5703 超时」）。
-        // 因此按车机声明的能力清单分派：不支持旧协议就直接跳到 0x4300/0x4301。
+        // WirelessCarPlayParams），BMW iD9 走这条。
+        //
+        // 分派依据 = [ReceiverProfile.wifiGen]，**不是**「清单里有没有声明 0x5702」：
+        //  - NEW（两清单均 10+ 项仍无 0x57xx，BMW iD9 形态）→ 跳过 0x5702；
+        //  - LEGACY（清单明写 0x5702/0x5703）→ 发；
+        //  - UNKNOWN（清单稀疏或缺声明）→ **也发**。
+        // UNKNOWN 必须发的实据（2026-10-22 奥迪 MMI 3315 真车日志）：它的可收清单
+        // 只有 5 项、不含 0x5702，可是同一天同一台车，旧版本发 0x5702 后 122~368ms
+        // 就回 0x5703、入网 30ms 后 AirPlay 7000 端口即可连通；而按「清单没声明就跳过」
+        // 的那一版，4 轮会话一次 0x5702 都没发，车机 AirPlay 服务**始终没起来**
+        // （45 次连接全部 ECONNREFUSED，_airplay._tcp 也没广播）。
+        // 清单是「可实现的能力声明」，不完整的清单不能反证「不支持」——catplay 与
+        // xcertplay 的车机侧都把 0x5702 列进无线清单，说明规范要求声明，但现实车机
+        // 常漏写；车机对未声明消息照常 ACK（同日日志：0x4e0d/0x4e0b/0x4e0e 三条不在
+        // 清单里，车机逐条 ack 到位）。
         val declaresReceiveWifi =
             accessoryDeclaresReceive(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
         val declaresSendWifi = accessoryDeclaresSend(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION)
-        val legacyWifiExchange = declaresReceiveWifi != false && declaresSendWifi != false
+        val legacyWifiExchange = wifiGen != ReceiverProfile.WifiGen.NEW
+        if (!legacyWifiExchange) {
+            log(
+                "iap2 车机画像判 NEW（BMW iD9 形态）——跳过 0x5702，AP 信息由 0x4301 提供" +
+                    "（清单声明 收=${declaresReceiveWifi ?: "未知"} 发=${declaresSendWifi ?: "未知"}）",
+            )
+        } else if (declaresReceiveWifi == false || declaresSendWifi == false) {
+            log(
+                "iap2 清单未声明 0x5702/0x5703（收=${declaresReceiveWifi ?: "未知"} " +
+                    "发=${declaresSendWifi ?: "未知"}）但画像判 $wifiGen——仍发 0x5702" +
+                    "（清单不完整不能反证「不支持」；车机对未声明消息通常照常处理）",
+            )
+        }
         val wifiFromExchange: WifiConfiguration? =
             if (!legacyWifiExchange) {
-                log(
-                    "iap2 车机未声明支持 0x5702/0x5703（收=${declaresReceiveWifi ?: "未知"} " +
-                        "发=${declaresSendWifi ?: "未知"}）——跳过旧协议，AP 信息由 0x4301 提供",
-                )
                 null
             } else {
                 send(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
-                val wifiConfiguration = expectOrNull(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION, deadline)
+                // 窗口只给 1.5s：奥迪八轮实测应答 122/136/166/166/198/246/266/368ms，
+                // 4 倍余量足够；不支持的旧车机很快就过，不必拖满整段 Phase 1。
+                val wifiConfiguration =
+                    expectOrNull(
+                        Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION,
+                        minOf(deadline, System.nanoTime() + WIFI_CONFIG_WAIT_NANOS),
+                    )
                 if (wifiConfiguration == null) {
-                    log("iap2 0x5703 未在窗口内到达——改走 0x4300/0x4301（新版协议自带 AP 信息）")
+                    log(
+                        "iap2 0x5703 未在 ${WIFI_CONFIG_WAIT_NANOS / 1_000_000}ms 内到达" +
+                            "——改走 0x4300/0x4301（新版协议自带 AP 信息）",
+                    )
                     null
                 } else {
                     val parsed = parseWifiConfiguration(wifiConfiguration)
@@ -326,21 +380,39 @@ class Iap2SenderSession(
                         "iap2 0x4301 未到（车机未声明会发；AirPlay 端点走 mDNS _airplay._tcp）"
                     },
                 )
-                if (wifiFromExchange == null) {
-                    // 既没有 0x5703、也没有 0x4301 = 一点 AP 信息都没有，继续等只会空转。
-                    throw IOException("未拿到车机热点凭据：该车机既不支持 0x5703，0x4301 也未提供 AP 信息")
+                if (wifiFromExchange != null) {
+                    // 有 0x5703 的凭据、只是 0x4301 没到：端点交给 mDNS/网关合成
+                    CarPlayEndpoint(
+                        ssid = wifiFromExchange.ssid,
+                        passphrase = wifiFromExchange.passphrase,
+                        channel = wifiFromExchange.channel,
+                        securityType = wifiFromExchange.securityType,
+                        airPlayPort = 0,
+                        deviceIdentifier = null,
+                        publicKey = null,
+                        sourceVersion = null,
+                        ipAddresses = emptyList(),
+                    )
+                } else {
+                    // 既没有 0x5703、也没有 0x4301。只要「还知道车机热点 SSID」
+                    // （上一轮拿过 / 已入网过）就不要拆链：合成 airPlayPort=0 的端点让
+                    // 主控按当前网络继续走 mDNS/网关，0x4301 晚到时仍会热更新。
+                    // 2026-10-22 奥迪：第 2 轮起手机已在车机热点上，却因「无凭据」
+                    // 每轮 8 秒自杀，把车机侧邀请窗口反复清零（iPhone 实录要 21s）。
+                    val fallback = credentiallessEndpoint(knownCarSsid?.invoke())
+                    if (fallback == null) {
+                        // 一点线索都没有（连 SSID 都不知道），继续等只会空转。
+                        throw IOException(
+                            "未拿到车机热点凭据：本轮 0x5702/0x4301 都没给出 AP 信息，" +
+                                "且本进程没有已知的车机热点（请先在车机上重新选择本机）",
+                        )
+                    }
+                    log(
+                        "iap2 无新凭据——沿用已知热点 \"${fallback.ssid}\" 继续" +
+                            "（绑定当前网络后走 mDNS/网关，晚到的 0x4301 会热更新端点），不拆链",
+                    )
+                    fallback
                 }
-                CarPlayEndpoint(
-                    ssid = wifiFromExchange.ssid,
-                    passphrase = wifiFromExchange.passphrase,
-                    channel = wifiFromExchange.channel,
-                    securityType = wifiFromExchange.securityType,
-                    airPlayPort = 0,
-                    deviceIdentifier = null,
-                    publicKey = null,
-                    sourceVersion = null,
-                    ipAddresses = emptyList(),
-                )
             }
         if (startSession != null) {
             logStartSessionRaw(startSession)
@@ -877,19 +949,18 @@ class Iap2SenderSession(
             log("iap2 0x1d01 车机可收清单(${receives.size})=" + receives.joinToString(" ") { "0x%04x".format(it) })
             // 车机画像（信号收口点）：身份 + 双清单 → era/wifiGen 一行判定，
             // 依据随行——判错时从这里回溯是哪条信号误导（铁律：按能力不按品牌）
-            log(
-                ReceiverProfile.describe(
-                    ReceiverProfile.classify(
-                        ReceiverProfile.Signals(
-                            name = name,
-                            model = model,
-                            manufacturer = manufacturer,
-                            sendIds = sends?.toSet(),
-                            receiveIds = receives.toSet(),
-                        ),
+            val profile =
+                ReceiverProfile.classify(
+                    ReceiverProfile.Signals(
+                        name = name,
+                        model = model,
+                        manufacturer = manufacturer,
+                        sendIds = sends?.toSet(),
+                        receiveIds = receives.toSet(),
                     ),
-                ),
-            )
+                )
+            wifiGen = profile.wifiGen
+            log(ReceiverProfile.describe(profile))
             log(
                 "iap2 0x1d01 协议代际：请求 WiFi 配置(0x5702)=" +
                     (
@@ -902,7 +973,8 @@ class Iap2SenderSession(
                         accessoryDeclaresSend(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION)?.let {
                             if (it) "会发" else "不发"
                         } ?: "未知"
-                    ),
+                    ) +
+                    " → 本轮" + if (profile.wifiGen == ReceiverProfile.WifiGen.NEW) "不发 0x5702（等 0x4301）" else "发 0x5702（清单不全也发）",
             )
         }
         log("iap2 0x1d01 原始体=" + frame.body.joinToString("") { "%02x".format(it) })
@@ -959,4 +1031,30 @@ class Iap2SenderSession(
             ((this[it].toInt() and 0xFF) shl 8) or (this[it + 1].toInt() and 0xFF)
         }
     }
+}
+
+/**
+ * 本轮没拿到任何 AP 凭据时的兜底端点；连 SSID 都不知道就返回 null（调用方报错）。
+ *
+ * 为什么必须有这条：车机的 ctrl 邀请可能要等 20 秒以上（真 iPhone 实录：入网
+ * 21 秒后才 `StartSessionHost`），而 0x4301 甚至可能整轮不来（0x5702 已给了凭据的
+ * 车机）。此时拆链等于把车机侧的等待计时清零，下一轮又从 0 开始。只要知道该连哪个
+ * 热点，就该让主控按当前网络继续等。
+ *
+ * `airPlayPort = 0` + 空地址 = 「端点不自足」，主控必然先等 ctrl 邀请再解析
+ * mDNS/网关，晚到的 0x4301 仍会热更新端点。
+ */
+internal fun credentiallessEndpoint(cachedSsid: String?): Iap2SenderSession.CarPlayEndpoint? {
+    val ssid = cachedSsid?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    return Iap2SenderSession.CarPlayEndpoint(
+        ssid = ssid,
+        passphrase = "",
+        channel = 0,
+        securityType = 0,
+        airPlayPort = 0,
+        deviceIdentifier = null,
+        publicKey = null,
+        sourceVersion = null,
+        ipAddresses = emptyList(),
+    )
 }

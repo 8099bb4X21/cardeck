@@ -328,11 +328,31 @@ object SessionController {
     }
 
     /**
+     * 本进程已知的车机热点 SSID：优先取已绑定的那个，其次取最近一次凭据的 SSID。
+     *
+     * 供给 [Iap2SenderSession] 做「本轮既无 0x5703 也无 0x4301」时的兜底：只要知道
+     * 车机热点是哪个，就不必拆链——按当前网络走 mDNS/网关，晚到的 0x4301 仍会热更新。
+     * 2026-10-22 奥迪 3315 日志：第 2 轮起手机就已在车机热点上，却因「无凭据」每轮
+     * 8 秒自杀一次，把车机侧邀请窗口反复清零（真 iPhone 实录要约 21 秒才邀请）。
+     */
+    private fun knownCarHotspotSsid(): String? = boundCarSsid ?: lastCarWifiSsid
+
+    /**
      * 最近一次 0x5703 的热点密码（仅内存，不落盘）。
      * 「车机热点 → 去连接」按钮复制到剪贴板用（手动加入兜底场景）。
      */
     @Volatile
     var lastWifiPsk: String? = null
+
+    /**
+     * 最近一次从车机拿到的热点 SSID（0x5703 或 0x4301，两条路径都写）。
+     *
+     * 与 [boundCarSsid] 的区别：boundCarSsid 只在**绑定成功**后才有值，而这里在
+     * 「拿到凭据」时就写——用于无新凭据时判断「这台车机应该连哪个热点」。
+     * 奥迪日志里手动兜底按钮误报「尚未拿到热点密码」，也是因为 0x4301 路径没写 psk。
+     */
+    @Volatile
+    var lastCarWifiSsid: String? = null
 
     /** 挂屏 UI 钩子：SSID 变化时通知当前 Activity 回填输入框（可空）。 */
     @Volatile
@@ -386,6 +406,7 @@ object SessionController {
                     onWifiCredentials = wifiCredentialHook,
                     onEndpointUpdate = { endpoint -> onLateEndpoint(endpoint, "车机回连") },
                     onLinkClosed = ::onSenderLinkClosed,
+                    knownCarSsid = ::knownCarHotspotSsid,
                     targetProvider = targetProvider,
                 )
             bluetoothClient =
@@ -396,6 +417,7 @@ object SessionController {
                     onWifiCredentials = wifiCredentialHook,
                     onEndpointUpdate = { endpoint -> onLateEndpoint(endpoint, "主动连车机") },
                     onLinkClosed = ::onSenderLinkClosed,
+                    knownCarSsid = ::knownCarHotspotSsid,
                     targetProvider = targetProvider,
                 )
             ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
@@ -573,11 +595,13 @@ object SessionController {
         // mDNS（DiPlay 视为手机重新上线、再拉一轮 RFCOMM）。只刷新密码缓存。
         if (videoSender?.isRunning == true) {
             lastWifiPsk = wifi.passphrase
+            lastCarWifiSsid = wifi.ssid
             appendLog("0x5703 冗余凭据（会话推流中）——保持现有 WiFi 绑定与 ctrl 广播不变")
             return
         }
         ssidSink?.invoke(wifi.ssid)
         lastWifiPsk = wifi.passphrase
+        lastCarWifiSsid = wifi.ssid
         phaseHint = "拿到车机热点凭据，绑定 WiFi…"
         appendLog(">>> 拿到车机热点凭据（0x5703）——立即绑定 WiFi + 广播 _carplay-ctrl")
         // ctrl 广播已在 startConnection 时发布（catplay：连接前保持发布能力在线）。
@@ -1623,6 +1647,13 @@ object SessionController {
         )
         phaseHint = "蓝牙已连上车机，解析热点地址…"
         ssidSink?.invoke(endpoint.ssid)
+        // 凭据缓存对两条路径都要写：0x5703 走 onWifiCredentials，0x4301 只到这里。
+        // 漏写会让「车机热点 → 去连接」手动兜底误报「尚未拿到热点密码（需 0x5703）」
+        // ——2026-10-22 奥迪日志里就是这么把排查方向带偏的。
+        if (endpoint.ssid.isNotBlank()) {
+            lastCarWifiSsid = endpoint.ssid
+            if (endpoint.passphrase.isNotEmpty()) lastWifiPsk = endpoint.passphrase
+        }
         // 诊断（老车机排查必看）：地址是 IPv4 还是只有 IPv6、TXT features 是否声明配对能力。
         // 奥迪 4xxx 两种「连不上」都源于这里——旧版日志里完全没有这两项。
         val addresses = endpoint.ipAddresses

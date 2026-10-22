@@ -36,6 +36,8 @@ class Iap2BluetoothClient(
     private val onEndpointUpdate: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
     /** 发送端链路断开（保活泵退出）时通知主控（释放僵尸轮次，见 SessionController.onSenderLinkClosed）。 */
     private val onLinkClosed: () -> Unit = {},
+    /** 本进程已知的车机热点 SSID（本轮无新凭据时沿用，避免每轮 8 秒拆链）。 */
+    private val knownCarSsid: () -> String? = { null },
     /** 目标车机（动态读取：选择后无需重启链路，下一轮尝试即生效）。 */
     private val targetProvider: () -> TargetDevicePrefs.Target? = { null },
 ) {
@@ -345,7 +347,16 @@ class Iap2BluetoothClient(
         val channel = Iap2LinkChannel(stream, name = "iap2-bt-car") { line -> log(line) }
         activeChannel = channel
         try {
-            channel.runSenderSession(context, SESSION_TIMEOUT_MILLIS, log, onEndpoint, onWifiCredentials, onEndpointUpdate, onLinkClosed)
+            channel.runSenderSession(
+                context,
+                SESSION_TIMEOUT_MILLIS,
+                log,
+                onEndpoint,
+                onWifiCredentials,
+                onEndpointUpdate,
+                onLinkClosed,
+                knownCarSsid,
+            )
         } catch (error: IOException) {
             log("BT-C: SESSION 失败 - ${error.message}")
         } finally {

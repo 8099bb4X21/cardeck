@@ -7,6 +7,7 @@ import android.view.Surface
 import io.github.shaonialife.cardeck.airplay.AirPlayCrypto
 import io.github.shaonialife.cardeck.airplay.BinaryPlist
 import io.github.shaonialife.cardeck.airplay.StreamFrameCipher
+import io.github.shaonialife.cardeck.net.TcpLiveness
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -96,6 +97,9 @@ class VideoSender(
             val client = Socket()
             client.connect(InetSocketAddress(host, dataPort), 5_000)
             client.tcpNoDelay = true
+            // 推流是长连接：车机熄火/走出热点时链路常不发 RST，写入会阻塞在满窗口上，
+            // 编码器线程随之卡死（表现为「画面停在最后一帧」）。
+            TcpLiveness.configure(client, "视频数据口", log)
             socket = client
             log("VIDEO: 数据端口已连通 $host:$dataPort（等 RECORD 后启动编码器）")
             true

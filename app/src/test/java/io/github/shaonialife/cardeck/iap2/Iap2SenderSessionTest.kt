@@ -59,7 +59,7 @@ class Iap2SenderSessionTest {
         val pair = InMemoryStreamPair()
         val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
         val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
-        val accessory = MockAccessory(accessoryChannel, audiDeclarations = true, lateStartSession = true)
+        val accessory = MockAccessory(accessoryChannel, shape = MockAccessory.Shape.AUDI_9310, lateStartSession = true)
 
         val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
         accessoryThread.isDaemon = true
@@ -98,6 +98,105 @@ class Iap2SenderSessionTest {
         phoneChannel.close()
         accessoryChannel.close()
         pump.join(2_000)
+    }
+
+    /**
+     * **奥迪 MMI 3315 真实形态必须发 0x5702**（2026-10-22 回归的钉子）。
+     *
+     * 它的可收清单只有 5 项且不含 0x5702，旧实现据此判「跳过旧协议」→ 整轮一次
+     * 0x5702 都没发 → 车机 AirPlay 服务**始终没起来**（45 次连接全部 ECONNREFUSED，
+     * `_airplay._tcp` 也没广播）。而同一台车在旧版本（无脑发 0x5702）下 122~368ms
+     * 就回 0x5703，入网 30ms 后端口即可连通。
+     *
+     * 判据是 `ReceiverProfile.wifiGen`：稀疏清单 → UNKNOWN → 保守走旧协议。
+     */
+    @Test
+    fun sparseDeclarationsStillSendWifiRequest() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory = MockAccessory(accessoryChannel, shape = MockAccessory.Shape.AUDI_3315)
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val endpoint =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "34:86:DA:86:BB:96",
+                deviceName = "test-device",
+            ).run(timeoutMillis = 10_000L)
+
+        assertTrue("奥迪 3315 形态必须发 0x5702（跳过会让车机不开 AirPlay 服务）", accessory.sawWifiRequest)
+        // 且必须采用 0x5703 给的凭据
+        assertEquals("MockAP", endpoint.ssid)
+        assertEquals("secret-passphrase", endpoint.passphrase)
+        assertEquals(36, endpoint.channel)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+    }
+
+    /**
+     * **宝马 iD9 形态不能发 0x5702**（同一处改动的另一半钉子）。
+     *
+     * 它两份清单都完整（合计 ≥10 项）仍无 0x57xx → 画像判 NEW → 跳过 0x5702，
+     * AP 信息完全由 0x4301 自带。若误发 0x5702 并傻等 0x5703，就是 8b64147
+     * 当初要修的「每轮死等超时」老毛病。
+     */
+    @Test
+    fun fullDeclarationsWithoutOldProtocolSkipWifiRequest() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory = MockAccessory(accessoryChannel, shape = MockAccessory.Shape.BMW_ID9)
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val endpoint =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "34:86:DA:86:BB:96",
+                deviceName = "test-device",
+            ).run(timeoutMillis = 10_000L)
+
+        assertTrue("宝马 iD9 形态不应发 0x5702（AP 信息由 0x4301 自带）", !accessory.sawWifiRequest)
+        // AP 信息来自 0x4301 的无线组
+        assertEquals("MockAP", endpoint.ssid)
+        assertEquals(49152, endpoint.airPlayPort)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+    }
+
+    /**
+     * **无新凭据但知道热点 SSID 时不得拆链**（2026-10-22 奥迪回归的第二根钉子）。
+     *
+     * 关键时序证据：真 iPhone 14:23:02 入网、14:23:23 才收到车机 ctrl 邀请
+     * （21 秒）；旧实现「8 秒没 0x4301 就抛异常」每轮自杀，车机侧的等待永远
+     * 从 0 重新计时。只要还知道该连哪个热点，就必须让主控按当前网络继续等。
+     */
+    @Test
+    fun knownCarSsidAvoidsCredentiallessAbort() {
+        val endpoint = credentiallessEndpoint("Audi_MMI_3315_5GHz")
+        assertNotNull("已知热点时必须合成兜底端点，而不是拆链", endpoint)
+        assertEquals("Audi_MMI_3315_5GHz", endpoint!!.ssid)
+        // 必须是「不自足端点」：主控据此才走「等 ctrl 邀请 → mDNS/网关」路径
+        assertEquals(0, endpoint.airPlayPort)
+        assertTrue(endpoint.ipAddresses.isEmpty())
+    }
+
+    /** 连 SSID 都不知道才允许失败（继续等只会空转）。 */
+    @Test
+    fun noCredentialAndNoKnownSsidStillFails() {
+        assertEquals(null, credentiallessEndpoint(null))
+        assertEquals(null, credentiallessEndpoint(""))
+        assertEquals(null, credentiallessEndpoint("   "))
     }
 
     /**
@@ -142,8 +241,19 @@ class Iap2SenderSessionTest {
     /** 按 DiPlay Iap2WirelessControlClient 的时序脚本化应答。 */
     private class MockAccessory(
         private val channel: Iap2LinkChannel,
-        /** 奥迪形态：识别帧声明只发 0x5703/0xea03（不发 StartHID/0x4301）。 */
-        private val audiDeclarations: Boolean = false,
+        /**
+         * 车机形态（0x1D01 双清单 + 是否应答 0x5702）。
+         *
+         * 这四种形态是 WiFi 凭据协议分派的**全部**依据来源，任何一个判错都会
+         * 让对应车型连不上，所以逐个钉死：
+         *  - [Shape.TEST_BENCH]：DiPlay/xcertplay 测试台，无清单、走 0x5702→0x5703；
+         *  - [Shape.AUDI_9310]：发清单 2 项（含 0x5703），走旧协议；
+         *  - [Shape.AUDI_3315]：发 2 项（**不含** 0x5703）收 5 项（**不含** 0x5702）
+         *    ——稀疏且不完整，但**实际完整支持旧协议**；判成「跳过 0x5702」会让车机
+         *    压根不启动 AirPlay 服务（2026-10-22 真车日志：45 次 ECONNREFUSED）；
+         *  - [Shape.BMW_ID9]：两清单完整（10+ 项）仍无 0x57xx，AP 信息只在 0x4301。
+         */
+        private val shape: Shape = Shape.TEST_BENCH,
         /** Phase 1 结束后再补发 0x4301（车机窗口晚开的真实时序）。 */
         private val lateStartSession: Boolean = false,
         /**
@@ -155,20 +265,35 @@ class Iap2SenderSessionTest {
         private val parser = Iap2Csm.Parser()
         private val pending = ArrayDeque<Iap2Csm.Frame>()
 
+        /** 发送端是否发过 0x5702（分派断言用）。 */
+        @Volatile
+        var sawWifiRequest: Boolean = false
+            private set
+
+        /** 车机形态。 */
+        enum class Shape {
+            TEST_BENCH,
+            AUDI_9310,
+            AUDI_3315,
+            BMW_ID9,
+        }
+
+        /** 老式奥迪/测试台：不声明接收清单，也不发 StartHID。 */
+        private val legacyHid: Boolean get() = shape != Shape.TEST_BENCH
+
+        /** 是否应答 0x5702（旧协议在网络侧有凭据交换）。 */
+        private val answersWifiRequest: Boolean get() = shape != Shape.BMW_ID9
+
         fun run() {
             check(channel.awaitReady(10_000)) { "mock link not ready" }
 
             expect(Iap2MessageIds.START_IDENTIFICATION)
             send(
                 Iap2MessageIds.IDENTIFICATION_INFORMATION,
-                Iap2Csm.string(0, "MockCarPlay"),
+                Iap2Csm.string(0, identityName()),
                 Iap2Csm.string(1, "MU-1"),
                 Iap2Csm.string(2, "Mock Manufacturer"),
-                if (audiDeclarations) {
-                    Iap2Csm.u16List(6, intArrayOf(0x5703, 0xea03))
-                } else {
-                    ByteArray(0)
-                },
+                *declarationParams(),
             )
             expect(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
 
@@ -178,8 +303,8 @@ class Iap2SenderSessionTest {
             send(Iap2MessageIds.MFI_RESPONSE, Iap2Csm.param(0, ByteArray(70) { (it * 7).toByte() }))
             expect(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
 
-            // 订阅 + StartHID（奥迪形态不发，发送端应直接跳过等待）
-            if (!audiDeclarations) {
+            // 订阅 + StartHID（奥迪/宝马形态不发，发送端应直接跳过等待）
+            if (!legacyHid) {
                 send(Iap2MessageIds.START_NOW_PLAYING_UPDATES)
                 send(Iap2MessageIds.START_POWER_UPDATES)
                 send(
@@ -192,19 +317,24 @@ class Iap2SenderSessionTest {
                 expect(Iap2MessageIds.DEVICE_HID_REPORT)
             }
 
-            // WiFi 配置
-            expect(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
-            // 迟到一条订阅请求（真实车机 bring-up 常见：0x5000 与 0x5703 相邻到达）。
-            // 它必须被暂存而不是在 expectOrNull 里被反复重读——旧实现把非预期帧塞回
-            // 「自己下一轮优先读取」的队列，同一帧无限循环（2026-10-18 日志刷屏根因）。
-            send(Iap2MessageIds.START_NOW_PLAYING_UPDATES)
-            send(
-                Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION,
-                Iap2Csm.string(1, "MockAP"),
-                Iap2Csm.string(2, "secret-passphrase"),
-                Iap2Csm.u8(3, 2),
-                Iap2Csm.u8(4, 36),
-            )
+            // WiFi 配置：只有 BMW 形态不发 0x5702（AP 信息由 0x4301 自带）。
+            // 若发送端在 BMW 形态下仍发 0x5702，下面第一个 expect(0x4e0d) 会立刻
+            // 报「expected 0x4e0d got 0x5702」——分派错误无处可藏。
+            if (answersWifiRequest) {
+                expect(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
+                sawWifiRequest = true
+                // 迟到一条订阅请求（真实车机 bring-up 常见：0x5000 与 0x5703 相邻到达）。
+                // 它必须被暂存而不是在 expectOrNull 里被反复重读——旧实现把非预期帧塞回
+                // 「自己下一轮优先读取」的队列，同一帧无限循环（2026-10-18 日志刷屏根因）。
+                send(Iap2MessageIds.START_NOW_PLAYING_UPDATES)
+                send(
+                    Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION,
+                    Iap2Csm.string(1, "MockAP"),
+                    Iap2Csm.string(2, "secret-passphrase"),
+                    Iap2Csm.u8(3, 2),
+                    Iap2Csm.u8(4, 36),
+                )
+            }
 
             // 设备状态问候（真机顺序：0x4E0D/0x4E0A/0x4E09/0x4E0B/0x4E0C → 0x4300）
             expect(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE)
@@ -226,6 +356,46 @@ class Iap2SenderSessionTest {
                 sendStartSession()
             }
         }
+
+        /** 0x1D01 的 name（奥迪/宝马形态用真实车机名，MFi 记忆与画像键才一致）。 */
+        private fun identityName(): String =
+            when (shape) {
+                Shape.AUDI_9310, Shape.AUDI_3315 -> "Audi_MMI_3315"
+                Shape.BMW_ID9 -> "BMW 87866"
+                Shape.TEST_BENCH -> "MockCarPlay"
+            }
+
+        /**
+         * 0x1D01 的参数 6（车机会发）与参数 7（车机可收）。
+         *
+         * 奥迪 3315 的 5 项接收清单取自真实识别帧（2026-10-22 日志），宝马 iD9 的
+         * 两份完整清单取自 ReceiverProfileTest 的同款形态——两者都是「分派判错的现场」。
+         */
+        private fun declarationParams(): Array<ByteArray> =
+            when (shape) {
+                // 测试台：完全不声明 → 画像 UNKNOWN → 走旧协议
+                Shape.TEST_BENCH -> emptyArray()
+                // 奥迪 MMI 9310：只声明发 0x5703/0xea03（无接收清单）
+                Shape.AUDI_9310 -> arrayOf(Iap2Csm.u16List(6, intArrayOf(0x5703, 0xea03)))
+                // 奥迪 MMI 3315：发 2 项（0x4301/0xea03）、收 5 项（均无 0x57xx）
+                Shape.AUDI_3315 ->
+                    arrayOf(
+                        Iap2Csm.u16List(6, intArrayOf(0x4301, 0xea03)),
+                        Iap2Csm.u16List(7, intArrayOf(0x4e0c, 0x4e09, 0x4300, 0xea00, 0xea01)),
+                    )
+                // 宝马 iD9：两清单各 10 项、合计 20（≥10）仍无 0x57xx → NEW
+                Shape.BMW_ID9 ->
+                    arrayOf(
+                        Iap2Csm.u16List(
+                            6,
+                            intArrayOf(0xaa01, 0xaa03, 0x5000, 0x5002, 0x5200, 0x5203, 0xae00, 0xae02, 0x4157, 0x4301),
+                        ),
+                        Iap2Csm.u16List(
+                            7,
+                            intArrayOf(0xaa00, 0xaa02, 0xaa04, 0xaa05, 0xea00, 0xea01, 0x5001, 0x5201, 0x4300, 0x4e0d),
+                        ),
+                    )
+            }
 
         private fun sendStartSession() {
             send(

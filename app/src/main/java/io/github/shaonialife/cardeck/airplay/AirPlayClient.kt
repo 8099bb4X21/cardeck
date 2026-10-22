@@ -10,6 +10,7 @@ import io.github.shaonialife.cardeck.iap2.Iap2Csm
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
 import io.github.shaonialife.cardeck.net.EndpointHosts
+import io.github.shaonialife.cardeck.net.TcpLiveness
 import io.github.shaonialife.cardeck.util.DeviceIdentity
 import java.io.IOException
 import java.net.Inet6Address
@@ -2070,6 +2071,8 @@ class AirPlayClient(
             socket.connect(InetSocketAddress(resolveAddress(host), setup.eventPort), 5_000)
             socket.tcpNoDelay = true
             socket.soTimeout = 30_000
+            // 事件通道同样是长连接：对端消失时要能自己发现（见 TcpLiveness 注释）。
+            TcpLiveness.configure(socket, "事件通道", log)
             log("EVENT: ✓ 已连接事件通道 $host:${setup.eventPort}（${if (sessionKey != null) "加密" else "明文"}）")
             val cipher =
                 sessionKey?.let { secret ->
@@ -2281,6 +2284,9 @@ class AirPlayClient(
                 // 读由独立读线程负责（阻塞等数据），请求超时由待响应表的 poll 控制；
                 // 这里若留 soTimeout，读线程会周期性收到 SocketTimeoutException 而退出
                 newSocket.soTimeout = 0
+                // 对端健康检查：内核默认 keepalive 要等 2 小时才开始探测，而车机熄火/
+                // 走出热点时链路常不发 RST，读线程会一直挂着（画面冻结、看门狗不触发）。
+                TcpLiveness.configure(newSocket, "控制通道", log)
                 socket = newSocket
                 activeAddress = address
                 activeHost = addressLiteral(address)

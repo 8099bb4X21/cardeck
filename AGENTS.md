@@ -621,9 +621,51 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   （合计 ≥10 项，iD9 形态）仍无 0x5703/0x5702，稀疏清单判 UNKNOWN 走旧协议
   （0x5703 有超时兜底）；③ identityKey 存原文（与 0x1D01 逐字一致），持久化键的
   清洗由 MfiLengthMemory.receiverKey 负责——后续 Memory 并表共用此键。
+- **能力清单只能证明「有」，不能证明「没有」——绝不可当硬门禁**（2026-10-22 奥迪
+  3315 真车定谳，0.1.13 回归的根因）：8b64147 把 WiFi 凭据分派写成「清单没声明
+  0x5702 就跳过旧协议」，而奥迪的可收清单只有 5 项（`0x4e0c 0x4e09 0x4300 0xea00
+  0xea01`）不含 0x5702 → 整轮**一次 0x5702 都没发** → 车机 AirPlay 服务**始终没起来**
+  （45 次连接全部 `ECONNREFUSED`、`_airplay._tcp` 也没广播），4 轮会话每轮 8 秒自拆。
+  同一台车同一热点在旧版本（无脑发 0x5702）下的对照：`0x5702 → 0x5703` 应答
+  **122/136/166/166/198/246/266/368ms**，入网 30ms 后端口 7000 即可连通。
+  两条铁证说明「未声明 ≠ 不支持」：① 同日日志里 0x4e0d/0x4e0b/0x4e0e 三条**不在**
+  清单里，车机逐条 ACK 到位（seq 107→ack=107、110→ack=110、113→ack=113）；
+  ② catplay `catplay_carplay_rx_gadget` 与 xcertplay `Iap2IdentificationClient` 扮演
+  车机时都把 0x5702 列进无线清单（`WIRELESS_PHONE_MESSAGES = [0x4e0d, 0x4e0e, 0x5702]`），
+  说明规范要求声明、但现实车机常漏写。
+  **现行分派**：只认 `ReceiverProfile.wifiGen`——`NEW`（两清单合计 ≥10 项仍无 0x57xx，
+  BMW iD9 形态）才跳过 0x5702；`LEGACY` 与 `UNKNOWN`（稀疏/缺声明）**一律发**。
+  0x5703 等待窗口收到 **1.5s**（奥迪实测有 4 倍余量），超时只降级不拆链。
+  单测 `Iap2SenderSessionTest.sparseDeclarationsStillSendWifiRequest`（奥迪 3315 形态
+  必须发）与 `fullDeclarationsWithoutOldProtocolSkipWifiRequest`（宝马 iD9 形态不发）
+  钉死两个方向，**改这段先看这两条**。推广：任何「按清单能力分支」的地方，都要给出
+  「清单不完整时走保守路径」的分支，不能把缺席当成否证。
+- **无新凭据时不要拆链**（2026-10-22）：`Iap2SenderSession` 在「本轮既没 0x5703、
+  8 秒内也没 0x4301」时，只要 `knownCarSsid()` 能给出已知热点（`boundCarSsid` 或
+  `lastCarWifiSsid`），就合成 `airPlayPort=0` 的端点继续走 mDNS/网关，**不抛异常**。
+  奥迪日志里手机第 2 轮起就在车机热点上，却因「无凭据」每轮 8 秒自杀，把车机侧
+  邀请窗口反复清零——而真 iPhone 实录里车机**入网后约 21 秒**才发 ctrl 邀请
+  （`StartSessionHost`，奥迪 sysdiagnose 2026-10-21 14:23:02 入网 → 14:23:23 邀请），
+  每轮重启等于永远等不到。配套：0x4301 路径现在也写 `lastWifiPsk`/`lastCarWifiSsid`
+  （此前只在 0x5703 路径写，导致手动兜底按钮误报「尚未拿到热点密码」）。
+- **ctrl 广播端口必须固定**（2026-10-22）：Android NSD 没有 JmDNS 的 `reannounce()`，
+  重发公告只能注销+重注册；旧实现连带 `stop()` 一起做，每次 `ServerSocket(0)` 换端口
+  （奥迪日志实测 43857→33383→33125→38151→40697→38015），中间还有最长 1.2s 服务空窗。
+  依赖 ctrl 邀请的车机（xcertplay 车机侧每会话 7 次 ×1.5s 探测）会按缓存端口连到已关闭
+  的 socket。现改为：`unregisterServiceOnly()` 只换 mDNS 注册，socket 与 accept 线程
+  在整个 advertiser 生命周期内复用（`acceptRunning` 独立于 `registered`）。
+- **CarPlay 长连接要显式设 TCP keepalive**（2026-10-22，参照 DiPlay `TcpLiveness`）：
+  内核默认 keepalive 要 **2 小时**才开始探测；车机熄火/手机走出热点时链路常**不发 RST**，
+  控制通道读线程会一直挂在 `read()` 上（画面冻结、看门狗不触发）。`net/TcpLiveness`
+  统一设 idle=10s / interval=3s / count=3 + `TCP_USER_TIMEOUT=20s`（19s 判死刻意大于
+  车机 15s 看门狗），已接控制通道、事件通道、视频数据口三处。**API 坑**：
+  `ParcelFileDescriptor.fromSocket` 在 API 29 前返回 socket 自身 fd 的包装，close 会把
+  原 socket 一起关掉——29+ 才用它取副本，26~28 反射 `Socket.getFileDescriptor$()`。
 - **协议差异以日志为准**：测试台（DiPlay）与真车（奥迪 MIB3）行为多处相反（MFi 挑战
   32B/20B、0x4301 有无、ctrl 邀请死锁等），细节见 `docs/PROTOCOL-NOTES.md` §9，
-  改协议代码前先对照。
+  改协议代码前先对照。**0x5702 的外部佐证**在 §5b（catplay / xcertplay /
+  amineross-showcase / wiomoc-iap2 四个独立车机实现全部声明它）、**0.1.13 奥迪回归的
+  完整证据链与判读要点**在 §9j。
 - **老车机（CarPlay 210.81 / 奥迪 4xxx 固件）必须按 catplay 的「三时代」分类处理**
   （2026-10-19 定谳，`docs/PROTOCOL-NOTES.md` §9f）：该代是 **pre-HomeKit** 接收端
   （`_airplay._tcp` features 无 bit38 `HK_PAIRING_AND_ENCRYPT`），只接受
