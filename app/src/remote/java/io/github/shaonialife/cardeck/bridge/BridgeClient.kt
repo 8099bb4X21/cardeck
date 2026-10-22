@@ -26,6 +26,38 @@ object BridgeClient {
     var stateText: String = "未连接"
         private set
 
+    /** 下次自动重连的时刻（elapsedRealtime；0 = 无排定）。倒计时显示用。 */
+    @Volatile
+    var nextRetryAtElapsed: Long = 0
+        private set
+
+    /** 最近一次断连/失败原因（状态行倒计时附带展示）。 */
+    @Volatile
+    private var lastDisconnectReason: String? = null
+
+    /**
+     * 设置页状态行：处于退避重连时附加「Ns 后自动重试」倒计时——断连对用户必须是
+     * 可见且带明确预期的（2026-10-22 用户要求），不是停在一句「连接断开」。
+     */
+    fun statusLine(): String {
+        val next = nextRetryAtElapsed
+        if (next > 0) {
+            val remain = ((next - android.os.SystemClock.elapsedRealtime()) / 1000 + 1).coerceAtLeast(0)
+            val reason = lastDisconnectReason
+            return "连接断开${if (reason != null) "：$reason" else ""}（${remain}s 后自动重试）"
+        }
+        return stateText
+    }
+
+    /**
+     * 连接状态跃迁通知（true=连上；false=此前已连上的连接断开）。
+     * App 层用它弹用户提示；回调在连接线程触发，实现方自行切主线程。
+     */
+    @Volatile
+    var connectionEvents: ((connected: Boolean) -> Unit)? = null
+
+    private var wasConnected = false
+
     @Volatile
     private var appContext: Context? = null
 
@@ -38,6 +70,10 @@ object BridgeClient {
     /** 蜂窝互联网通道：车机会话期间进程网络被绑到车机热点，调试桥必须走它。 */
     @Volatile
     private var route: InternetRoute? = null
+
+    /** 当前连接尝试走的是否默认网络（welcome 成功时用于复位路由失败判定）。 */
+    @Volatile
+    private var connUsedDefaultNetwork = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -96,6 +132,7 @@ object BridgeClient {
 
     private fun runLoop() {
         var backoffMs = 2_000L
+        var attempt = 0
         while (running) {
             val ctx = appContext ?: return
             val url = BridgePrefs.serverUrl(ctx)
@@ -104,6 +141,11 @@ object BridgeClient {
                 sleepQuiet(3_000)
                 continue
             }
+            // 路由选择必须进日志流：车机会话期间进程网络被绑到热点上，连接走蜂窝
+            // 还是默认、失败原因是什么——这些不看日志就等于盲调（2026-10-22 实测：
+            // WS 入热点即断、4 分钟后才自愈，期间日志流停更却无任何痕迹可查）
+            val network = route?.current()
+            attempt++
             val client =
                 WsClient(
                     url,
@@ -120,26 +162,50 @@ object BridgeClient {
 
                         override fun onClosed(reason: String) {
                             setState("连接断开：$reason")
+                            lastDisconnectReason = reason.take(40)
+                            debugLog("连接断开：$reason")
                         }
                     },
-                    // 每次重连读当前值：会话中途蜂窝才注册上也能在下一轮接上
-                    route?.current(),
+                    network,
                 )
             ws = client
             setState("连接中…")
+            nextRetryAtElapsed = 0
+            connUsedDefaultNetwork = network == null
+            debugLog(
+                "连接尝试 #$attempt 路由=${if (network != null) "蜂窝" else "默认网络"} " +
+                    "退避=${backoffMs}ms（backoff 重置说明上一轮曾成功）",
+            )
             try {
                 client.connect()
                 backoffMs = 2_000L
-            } catch (_: InterruptedException) {
+            } catch (interrupted: InterruptedException) {
                 return
-            } catch (_: Exception) {
-                // 连接失败/断开：退避重连
+            } catch (error: Exception) {
+                // 连接失败/断开：退避重连（失败原因写日志流——重试风暴是否在发生
+                // 必须在流内可见，否则远程侧只看到「日志停更」猜不出原因）。
+                // 默认网络失败要上报路由器：假 VALIDATED（缓存判定）下每轮都撞
+                // 同一条死路，noteFailure 后下一轮切蜂窝。
+                debugLog("连接失败（${error.message ?: error.javaClass.simpleName}）")
+                lastDisconnectReason = (error.message ?: error.javaClass.simpleName).take(40)
+                route?.noteFailure(connUsedDefaultNetwork)
             }
             ws = null
+            // 已连上过的连接走到这里 = 断连；告知 App 层弹用户提示（倒计时在状态行）
+            if (wasConnected) {
+                wasConnected = false
+                runCatching { connectionEvents?.invoke(false) }
+            }
             if (!running) break
+            nextRetryAtElapsed = android.os.SystemClock.elapsedRealtime() + backoffMs
             sleepQuiet(backoffMs)
             backoffMs = (backoffMs * 2).coerceAtMost(30_000L)
         }
+    }
+
+    /** 写进主日志流（与业务日志同管道）：桥自身的连接事件对远程排障可见。 */
+    private fun debugLog(message: String) {
+        appContext?.let { DebugFileLog.append(it, "BRIDGE: $message") }
     }
 
     private fun sleepQuiet(millis: Long) {
@@ -159,6 +225,14 @@ object BridgeClient {
             "welcome" -> {
                 if (msg.optBoolean("ok")) {
                     setState("已连接（${msg.optLong("pairedAt")}）")
+                    nextRetryAtElapsed = 0
+                    debugLog("已连上调试服务器（配对通过），日志流恢复")
+                    // 本轮连接走默认网络且真通了：清除「假 VALIDATED」失败判定
+                    route?.noteSuccess(connUsedDefaultNetwork)
+                    if (!wasConnected) {
+                        wasConnected = true
+                        runCatching { connectionEvents?.invoke(true) }
+                    }
                     // 全量回补：服务端按 seq 去重并留环形缓冲
                     sendLogBatch(since = 0)
                 } else {

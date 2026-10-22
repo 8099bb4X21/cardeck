@@ -32,7 +32,8 @@ class BridgeSetupActivity : AppCompatActivity() {
     private val ticker =
         object : Runnable {
             override fun run() {
-                statusText?.text = "状态：${BridgeClient.stateText}"
+                // statusLine()：退避重连期间带「Ns 后自动重试」实时倒计时
+                statusText?.text = "状态：${BridgeClient.statusLine()}"
                 refresh.postDelayed(this, 1_000)
             }
         }
@@ -140,7 +141,7 @@ class BridgeSetupActivity : AppCompatActivity() {
             }
         statusText =
             TextView(this).apply {
-                text = "状态：${BridgeClient.stateText}"
+                text = "状态：${BridgeClient.statusLine()}"
                 setTextColor(0xFF3DD6C4.toInt())
                 textSize = 14f
             }

@@ -1,5 +1,7 @@
 package io.github.shaonialife.cardeck.bridge
 
+import android.os.Handler
+import android.os.Looper
 import io.github.shaonialife.cardeck.SenderApp
 import io.github.shaonialife.cardeck.util.Bg
 import io.github.shaonialife.cardeck.util.DebugFileLog
@@ -10,9 +12,26 @@ import io.github.shaonialife.cardeck.util.DebugFileLog
  * 在进程最早入口安装日志 tap 与调试桥；standard 变体不含本文件，一切无从谈起。
  */
 class BridgeApp : SenderApp() {
+    private val main = Handler(Looper.getMainLooper())
+
     override fun onCreate() {
         super.onCreate()
         DebugFileLog.append(this, "BRIDGE: 远程调试变体启动（${io.github.shaonialife.cardeck.BuildConfig.VERSION_NAME}）")
+        // 断连对用户可见：悬浮提示 + 设置页状态行的自动重连倒计时（2026-10-22
+        // 用户要求）。恢复时短提示收口，反复震荡由悬浮窗单例自然去重（新弹覆盖旧弹）。
+        BridgeClient.connectionEvents = { connected ->
+            main.post {
+                if (connected) {
+                    BridgeOverlay.show(this, "调试连接已恢复", dismissMillis = 3_000)
+                } else {
+                    BridgeOverlay.show(
+                        this,
+                        "调试连接已断开——正在自动重连（进度见调试页状态行）",
+                        dismissMillis = 6_000,
+                    )
+                }
+            }
+        }
         // 先清掉卡死的旧安装会话（防堵后续安装），再决定连接/续接
         Bg.run("bridge-clean-sessions") { ReinstallFlow.abandonStaleSessions(this) }
 

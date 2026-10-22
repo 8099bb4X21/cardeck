@@ -60,10 +60,38 @@ class InternetRoute(
      *  默认网络带 VALIDATED（真通互联网，如家里/公司 WiFi）就优先它——无条件走
      *  蜂窝反而更差：室内 WiFi 环境蜂窝信号弱，15MB APK 实测中途断流
      * （unexpected end of stream，2026-10-21）。车机会话期间进程默认网络是
-     * 车机热点（无互联网、不 VALIDATED），此时才退蜂窝。 */
+     *  车机热点（无互联网、不 VALIDATED），此时才退蜂窝。
+     *  **但 VALIDATED 是缓存判定 ≠ 当前可达**（2026-10-22 实测：测试台热点无上行
+     *  互联网却仍标 VALIDATED，重连每轮 ENETUNREACH 且永不换路）——默认网络近期
+     *  连接失败过（[noteFailure]）即改走蜂窝；成功（[noteSuccess]）或默认网络
+     *  更换（netId 变化，如会话结束解绑）时复位判定。 */
     fun current(): Network? {
         val active = cm.activeNetwork ?: return cellular
+        // toString() 即 netId 的十进制串（公开途径拿网络身份）：默认网络更换
+        // （会话结束解绑/切网）即视为新网络，失败判定复位
+        val netKey = active.toString()
+        if (netKey != lastActiveNetKey) {
+            lastActiveNetKey = netKey
+            defaultFailStreak = 0
+        }
         val caps = cm.getNetworkCapabilities(active) ?: return cellular
-        return if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) null else cellular
+        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return cellular
+        if (defaultFailStreak > 0) return cellular
+        return null
     }
+
+    /** 一次走默认网络的连接失败：连续失败即换蜂窝，直到网络变化或成功复位。 */
+    fun noteFailure(usedDefaultNetwork: Boolean) {
+        if (usedDefaultNetwork) defaultFailStreak++
+    }
+
+    /** 走默认网络的连接成功：清除失败判定，恢复优先默认的快速路径。 */
+    fun noteSuccess(usedDefaultNetwork: Boolean) {
+        if (usedDefaultNetwork) defaultFailStreak = 0
+    }
+
+    @Volatile
+    private var defaultFailStreak = 0
+
+    private var lastActiveNetKey: String? = null
 }
