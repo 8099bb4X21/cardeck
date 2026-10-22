@@ -293,7 +293,10 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   让系统逻辑上保持「亮屏且未上锁」，只把物理面板在 SurfaceFlinger 层断电（scrcpy `-S` 同源）：
   受信屏额外声明 `VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP(1<<11)` +
   `VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED(1<<12)`，再对物理主屏 token 调
-  `SurfaceControl.setDisplayPowerMode(0)`。四条硬约束：① `ALWAYS_UNLOCKED` 需
+  `SurfaceControl.setDisplayPowerMode(0)`。**dock 屏虽「不受信」也必须带同一对 flag**
+  （同样的三级降级）——否则它落在默认显示组，物理屏一断电整组跟着灭，车机侧表现为
+  「app 屏正常、dock 栏全黑，解锁后恢复」（2026-10-23 实测；AOSP 只在 `AUTO_MIRROR`
+  时清 `OWN_DISPLAY_GROUP`，dock 没声明 PUBLIC 故 flag 保留）。四条硬约束：① `ALWAYS_UNLOCKED` 需
   `ADD_ALWAYS_UNLOCKED_DISPLAY`，**部分 ROM 未授予 shell**，带上会 SecurityException
   打挂整块屏 → `createDisplay` 必须三级降级（组+解锁 → 组 → 基础 flags）；
   ② **SDK 34+ 删除了 `SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken`**，

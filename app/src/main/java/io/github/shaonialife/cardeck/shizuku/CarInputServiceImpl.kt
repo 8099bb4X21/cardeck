@@ -455,7 +455,42 @@ class CarInputServiceImpl(
                     vd = createVirtualDisplayAttempt(dm, name, width, height, dpi, surface, baseFlags, "受信基础")
                 }
             } else {
-                vd = createVirtualDisplayAttempt(dm, name, width, height, dpi, surface, baseFlags, "非受信")
+                // dock 屏（不受信）默认落在**默认显示组**：物理主屏断电/锁屏时整组跟着灭，
+                // 车机侧表现为「app 屏正常、dock 栏全黑」，解锁后恢复（2026-10-23 实测）。
+                // 与受信屏同款三级降级：组+解锁 → 组 → 基础。
+                //  · AOSP 只在 AUTO_MIRROR 时清掉 OWN_DISPLAY_GROUP，而 AUTO_MIRROR 只随
+                //    PUBLIC 自动置上；dock 没声明 PUBLIC，所以该 flag 会保留；
+                //  · 两者都只要求权限（ADD_TRUSTED_DISPLAY / ADD_ALWAYS_UNLOCKED_DISPLAY），
+                //    不改变 dock「不受信」的语义（第三方任务仍然上不去）。
+                vd =
+                    createVirtualDisplayAttempt(
+                        dm,
+                        name,
+                        width,
+                        height,
+                        dpi,
+                        surface,
+                        baseFlags or FLAG_OWN_DISPLAY_GROUP or FLAG_ALWAYS_UNLOCKED,
+                        "非受信+独立组+ALWAYS_UNLOCKED",
+                    )
+                if (vd == null) {
+                    fileLog("$name 带 ALWAYS_UNLOCKED 失败——降级为独立组（ROM 可能未给 shell 该权限）")
+                    vd =
+                        createVirtualDisplayAttempt(
+                            dm,
+                            name,
+                            width,
+                            height,
+                            dpi,
+                            surface,
+                            baseFlags or FLAG_OWN_DISPLAY_GROUP,
+                            "非受信+独立组",
+                        )
+                }
+                if (vd == null) {
+                    fileLog("$name 带 OWN_DISPLAY_GROUP 失败——回退基础 flags（主屏断电时该屏会跟着休眠）")
+                    vd = createVirtualDisplayAttempt(dm, name, width, height, dpi, surface, baseFlags, "非受信")
+                }
             }
             val created = vd
             val id = created?.display?.displayId ?: -1

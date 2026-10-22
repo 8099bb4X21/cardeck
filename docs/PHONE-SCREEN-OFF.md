@@ -32,6 +32,13 @@ scrcpy 的 `-S/--turn-screen-off` 走的是另一条路：**系统逻辑上保�
 注意 `PUBLIC` 会隐式加 `AUTO_MIRROR`，而 `AUTO_MIRROR` 会把 `OWN_DISPLAY_GROUP` 清掉——
 我们同时声明了 `OWN_CONTENT_ONLY`（清掉 AUTO_MIRROR），所以独立显示组能保留。
 
+**dock 屏也必须独立成组**（2026-10-23 实测）：dock 是**不受信**屏，原来只拿基础 flags，
+于是落进默认显示组——物理面板一断电，整组跟着灭，车机侧表现为「app 屏正常、dock 栏全黑，
+解锁后恢复」。修法是给 dock 也加 `OWN_DISPLAY_GROUP`（带回退）：
+AOSP 只在 `AUTO_MIRROR` 时清这个 flag，而 `AUTO_MIRROR` 只随 `PUBLIC` 自动置上，
+dock 没声明 `PUBLIC`，所以 flag 会保留；`OWN_DISPLAY_GROUP` 只要求 `ADD_TRUSTED_DISPLAY`，
+不改变 dock「不受信」的语义（第三方任务仍然上不去）。
+
 ### 2.2 物理面板断电：`SurfaceControl.setDisplayPowerMode`
 
 对**物理主屏 token** 调 `setDisplayPowerMode(token, 0)`（0=OFF，2=NORMAL）。
