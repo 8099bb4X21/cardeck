@@ -133,9 +133,34 @@ class VideoSender(
                     setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
                     setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
                     setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                    // 固定 H.264 level 4.0（SPS level_idc=40，真 iPhone 同款流形态）。
+                    // 不固定时编码器按「分辨率+帧率」自动选：默认 30fps 下 1412x654
+                    // 合法落入 level 3.2——奥迪 DELPHI 解码器对该 level 静默不渲染
+                    // （TCP 照收、会话活着、车机黑屏，2026-10-22 奥迪 0628 真机日志
+                    // 定谳：同机 level=40 全部成功、level=32 首例黑屏）。60fps 时编码
+                    // 器本来就选 4.0，此设置对它无变化。
+                    runCatching {
+                        setInteger(
+                            MediaFormat.KEY_LEVEL,
+                            MediaCodecInfo.CodecProfileLevel.AVCLevel4,
+                        )
+                    }
                 }
             val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            // 个别编码器不接受 level 指定（configure 抛异常=视频全灭），降级为不指定重试
+            try {
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (levelRejected: Exception) {
+                log("VIDEO: 指定 level 4.0 被编码器拒绝（${levelRejected.message}）——回退自动选择（部分车机可能黑屏）")
+                val fallback =
+                    MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+                        setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                        setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+                        setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
+                        setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                    }
+                codec.configure(fallback, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
             val surface = codec.createInputSurface()
             codec.start()
             encoder = codec
@@ -277,12 +302,14 @@ class VideoSender(
         val annexB = ByteArray(size)
         buffer.get(annexB)
         val nalUnits = splitAnnexB(annexB)
-        val sps = nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 }
+        val rawSps = nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 }
         val pps = nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 }
-        if (sps == null || pps == null) {
+        if (rawSps == null || pps == null) {
             log("VIDEO: csd 缺少 SPS/PPS（${nalUnits.size} 个 NAL），跳过 config")
             return
         }
+        // level_idc 补丁到 4.0（关键帧内嵌 SPS 同样会打补丁，见 sendVideoFrame）
+        val sps = patchSpsLevel(rawSps)
         val avcc = ByteArrayOutputStream(8 + sps.size + pps.size)
         avcc.write(1)
         avcc.write(sps[1].toInt()) // profile
@@ -333,13 +360,17 @@ class VideoSender(
         val nalUnits = splitAnnexB(annexB)
         if (nalUnits.isEmpty()) return
 
+        // 关键帧内嵌的 SPS 同步打 level 补丁：车机会用帧内 SPS 更新解码器参数，
+        // 只改 csd 不改帧内 SPS 的话，收到第一个关键帧就又变回低 level 了
         val packed = ByteArrayOutputStream(size)
         for (nal in nalUnits) {
-            packed.write((nal.size ushr 24) and 0xFF)
-            packed.write((nal.size ushr 16) and 0xFF)
-            packed.write((nal.size ushr 8) and 0xFF)
-            packed.write(nal.size and 0xFF)
-            packed.write(nal)
+            val out =
+                if (nal.isNotEmpty() && (nal[0].toInt() and 0x1F) == 7) patchSpsLevel(nal) else nal
+            packed.write((out.size ushr 24) and 0xFF)
+            packed.write((out.size ushr 16) and 0xFF)
+            packed.write((out.size ushr 8) and 0xFF)
+            packed.write(out.size and 0xFF)
+            packed.write(out)
         }
         val plain = packed.toByteArray()
 
@@ -545,4 +576,30 @@ class VideoSender(
             }
         }
     }
+}
+
+/** H.264 level_idc 目标值：4.0（0x28）。真 iPhone 同款流形态。 */
+private const val TARGET_LEVEL_IDC = 40
+
+/**
+ * 把 SPS 的 level_idc 补丁到 4.0（3.1→4.0 是放宽约束，安全）。
+ *
+ * 为什么不改用 MediaFormat.KEY_LEVEL：实测（MagicOS/Android 17）编码器**静默忽略**
+ * 该键——不抛异常、SPS 里仍是 3.1。只能后处理。
+ *
+ * 为什么安全：① level_idc 在 SPS 的固定偏移（nal[3]），单字节改值不改长度；
+ * ② 3.1→4.0 只放宽 maxMBPS/maxFS/maxBR 上限，解码器按 4.0 分配的资源对 3.1 编码
+ * 的流只多不少；③ 0x28 非零且不会引入 emulation prevention 序列（00 00 0x）。
+ * 若 SPS 本来就 ≥4.0（如 60fps 时自动选 4.2），保持原值不降级。
+ *
+ * 动机：奥迪 DELPHI 解码器对 level 3.1/3.2 的流静默不渲染（TCP 照收、会话正常、
+ * 车机黑屏；2026-10-22 奥迪 0628 真机日志：同机 level=40 全部成功、level=32 首例黑屏）。
+ */
+internal fun patchSpsLevel(sps: ByteArray): ByteArray {
+    if (sps.size < 4) return sps
+    val current = sps[3].toInt() and 0xFF
+    if (current >= TARGET_LEVEL_IDC) return sps
+    val patched = sps.copyOf()
+    patched[3] = TARGET_LEVEL_IDC.toByte()
+    return patched
 }
