@@ -1307,6 +1307,9 @@ class AirPlayClient(
      */
     var onMediaKey: ((Int) -> Unit)? = null
 
+    /** 导航键（iDrive 旋钮/四向拨杆）：需要虚拟屏焦点，由会话层注入 DPAD。 */
+    var onNavKey: ((Int) -> Unit)? = null
+
     /** 虚拟链路唯一实例（出站路由/三形态语义见 [VirtualIap2Link]）。 */
     private fun obtainIapLink(): VirtualIap2Link =
         iapLink ?: synchronized(this) {
@@ -1319,6 +1322,7 @@ class AirPlayClient(
                     alive = { socket?.isClosed == false },
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
+                    it.onNavKey = { keyCode -> onNavKey?.invoke(keyCode) }
                     it.begin()
                     iapLink = it
                 }

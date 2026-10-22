@@ -28,11 +28,36 @@ object DisplayPrefs {
     /** 连接时真息屏（物理面板断电）默认值。 */
     const val SCREEN_OFF_DEFAULT = true
 
+    /** HID 原始报文日志默认值：默认关（校准键位时临时打开，避免刷屏）。 */
+    const val HID_RAW_LOG_DEFAULT = false
+
     private const val PREFS_NAME = "settings"
     private const val KEY_SCALE = "display_scale_percent"
     private const val KEY_FPS = "display_fps"
     private const val KEY_MOVE_THROTTLE = "move_throttle_ms"
     private const val KEY_SCREEN_OFF = "screen_off_on_connect"
+    private const val KEY_HID_RAW_LOG = "hid_raw_log"
+
+    /**
+     * HID 原始报文日志（键位校准用）：打开后每帧 `hidSendReport` 会写一行
+     * `HID-RAW: uuid=… bytes=…` 到主日志，用来对照按下某个键时的字节。
+     */
+    fun hidRawLog(context: Context): Boolean =
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_HID_RAW_LOG, HID_RAW_LOG_DEFAULT)
+
+    fun setHidRawLog(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_HID_RAW_LOG, enabled)
+            .apply()
+        io.github.shaonialife.cardeck.input.HidNavigation.rawLogEnabled = enabled
+    }
 
     /**
      * 连接时真息屏（默认开）：会话建立后把物理面板硬件断电（同 scrcpy `-S`），

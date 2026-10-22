@@ -14,6 +14,11 @@ interface ICarInput {
     boolean pointerMove(int displayId, int x, int y);
     boolean pointerUp(int displayId, int x, int y);
 
+    // 按键注入（iDrive 旋钮 → 方向键/确认键）：与触摸同一条 injectInputEvent 通路，
+    // KeyEvent 带 targetDisplayId 直注虚拟屏，毫秒级、不碰手机主屏。
+    // 失败返回 false（调用方回退 `input -d <id> keyevent <code>`）。
+    boolean keyEvent(int displayId, int keyCode);
+
     // 受信虚拟屏（shell 权限）：第三方应用的新任务可落在其上，
     // 解决「应用内跳转的任务被重定向到手机主屏」问题（AOSP 安全策略）。
     // trusted=false：不声明 FLAG_TRUSTED——第三方任务无法被系统安置到该屏

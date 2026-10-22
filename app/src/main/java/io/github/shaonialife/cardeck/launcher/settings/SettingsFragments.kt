@@ -665,6 +665,34 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         autoConnectOn.setOnClickListener { applyAutoConnect(true) }
         autoConnectOff.setOnClickListener { applyAutoConnect(false) }
 
+        // HID 原始日志（键位校准）：默认关；打开后每帧 hidSendReport 写一行 HID-RAW
+        val hidRawOn = view.findViewById<TextView>(R.id.btnHidRawOn)
+        val hidRawOff = view.findViewById<TextView>(R.id.btnHidRawOff)
+        var hidRawEnabled = DisplayPrefs.hidRawLog(ctx)
+
+        fun refreshHidRaw(enabled: Boolean) {
+            hidRawOn.setBackgroundResource(
+                if (enabled) R.drawable.bg_segment_sel else R.drawable.bg_segment,
+            )
+            hidRawOn.setTextColor(if (enabled) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+            hidRawOff.setBackgroundResource(
+                if (enabled) R.drawable.bg_segment else R.drawable.bg_segment_sel,
+            )
+            hidRawOff.setTextColor(if (enabled) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt())
+        }
+
+        refreshHidRaw(hidRawEnabled)
+
+        fun applyHidRaw(enabled: Boolean) {
+            if (enabled == hidRawEnabled) return
+            hidRawEnabled = enabled
+            DisplayPrefs.setHidRawLog(ctx, enabled)
+            refreshHidRaw(enabled)
+            hostToast(if (enabled) "已开启 HID 原始日志（校准完请关掉）" else "已关闭 HID 原始日志")
+        }
+        hidRawOn.setOnClickListener { applyHidRaw(true) }
+        hidRawOff.setOnClickListener { applyHidRaw(false) }
+
         // 滑条 progress（0..26）→ 百分比（30..160，步进 5）
         fun progressOf(percent: Int) = (percent - DisplayPrefs.SCALE_MIN) / DisplayPrefs.SCALE_STEP
 

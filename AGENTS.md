@@ -330,6 +330,17 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   （`AutoConnectPrefs`，默认开；与「连接时真息屏」同一面板）。
   下车走 `ACTION_AUTO_STOP_SESSION` → `disconnect()`；该 intent 用 `startService` 投递
   （服务在跑时进程已是前台服务态，不受后台启动限制）。
+- **车机 HID：方向盘媒体键 + iDrive 旋钮**（2026-10-23，详见 `docs/HID-KNOB.md`）：
+  `/info` 的 hidDevices **已遍历全部 uuid 发 hidSetInputMode**——不要改成按 uuid/名称猜设备
+  （奥迪发 `"0"/"1"`、DiPlay 发整数），**描述符才是唯一稳定信号**。Consumer 页(0x0C) →
+  `ConsumerKeys`（Array/Variable 两种语义分开解，混用会一个键都点不出）→
+  `AudioManager.dispatchMediaKeyEvent` 全局媒体键；Generic Desktop 页(0x01) 的
+  Wheel(0x38)/Hat(0x39) → `HidNavigation` → `ICarInput.keyEvent(displayId, DPAD_*)`
+  注入虚拟屏（KeyEvent 也走 `setDisplayId`；失败回退 `input -d`）。**DPAD 不能全局分发**
+  （会落到手机主屏），目标屏取 `VirtualLauncher.activeAppDisplayId()`。焦点高亮 = 网格单元
+  `isFocusable=true` + `foreground=focus_ring`（foreground 不覆盖 background）；
+  **dock 是独立 display，DPAD 不跨屏**。键位校准开关：设置 → 显示 →「HID 原始日志」
+  （`DisplayPrefs.hidRawLog` → `HidNavigation.rawLogEnabled`，日志行 `HID-RAW: uuid=… bytes=…`）。
 - **取消连接必须全程可中断**：`sessionStarting` 互斥标志的复位依赖配对流程线程
   走到 finally——该线程可能阻塞在不可中断的等待（无超时 connect、mDNS 等待、
   BT 保活读循环），任何一处卡住都会让取消「无效」（英雄卡永久「正在连接」）。

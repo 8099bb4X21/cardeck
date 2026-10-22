@@ -6,6 +6,7 @@ import io.github.shaonialife.cardeck.iap2.Iap2LinkEngine
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.MfiLengthMemory
 import io.github.shaonialife.cardeck.input.ConsumerKeys
+import io.github.shaonialife.cardeck.input.HidNavigation
 import java.security.SecureRandom
 import java.util.TimeZone
 import java.util.UUID
@@ -616,24 +617,34 @@ class VirtualIap2Link(
                 // 于是日志一直打 `usage=无 keyCode=0`，按键到了却点不出任何动作。
                 val params = Iap2Csm.parseParams(frame.body)
                 val report = hidReportFromParams(params)
-                val keyMap = hidDescriptor?.let(ConsumerKeys::parseDescriptor)
-                val usages =
-                    when {
-                        report == null -> emptyList()
-                        keyMap != null -> keyMap.usagesFor(report)
-                        // 无描述符：退化为「单字节即 Usage ID」
-                        else -> listOf(report[0].toInt() and 0xFF).filter { it != 0 }
+                // 导航类设备（iDrive 旋钮/四向拨杆）：Generic Desktop 页的 Wheel/Hat，
+                // 走 DPAD 注入（需要虚拟屏焦点），不能当媒体键全局分发。
+                if (report != null && HidNavigation.isNavigationDevice(hidDescriptor)) {
+                    val navKeys = HidNavigation.handle("iap2-hid", hidDescriptor, report)
+                    if (navKeys.isNotEmpty()) {
+                        log("IAPLINK: 旋钮/导航键 " + navKeys.joinToString("+") { HidNavigation.nameOf(it) })
+                        navKeys.forEach { onNavKey?.invoke(it) }
                     }
-                if (hidReportFrames < HID_REPORT_VERBOSE_FRAMES) {
-                    hidReportFrames++
-                    log(
-                        "IAPLINK: 车机 0x6802 params=" +
-                            params.joinToString(",") { "${it.id}=" + it.value.joinToString("") { b -> "%02x".format(b) } } +
-                            " 报告=" + (report?.joinToString(" ") { "%02x".format(it) } ?: "空") +
-                            " 位图=" + (keyMap?.isArray?.let { if (it) "Array" else "Variable" } ?: "无描述符"),
-                    )
+                } else {
+                    val keyMap = hidDescriptor?.let(ConsumerKeys::parseDescriptor)
+                    val usages =
+                        when {
+                            report == null -> emptyList()
+                            keyMap != null -> keyMap.usagesFor(report)
+                            // 无描述符：退化为「单字节即 Usage ID」
+                            else -> listOf(report[0].toInt() and 0xFF).filter { it != 0 }
+                        }
+                    if (hidReportFrames < HID_REPORT_VERBOSE_FRAMES) {
+                        hidReportFrames++
+                        log(
+                            "IAPLINK: 车机 0x6802 params=" +
+                                params.joinToString(",") { "${it.id}=" + it.value.joinToString("") { b -> "%02x".format(b) } } +
+                                " 报告=" + (report?.joinToString(" ") { "%02x".format(it) } ?: "空") +
+                                " 位图=" + (keyMap?.isArray?.let { if (it) "Array" else "Variable" } ?: "无描述符"),
+                        )
+                    }
+                    fireHidKeysLocked(usages)
                 }
-                fireHidKeysLocked(usages)
             }
 
             else -> {
@@ -780,6 +791,9 @@ class VirtualIap2Link(
      * 只有 iAP2 链路真正建立后才会来（见 [eventLinkArmed]）。
      */
     var onMediaKey: ((Int) -> Unit)? = null
+
+    /** 导航键（iDrive 旋钮/四向）：交给会话层注入虚拟屏（DPAD_*），不是全局媒体键。 */
+    var onNavKey: ((Int) -> Unit)? = null
 
     /** 车机在 0x6800 StartHID 里给出的 HID 描述符（解析报告用；null = 未提供）。 */
     private var hidDescriptor: ByteArray? = null

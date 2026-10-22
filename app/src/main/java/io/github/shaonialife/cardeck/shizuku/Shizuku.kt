@@ -271,6 +271,21 @@ object CarInputClient {
             false
         }
 
+    /**
+     * 按键注入到指定 display（iDrive 旋钮 → 方向键/确认键）。
+     * 走 UserService 的 injectInputEvent（毫秒级）；失败时调用方回退 shell `input -d`。
+     */
+    fun keyEvent(
+        displayId: Int,
+        keyCode: Int,
+    ): Boolean =
+        try {
+            service?.keyEvent(displayId, keyCode) ?: false
+        } catch (t: Throwable) {
+            diag("keyEvent($displayId,$keyCode) 失败：${t.javaClass.simpleName} ${t.message}")
+            false
+        }
+
     private val conn =
         object : ServiceConnection {
             override fun onServiceConnected(

@@ -8,6 +8,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
 import android.view.InputEvent
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import java.lang.reflect.Method
@@ -128,12 +129,12 @@ class CarInputServiceImpl(
     private var injectFailLogged = false
 
     private fun inject(
-        event: MotionEvent,
+        event: InputEvent,
         displayId: Int,
     ): Boolean {
         val inj = injector
         if (inj == null) {
-            event.recycle()
+            recycle(event)
             return false
         }
         return try {
@@ -157,8 +158,28 @@ class CarInputServiceImpl(
             }
             false
         } finally {
-            event.recycle()
+            recycle(event)
         }
+    }
+
+    /** KeyEvent 没有可复用的池化语义（recycle 已废弃），只有 MotionEvent 需要回收。 */
+    private fun recycle(event: InputEvent) {
+        (event as? MotionEvent)?.recycle()
+    }
+
+    /**
+     * 按键注入（iDrive 旋钮 → 方向键/确认键）：与触摸共用 injectInputEvent，
+     * 差别只是 event 换成 KeyEvent 且同样 setDisplayId 到目标虚拟屏。
+     */
+    override fun keyEvent(
+        displayId: Int,
+        keyCode: Int,
+    ): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val down = KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0)
+        if (!inject(down, displayId)) return false
+        val up = KeyEvent(now, now + 24, KeyEvent.ACTION_UP, keyCode, 0)
+        return inject(up, displayId)
     }
 
     @Suppress("DEPRECATION")

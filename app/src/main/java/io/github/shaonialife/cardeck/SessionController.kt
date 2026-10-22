@@ -18,8 +18,10 @@ import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
 import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import io.github.shaonialife.cardeck.input.ConsumerKeys
+import io.github.shaonialife.cardeck.input.HidNavigation
 import io.github.shaonialife.cardeck.input.TouchReports
 import io.github.shaonialife.cardeck.input.TouchRouter
+import io.github.shaonialife.cardeck.launcher.VirtualLauncher
 import io.github.shaonialife.cardeck.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
 import io.github.shaonialife.cardeck.net.AirPlayFeatures
@@ -140,6 +142,8 @@ object SessionController {
         AppOrientationCompat.diagSink = ::appendLog
         // 主线程调用 shell 的告警（历史上两次真机 ANR 都源于此；HKS 下 logcat 不可读）
         Shell.violationSink = ::appendLog
+        // HID 原始日志开关（键位校准）：静态标志从偏好初始化，进程冷启动也要生效
+        HidNavigation.rawLogEnabled = DisplayPrefs.hidRawLog(appContext!!)
     }
 
     /** 追加一行日志：logcat + 文件 + 进程级缓冲 + 挂屏渲染（增量行直送）。任意线程可调。 */
@@ -178,6 +182,26 @@ object SessionController {
         val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+    }
+
+    /**
+     * 旋钮/四向拨杆 → 方向键：注入**应用屏**虚拟显示（DPAD 需要焦点，不能全局分发）。
+     *
+     * 走 UserService 的 `injectInputEvent`（毫秒级）；失败回退 `input -d <id> keyevent`
+     * （多 ~30ms 但不会丢键）。dок 屏不参与——跨屏焦点需要 Launcher 侧改造，见
+     * docs/HID-KNOB.md。
+     */
+    private fun injectNavigationKey(keyCode: Int) {
+        // 优先注入「当前可见的应用屏」（桌面网格 / 打开中的应用屏），否则退回主应用屏
+        val displayId =
+            VirtualLauncher.activeAppDisplayId().takeIf { it > 0 }
+                ?: VirtualLauncher.appDisplayId
+        if (displayId <= 0) {
+            appendLog("HID: 应用屏未就绪（displayId=$displayId）——导航键忽略")
+            return
+        }
+        if (CarInputClient.keyEvent(displayId, keyCode)) return
+        Shell.exec("input -d $displayId keyevent $keyCode", 3_000L)
     }
 
     /**
@@ -1893,6 +1917,8 @@ object SessionController {
                                 dispatchMediaKey(keyCode)
                                 appendLog("EVENT: 车机媒体键（iAP2 0x6802）→ keyCode=$keyCode 已注入")
                             }
+                            // 旋钮/四向拨杆（iAP2 0x6802 通路）：注入虚拟屏的 DPAD
+                            created.onNavKey = { keyCode -> injectNavigationKey(keyCode) }
                         }
                     retireSession()
                     // 会话静默降噪（2026-10-10）：从交接点起暂停其它接收端的出站连接探测
@@ -2048,8 +2074,23 @@ object SessionController {
                                                 report != null && report.size == 1 -> rawValue?.takeIf { it != 0 }
                                                 else -> null
                                             }
-                                        val contacts =
+                                        // 旋钮/四向拨杆（Generic Desktop 页的 Wheel/Hat）：
+                                        // 不是 Consumer 设备才走这里；输出 DPAD_* 注入虚拟屏。
+                                        val navKeys =
                                             if (consumerUsage == null && report != null) {
+                                                if (HidNavigation.rawLogEnabled) {
+                                                    appendLog(
+                                                        "HID-RAW: uuid=$uuid bytes=" +
+                                                            report.joinToString(" ") { "%02X".format(it) } +
+                                                            " desc=${descriptor?.size ?: 0}B",
+                                                    )
+                                                }
+                                                HidNavigation.handle(uuid.orEmpty(), descriptor, report)
+                                            } else {
+                                                emptyList()
+                                            }
+                                        val contacts =
+                                            if (consumerUsage == null && navKeys.isEmpty() && report != null) {
                                                 // 触摸格式按设备描述符判定（Digitizer 页 + 单指/多槽），
                                                 // 描述符不可用时按报文长度回退——不依赖车机型号或 uuid
                                                 val touchFormat =
@@ -2058,7 +2099,14 @@ object SessionController {
                                             } else {
                                                 null
                                             }
-                                        if (consumerUsage != null) {
+                                        if (navKeys.isNotEmpty()) {
+                                            navKeys.forEach(::injectNavigationKey)
+                                            appendLog(
+                                                "EVENT: 旋钮/导航键 " +
+                                                    navKeys.joinToString("+") { HidNavigation.nameOf(it) } +
+                                                    "（uuid=$uuid）",
+                                            )
+                                        } else if (consumerUsage != null) {
                                             val keyCode = ConsumerKeys.keyCodeFor(consumerUsage)
                                             if (keyCode != 0) {
                                                 dispatchMediaKey(keyCode)
