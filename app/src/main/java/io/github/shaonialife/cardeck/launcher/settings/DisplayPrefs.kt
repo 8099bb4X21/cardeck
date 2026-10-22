@@ -25,10 +25,35 @@ object DisplayPrefs {
     const val MOVE_THROTTLE_DEFAULT = 0
     const val MOVE_THROTTLE_MAX = 48
 
+    /** 连接时真息屏（物理面板断电）默认值。 */
+    const val SCREEN_OFF_DEFAULT = true
+
     private const val PREFS_NAME = "settings"
     private const val KEY_SCALE = "display_scale_percent"
     private const val KEY_FPS = "display_fps"
     private const val KEY_MOVE_THROTTLE = "move_throttle_ms"
+    private const val KEY_SCREEN_OFF = "screen_off_on_connect"
+
+    /**
+     * 连接时真息屏（默认开）：会话建立后把物理面板硬件断电（同 scrcpy `-S`），
+     * 系统保持唤醒、虚拟屏照常渲染；关闭则只用暗幕。
+     * 切换在会话中立即生效（见 SessionController.applyScreenOffPreference）。
+     */
+    fun screenOffOnConnect(context: Context): Boolean =
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SCREEN_OFF, SCREEN_OFF_DEFAULT)
+
+    fun setScreenOffOnConnect(
+        context: Context,
+        enabled: Boolean,
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_SCREEN_OFF, enabled)
+            .apply()
+    }
 
     /** 流分辨率缩放百分比（30–160，步进 5；默认 100）。 */
     fun scalePercent(context: Context): Int =

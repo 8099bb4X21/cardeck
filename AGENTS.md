@@ -288,6 +288,26 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   （否则下次启动会沿用 true）。手动「假息屏」`enterDimNow` 走 `force` 路径不受限制。
   **判断标准**：任何「会话期间才该生效」的 UI/系统副作用，都要同时挂在
   「推流启动成功」与「onEnded」两端——只挂一端必然漏掉车机主动断开这条路径。
+- **手机真息屏（物理面板断电）+ 虚拟屏独立常亮**（2026-10-23，详见
+  `docs/PHONE-SCREEN-OFF.md`）：按电源键会「锁屏 + Doze」（车机黑屏/掉帧），正确做法是
+  让系统逻辑上保持「亮屏且未上锁」，只把物理面板在 SurfaceFlinger 层断电（scrcpy `-S` 同源）：
+  受信屏额外声明 `VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP(1<<11)` +
+  `VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED(1<<12)`，再对物理主屏 token 调
+  `SurfaceControl.setDisplayPowerMode(0)`。四条硬约束：① `ALWAYS_UNLOCKED` 需
+  `ADD_ALWAYS_UNLOCKED_DISPLAY`，**部分 ROM 未授予 shell**，带上会 SecurityException
+  打挂整块屏 → `createDisplay` 必须三级降级（组+解锁 → 组 → 基础 flags）；
+  ② **SDK 34+ 删除了 `SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken`**，
+  必须经 `ClassLoaderFactory` + `SYSTEMSERVERCLASSPATH` 加载
+  `com.android.server.display.DisplayControl`，并 `Runtime.loadLibrary0(cls,"android_servers")`，
+  否则 JNI 未注册（scrcpy 同款）；③ 时机：推流成功后 `enterPhoneScreenOff()`，
+  `onEnded` 走 `restorePhoneScreen(sleep=true)`（保持黑、直接 KEYCODE_SLEEP），
+  `retireSession`/手动断开设 false（点亮面板）；④ **必须有三层恢复**（会话结束 /
+  UserService 过期自尽前 / 应用下次启动）——否则应用崩溃会把手机留在黑屏
+  （电源键按两次能救回，但不能依赖它）。**用户开关**：设置 → 显示 →「连接时真息屏」
+  （默认开，`DisplayPrefs.screenOffOnConnect`，键 `screen_off_on_connect`）；关闭后
+  只保留暗幕。会话中切换经 `SessionController.applyScreenOffPreference` **立即收放**
+  （车机屏可操作，不必等下次连接）。「显示」面板已套 ScrollView——车机内容区只有
+  ~200dp 高，4 段内容不滚动会把最后一段裁掉。
 - **取消连接必须全程可中断**：`sessionStarting` 互斥标志的复位依赖配对流程线程
   走到 finally——该线程可能阻塞在不可中断的等待（无超时 connect、mDNS 等待、
   BT 保活读循环），任何一处卡住都会让取消「无效」（英雄卡永久「正在连接」）。

@@ -67,7 +67,7 @@ jobs:
             if [ -z "${!v:-}" ]; then MISSING="$MISSING $v"; fi
           done
           if [ -n "$MISSING" ]; then
-            echo "::error::缺少仓库 Secrets:$MISSING —— 本流水线只出正式签名包，不会退回 debug 签名。配置方法见本文件顶部注释。"
+            echo "::error::缺少仓库 Secrets:$MISSING。到 ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/settings/secrets/actions 添加（KEYSTORE_BASE64 生成：PowerShell [Convert]::ToBase64String([IO.File]::ReadAllBytes('keystore.jks'))）。本流水线只出正式签名包，不会退回 debug 签名。"
             exit 1
           fi
           # 允许粘贴多行 base64（Windows 复制常见），解码前先去掉换行
@@ -133,12 +133,14 @@ jobs:
           NAME="CarDeck-${VERSION}-release.apk"
           cp "$APK" "$NAME"
           SHA=$(sha256sum "$NAME" | cut -d' ' -f1)
+          SIZE=$(du -h "$NAME" | cut -f1)
           {
             echo "name=$NAME"
             echo "sha=$SHA"
             echo "cert=$CERT"
+            echo "size=$SIZE"
           } >> "$GITHUB_OUTPUT"
-          echo "已生成 $NAME（$(du -h "$NAME" | cut -f1)）"
+          echo "已生成 $NAME（$SIZE）"
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4
@@ -155,6 +157,7 @@ jobs:
           NAME: ${{ steps.package.outputs.name }}
           SHA: ${{ steps.package.outputs.sha }}
           CERT: ${{ steps.package.outputs.cert }}
+          SIZE: ${{ steps.package.outputs.size }}
         run: |
           set -eu
           {
@@ -163,10 +166,14 @@ jobs:
             echo "| 项 | 值 |"
             echo "|---|---|"
             echo "| APK | ${NAME} |"
+            echo "| APK 大小 | ${SIZE} |"
             echo "| SHA-256 | ${SHA} |"
             echo "| 签名证书 SHA-256 | ${CERT} |"
             echo
             echo "安装：adb install -r ${NAME}"
+            echo
+            echo "> Artifacts 列表里显示的体积是**压缩包**大小（dex 在 APK 内不压缩，再打包会缩到约 45%）；"
+            echo "> 解压后的 APK 体积见上表。"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # 放在出包之后：单测挂了本次运行标红，但 APK 仍可下载

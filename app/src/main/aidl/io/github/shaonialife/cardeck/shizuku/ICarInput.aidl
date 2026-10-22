@@ -25,6 +25,11 @@ interface ICarInput {
     // 应用自行 relayout——地图屏「分屏 ⇄ 全屏」切换即用此能力（任务不动，状态不丢）。
     boolean resizeDisplay(int displayId, int width, int height, int dpi);
 
+    // 物理主屏硬件电源（SurfaceControl.setDisplayPowerMode）：false=断电（真息屏），
+    // true=恢复点亮。系统逻辑上仍保持唤醒（不锁屏、不进 Doze），虚拟屏照常渲染。
+    // 原理同 scrcpy -S/--turn-screen-off；失败返回 false（ROM 未授权/取不到 display token）。
+    boolean setPhysicalScreenPower(boolean on);
+
     boolean ping();
     String diag();
 

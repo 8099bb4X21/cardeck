@@ -259,6 +259,18 @@ object CarInputClient {
         return killed
     }
 
+    /**
+     * 物理主屏断电/点亮（真息屏，同 scrcpy `-S`）。失败返回 false：
+     * ROM 未给 shell 相应权限，或 SDK 34+ 取不到 display token。
+     */
+    fun setPhysicalScreenPower(on: Boolean): Boolean =
+        try {
+            service?.setPhysicalScreenPower(on) ?: false
+        } catch (t: Throwable) {
+            diag("setPhysicalScreenPower($on) 失败：${t.javaClass.simpleName} ${t.message}")
+            false
+        }
+
     private val conn =
         object : ServiceConnection {
             override fun onServiceConnected(

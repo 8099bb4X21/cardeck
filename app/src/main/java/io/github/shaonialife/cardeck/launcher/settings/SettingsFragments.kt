@@ -606,6 +606,36 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         val fps30 = view.findViewById<TextView>(R.id.btnFps30)
         val fps60 = view.findViewById<TextView>(R.id.btnFps60)
 
+        // 连接时真息屏（物理面板断电）：默认开；会话中切换立即生效
+        val screenOffOn = view.findViewById<TextView>(R.id.btnScreenOffOn)
+        val screenOffOff = view.findViewById<TextView>(R.id.btnScreenOffOff)
+        var screenOffEnabled = DisplayPrefs.screenOffOnConnect(ctx)
+
+        fun refreshScreenOff(enabled: Boolean) {
+            screenOffOn.setBackgroundResource(
+                if (enabled) R.drawable.bg_segment_sel else R.drawable.bg_segment,
+            )
+            screenOffOn.setTextColor(if (enabled) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+            screenOffOff.setBackgroundResource(
+                if (enabled) R.drawable.bg_segment else R.drawable.bg_segment_sel,
+            )
+            screenOffOff.setTextColor(if (enabled) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt())
+        }
+
+        refreshScreenOff(screenOffEnabled)
+
+        fun applyScreenOff(enabled: Boolean) {
+            if (enabled == screenOffEnabled) return
+            screenOffEnabled = enabled
+            DisplayPrefs.setScreenOffOnConnect(ctx, enabled)
+            refreshScreenOff(enabled)
+            // 车机屏上就能操作：立即收放，不必等下次连接
+            SessionController.applyScreenOffPreference(enabled)
+            hostToast(if (enabled) "已开启：连接时物理息屏" else "已关闭：连接时只用暗幕")
+        }
+        screenOffOn.setOnClickListener { applyScreenOff(true) }
+        screenOffOff.setOnClickListener { applyScreenOff(false) }
+
         // 滑条 progress（0..26）→ 百分比（30..160，步进 5）
         fun progressOf(percent: Int) = (percent - DisplayPrefs.SCALE_MIN) / DisplayPrefs.SCALE_STEP
 

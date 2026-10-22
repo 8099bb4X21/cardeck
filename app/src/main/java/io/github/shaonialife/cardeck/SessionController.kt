@@ -29,6 +29,7 @@ import io.github.shaonialife.cardeck.net.EndpointHosts
 import io.github.shaonialife.cardeck.net.WifiCarPlayConnector
 import io.github.shaonialife.cardeck.net.WifiConnectCommand
 import io.github.shaonialife.cardeck.service.CarPlayService
+import io.github.shaonialife.cardeck.shizuku.CarInputClient
 import io.github.shaonialife.cardeck.shizuku.Shell
 import io.github.shaonialife.cardeck.shizuku.ShizukuGate
 import io.github.shaonialife.cardeck.ui.ScreenDimmer
@@ -399,6 +400,22 @@ object SessionController {
                     },
                 )
         }
+
+        // 上次进程若在物理息屏期间崩溃/被杀，面板会停在 OFF（UserService 是常驻 shell 进程，
+        // 它持有的电源状态不随应用进程消失）。新进程启动时恢复一次：此刻还没有会话，
+        // 恢复是安全的——否则用户拿到的是一块按不亮的黑屏（可按电源键两次救回）。
+        Bg.run("screen-power-startup-restore") {
+            if (ShizukuGate.state(context) != ShizukuGate.State.READY) return@run
+            val deadline = android.os.SystemClock.uptimeMillis() + 3_000L
+            while (android.os.SystemClock.uptimeMillis() < deadline && CarInputClient.service == null) {
+                CarInputClient.ensure(context)
+                Thread.sleep(150)
+            }
+            // 只恢复「已绑定服务」的情况：Shizuku 没起来时不必打扰用户（面板也不会是我们关的）
+            if (CarInputClient.service != null && !CarInputClient.setPhysicalScreenPower(true)) {
+                appendLog("SCREEN: 启动恢复物理屏失败（ROM 未授权 shell 电源控制）")
+            }
+        }
     }
 
     /** 状态行文本（Activity 渲染 statusText 用）。 */
@@ -491,12 +508,109 @@ object SessionController {
         }
     }
 
+    // ---- 物理屏真息屏（同 scrcpy -S/--turn-screen-off）----
+
+    /** 物理主屏是否被我们置为断电（只用于「要不要恢复」的判断，避免无谓的 AIDL 调用）。 */
+    @Volatile
+    private var phoneScreenOff = false
+
+    /**
+     * 电源切换串行化。enter/restore 都是 Bg 任务（cached 池不保证顺序），
+     * 不加锁会出现「restore 先跑完、enter 后跑」→ 会话都结束了面板还被关掉。
+     */
+    private val screenPowerLock = Any()
+
+    /**
+     * 会话进入「真息屏」：把**物理主屏**硬件断电，系统仍保持唤醒，虚拟屏照常出帧。
+     *
+     * 与暗幕的区别：暗幕只是一层黑 View，触摸层仍通电（口袋误触、耗电）；
+     * 这里是 SurfaceFlinger 级断电（触摸 IC 同步熄），观感等同锁屏，但**不锁屏**——
+     * 车机侧的高德/QQ 音乐不会被 Keyguard 挂起。
+     *
+     * 失败只记日志：ROM 没给 shell 权限或取不到 display token 时，最坏退回暗幕。
+     */
+    private fun enterPhoneScreenOff() {
+        val ctx = appContext ?: return
+        // 没有在推流就不必关屏（设置面板无会话时切换也会走到这里）
+        if (videoSender?.isRunning != true) return
+        Bg.run("screen-power-off") {
+            synchronized(screenPowerLock) {
+                if (phoneScreenOff) return@synchronized
+                // Bg 任务可能晚于会话结束才被执行：会话没了就绝不能再关屏
+                if (videoSender?.isRunning != true) {
+                    appendLog("SCREEN: 会话已结束——跳过物理息屏")
+                    return@synchronized
+                }
+                // 手机若正在休眠：先唤醒让框架把物理屏置 ON；否则我们设 OFF 之后，框架的
+                // 唤醒流程又会把面板点亮（两者抢同一个 SurfaceFlinger 电源状态）。
+                val interactive =
+                    runCatching {
+                        (ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
+                    }.getOrDefault(true)
+                if (!interactive) {
+                    appendLog("SCREEN: 手机处于休眠——先唤醒再物理息屏（避免框架把面板重新点亮）")
+                    Shell.exec("input keyevent KEYCODE_WAKEUP", 4_000L)
+                    Thread.sleep(400)
+                    // 无密码 / SmartLock 场景顺手划开锁屏；安全锁会失败，忽略即可
+                    Shell.exec("wm dismiss-keyguard", 3_000L)
+                }
+                val ok = CarInputClient.setPhysicalScreenPower(false)
+                phoneScreenOff = ok
+                appendLog(
+                    if (ok) {
+                        "SCREEN: 物理屏已断电（真息屏；系统保持唤醒，虚拟屏照常渲染，按电源键两次可恢复）"
+                    } else {
+                        "SCREEN: 物理屏断电失败（ROM 未给 shell 权限 / 取不到 display token）——继续用暗幕"
+                    },
+                )
+            }
+        }
+    }
+
+    /**
+     * 设置面板切「连接时真息屏」：会话中立即收放（没有会话时什么都不做）。
+     *
+     * 车机屏上就能操作，所以手机面板黑着也不影响切换；关掉会立刻把面板点亮。
+     */
+    fun applyScreenOffPreference(enabled: Boolean) {
+        if (enabled) {
+            enterPhoneScreenOff()
+        } else {
+            restorePhoneScreen(sleepIfCarSide = false)
+        }
+    }
+
+    /**
+     * 恢复物理屏点亮。幂等：没关过就什么都不做。
+     *
+     * @param sleepIfCarSide 车机侧断开（人在车外、手机在口袋）为 true：直接让手机休眠，
+     *   不先点亮面板（否则口袋里的手机会先亮一下再熄）；用户手动断开走 false。
+     */
+    private fun restorePhoneScreen(sleepIfCarSide: Boolean) {
+        Bg.run("screen-power-restore") {
+            synchronized(screenPowerLock) {
+                if (!phoneScreenOff) return@synchronized
+                phoneScreenOff = false
+                if (sleepIfCarSide) {
+                    // 保持 SurfaceFlinger 的 OFF 状态，让框架正常休眠；下次唤醒时框架会把面板置 ON
+                    Shell.exec("input keyevent KEYCODE_SLEEP", 4_000L)
+                    appendLog("SCREEN: 车机侧断开——已让手机休眠（面板保持黑）")
+                } else {
+                    val ok = CarInputClient.setPhysicalScreenPower(true)
+                    appendLog("SCREEN: 物理屏已恢复点亮 ok=$ok")
+                }
+            }
+        }
+    }
+
     /** 会话结束/新周期开始前彻底退役上一代会话（旧管线泄漏会累积编码器/虚拟显示器，最终 dequeueBuffer -19）。 */
     fun retireSession() {
         videoSender?.stop()
         videoSender = null
         // 暗幕/常亮随会话收掉（本方法在每轮配对起步也会执行，新一轮推流起来后会重新置位）
         ScreenDimmer.setSessionActive(false)
+        // 物理屏兜底恢复：崩溃/异常路径若把面板留在 OFF，这里不会让它烂在黑屏里
+        restorePhoneScreen(sleepIfCarSide = false)
         audioSender?.stop()
         audioSender = null
         currentSharedSecret = null
@@ -2148,6 +2262,9 @@ object SessionController {
                                                 // 漏掉它就会出现「会话早就断了、45s 后手机屏突然变黑」
                                                 // （2026-10-19 用户实测）。
                                                 ScreenDimmer.setSessionActive(false)
+                                                // 车机侧断开：人在车外，让手机直接休眠（面板保持黑），
+                                                // 而不是先点亮再等 60s 超时
+                                                restorePhoneScreen(sleepIfCarSide = true)
                                                 // 同样复原横屏覆盖。这里跑在推流收尾线程，不是连接
                                                 // 关键路径，但统一走异步口以保持「串行、不重入」的语义。
                                                 appContext?.let { ctx ->
@@ -2193,7 +2310,15 @@ object SessionController {
                                         )
                                         // 暗幕/常亮只在真正开始投屏后生效（见 ScreenDimmer.sessionActive）：
                                         // 应用启动时只挂触摸探针，避免「会话早断了、手机过一会儿还是变暗」。
-                                        if (ok) ScreenDimmer.setSessionActive(true)
+                                        if (ok) {
+                                            ScreenDimmer.setSessionActive(true)
+                                            // 虚拟屏已建好 → 按「连接时真息屏」开关决定是否硬件断电
+                                            if (DisplayPrefs.screenOffOnConnect(context)) {
+                                                enterPhoneScreenOff()
+                                            } else {
+                                                appendLog("SCREEN: 「连接时真息屏」已关闭——本次仅用暗幕")
+                                            }
+                                        }
                                     }
                                 }
                                 // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
