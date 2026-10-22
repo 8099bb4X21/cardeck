@@ -219,8 +219,16 @@ reference/                          # 参考仓库（gitignore，不入库不分
 `versionCode` 由它自动推导（`major*10000 + minor*100 + patch`），避免两处不同步导致
 用户装不上更新却没有任何提示。改版本只改这一行。
 
-**签名**：release 默认退回 **debug 签名**，fork 者无需私钥即可构建安装；
-正式对外分发前请配置真实签名：
+**CI 自动出包**（`.github/workflows/android-ci.yml`）：每次 push 用仓库 Secrets 里的
+正式 keystore 构建 `assembleRelease`，并自动累计构建号——传
+`-Pcardeck.buildNumber=<run_number>`，得到 `0.1.13.<N>` / `versionCode=base*10000+N`
+（每次推送 +1，可直接覆盖安装上一版；升 patch 时自动反超）。产物
+`CarDeck-<版本>-release.apk` 只在 Actions 的 Artifacts 里，**不发布 GitHub Release**。
+没配 `KEYSTORE_BASE64`（以及 `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD`）时
+流水线直接失败，不会用 debug 签名凑一个「正式版」。
+
+**签名**：本地 `assembleRelease` 在没有 `keystore.properties` 时退回 **debug 签名**
+（只给 fork 者试装；CI 带构建号的构建会直接报错），正式对外分发前请配置真实签名：
 
 1. 复制 `keystore.properties.example` → `keystore.properties`（已 gitignore）；
 2. `keytool -genkeypair -v -keystore cardeck-release.jks -alias cardeck -keyalg RSA -keysize 4096 -validity 10000`；

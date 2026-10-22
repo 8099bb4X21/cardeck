@@ -56,6 +56,15 @@ $ANDROID_HOME/build-tools/<ver>/apksigner verify --print-certs app/build/outputs
 git tag -a v0.1.0 -m "CarDeck 0.1.0"; git push origin v0.1.0
 gh release create v0.1.0 CarDeck-0.1.0.apk --title "..." --notes-file notes.md --latest
 ```
+**CI（`.github/workflows/android-ci.yml`，2026-10-22 起）**：每次 push 自动出**正式签名**包，
+版本号自动累计——传 `-Pcardeck.buildNumber=<github.run_number>`，得到
+`versionName=<appVersionName>.<N>`、`versionCode=base*10000+N`（能覆盖安装上一版；
+base 升 patch 时自动反超）。产物名 `CarDeck-<版本>-release.apk`，**只在 Actions Artifacts，
+不发 GitHub Release**（`permissions: contents: read`）。签名来自仓库 Secrets
+`KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD`（可选
+`EXPECTED_CERT_SHA256` 做指纹比对）；**没配 KEYSTORE_BASE64 流水线直接失败**，
+且 Gradle 侧 `check` 会拦「带构建号却没有 keystore.properties」，不允许 debug 签名的
+「正式版」流出去。本地 `assembleRelease` 不带 `-P` 时仍是纯 base 版本（`1_130_000`）。
 **签名是不可逆决定**：debug 证书签的包一经发出，以后换正式证书时已安装用户必须
 卸载重装（证书不同无法覆盖安装）。所以**首个公开版本就必须用正式 keystore**。
 keystore 与密码只存本地/密码管理器：私钥泄露 = 任何人可签发覆盖安装的更新；
@@ -361,24 +370,24 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   「未连接」，反而掩盖真实状态。诊断日志：`BT-PROFILE: 连接前…的蓝牙配置文件状态=`。
 - **Shell 命令**：参数用 `shellQuote`（单引号转义）；查 WiFi 开关/当前 SSID 用一次
   `cmd wifi status`（勿用「任意 WiFi 即成功」的盲绑判定——手机连着别的 WiFi 时会误判）。
-  **无互联网热点：默认走应用专属网络，不再系统级入网**（2026-10-18 定谳）：
-  `WifiNetworkSpecifier`（`WifiCarPlayConnector.joinCarPlayNetwork`）加入车机热点——
-  网络只对本进程可见（系统侧 `Ephemeral: true` + `OwnerUid=本应用`），**不进系统已保存
-  网络、不成为默认网络**，其它应用继续走 4G/5G。实测（荣耀 + Redmi K40 + DiPlay）：
-  `cmd wifi list-networks` 无该 SSID（返回 0）、`Active default network` 仍是蜂窝、
-  推流期间 `ping baidu.com` 0 丢包。顺带解决三个老问题：系统 watchdog 不再切回原
-  WiFi；不需要 Shizuku 也能自动加入；不会因「已连接无互联网」被 ROM 连带关掉移动数据。
-  **迁移坑**：旧版本用 `cmd wifi connect-network` 存过热点，只要还在系统配置里系统就
-  会自动全局连接——加入前先 `cmd wifi list-networks` 查同 SSID，**命中则弹窗询问用户
-  是否清除，绝不擅自删除**（保留是正当需求：用户可能就想用系统自动连、或车机热点
-  本身带流量；删除只影响「会不会全局自动连」，与本轮连接无关）。选择保留 → 照常
-  以应用专属网络连接。每个 SSID 每进程只问一次（`forgetPromptHandled`），否则配对
-  重试/端点重入会反复弹窗挡住流程；无人应答按「保留」处理（不做破坏性动作）。
-  解析用 `WifiSavedNetworks.idsOf`（纯函数，有单测：SSID 含空格/非 ASCII/同网多行
-  同 netId/畸形行都覆盖；宁可漏判不误删）。手动兜底（`manualJoinCarWifi`）会把热点
-  存回系统网络，日志与弹窗都明确写出这个代价。
-  **WEP 无法用 specifier 表达**（无对应 Builder API）→ `JoinResult.Unsupported`，
-  走旧的 `connect-network` 兜底路径（`legacyJoinCarWifi`）。
+  **车机热点入网：静默命令行优先**（2026-10-22 变更，详见 `docs/WIFI-JOIN.md`）：
+  Shizuku 执行 `cmd wifi set-wifi-enabled enabled` + `cmd wifi connect-network "<SSID>" wpa2 "<PSK>"`
+  （0 弹窗，热点进系统已保存网络），再用**不带 specifier** 的
+  `requestNetwork(TRANSPORT_WIFI)` 取 `Network` 句柄并 `bindProcessToNetwork`
+  （`SessionController.joinCarWifiSilently` → `WifiCarPlayConnector.bindCurrentWifi`）。
+  三个必须记住的点：① `connect-network` 的 exit=0 **不代表已连上**（命令只把连接投给
+  WifiService 就返回）→ 必须轮询 `cmd wifi status` 等 SSID 变成车机热点；
+  ② **不能省掉 bindProcessToNetwork**：`NsdManager.registerService` 没有 Network 参数
+  （API 36 的 `AdvertisingRequest` 才有），mDNS 广播跟随进程默认网络，不绑就从蜂窝出去，
+  车机永远发现不了手机（0x4301 不到）；它只影响本进程，虚拟屏里的导航/音乐是独立进程，
+  照常走蜂窝，不会断网；③ `cmd wifi set-wifi-watchdog-enabled` **这条命令不存在**
+  （AOSP 是 `set-wifi-watchdog`，仅 root 可用、管的是连接失败自救），别再照抄。
+  **应用专属网络（`WifiNetworkSpecifier`）仅作兜底**（Shizuku 不可用 / ROM 屏蔽命令行）：
+  网络只对本进程可见、不保存、不成为默认网络，但首次连该 AP 会弹一次系统确认框
+  （批准结果按 AP 持久化；`network-requests-set-user-approved` 是 root-only，Shizuku 用不了）。
+  因此**不再有「清除系统里保存的同名热点」弹窗**——静默路径本来就会保存热点
+  （`WifiSavedNetworks` 及其单测已随之删除）。
+  **WEP 无法用 specifier 表达** → `JoinResult.Unsupported`，走 `legacyJoinCarWifi`。
   specifier 在 **Android 12/12L 仍需位置权限 + 位置服务**（13+ 由 NEARBY_WIFI_DEVICES
   接管）：缺权限时 `requestNetwork` 直接失败、现象只是「未能加入车机热点」，很难自查，
   故在连接前置检查拦截（`ensureWifiLocationReady`）；manifest 里 FINE/COARSE 必须成对
