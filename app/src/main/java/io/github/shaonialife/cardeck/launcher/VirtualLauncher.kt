@@ -323,10 +323,11 @@ object VirtualLauncher {
         mapLayoutListeners.forEach { runCatching { it(mapFullscreen) } }
     }
 
-    /** 地图应用白名单（优先序：车机版高德 → 手机高德 → 百度 → 腾讯）。 */
+    /** 地图应用白名单（优先序：车机版高德 → 车机版百度 → 手机高德 → 手机百度 → 腾讯）。 */
     val MAP_PACKAGES_PRIORITY =
         listOf(
             "com.autonavi.amapauto",
+            "com.baidu.naviauto",
             "com.autonavi.minimap",
             "com.baidu.BaiduMap",
             "com.tencent.map",
@@ -1158,12 +1159,6 @@ object VirtualLauncher {
         dashboardMode = false
         notifyDashboard()
         setMapFullscreen(true)
-        val target =
-            if (component.packageName == "com.autonavi.amapauto") {
-                "com.autonavi.amapauto/.MainMapActivity"
-            } else {
-                component.flattenToShortString()
-            }
         // 同屏已有其他地图任务时清掉（白名单互斥；默认地图任务保留复用）
         val ctx = appContextRef
         val defaultPkg = ctx?.let { defaultMapComponent(it)?.packageName }
@@ -1172,11 +1167,7 @@ object VirtualLauncher {
                 Shell.exec("am stack remove $taskId", timeoutMs = 4000)
             }
         }
-        val result =
-            Shell.exec(
-                "am start -n $target --display $mapDisplayId -f 0x18000000",
-                timeoutMs = 8000,
-            )
+        val result = startMapApp(component, mapDisplayId, forceNewTask = true)
         val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
         logSink?.invoke(
             "LAUNCH(${component.packageName}): → 地图屏全屏 ok=$ok out=${result.output.take(80)}",
@@ -1196,6 +1187,35 @@ object VirtualLauncher {
         pkg: String,
         displayId: Int,
     ): List<String> = tasksOf(taskIdsByDisplayPkg(), pkg, displayId)
+
+    /**
+     * 在指定屏启动地图应用：按 [mapLaunchCandidates] 逐个候选尝试 `am start -n`。
+     *
+     * 车机版地图的显式主界面（高德 `MainMapActivity`、百度 `NaviAutoActivity`）在
+     * 部分定制固件/版本上可能不存在，写死单点会让地图屏黑着且日志只有一句 `Starting:` 缺失。
+     * 因此首个候选失败即回退到 launcher 解析出的 component，并把每次尝试记进日志。
+     */
+    private fun startMapApp(
+        component: ComponentName,
+        displayId: Int,
+        forceNewTask: Boolean,
+        extraArgs: String = "",
+    ): Shell.Result {
+        val suffix =
+            (if (forceNewTask) " -f 0x18000000" else "") +
+                (if (extraArgs.isEmpty()) "" else " $extraArgs")
+        var last: Shell.Result? = null
+        for (target in mapLaunchCandidates(component)) {
+            val result = Shell.exec("am start -n $target --display $displayId$suffix", timeoutMs = 8000)
+            val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
+            if (ok) return result
+            logSink?.invoke(
+                "LAUNCH(${component.packageName}): 入口 $target 启动失败（${result.output.take(80)}）——尝试下一个候选",
+            )
+            last = result
+        }
+        return last ?: Shell.exec("am start -n ${component.flattenToShortString()} --display $displayId$suffix", timeoutMs = 8000)
+    }
 
     /**
      * 一次 `dumpsys activity activities` 解析出「displayId → 包 → 任务 ID 列表」。
@@ -1244,14 +1264,8 @@ object VirtualLauncher {
                 logSink?.invoke("LAUNCHER: 未找到任何地图应用（白名单内）——地图 tile 空")
                 return
             }
-        val target =
-            if (component.packageName == "com.autonavi.amapauto") {
-                "com.autonavi.amapauto/.MainMapActivity"
-            } else {
-                component.flattenToShortString()
-            }
         // 不带 MULTIPLE_TASK：任务已在地图屏时等价于带回前台
-        val result = Shell.exec("am start -n $target --display $mapDisplayId", timeoutMs = 8000)
+        val result = startMapApp(component, mapDisplayId, forceNewTask = false)
         logSink?.invoke(
             "LAUNCHER: 默认地图 ${component.packageName} → 地图屏（display=$mapDisplayId）ok=" +
                 (result.ok && result.output.contains("Starting:", ignoreCase = true)) +
@@ -1306,24 +1320,33 @@ object VirtualLauncher {
                 }
             }
         }
-        val target =
-            if (component.packageName == "com.autonavi.amapauto") {
-                "com.autonavi.amapauto/.MainMapActivity --windowingMode 1"
-            } else {
-                component.flattenToShortString()
+        var ok: Boolean
+        val result: Shell.Result
+        if (isMapPackage(component.packageName)) {
+            // 地图屏不可用（mapDisplayId < 0）时的回退：仍按车机版主界面启动，
+            // 但落到应用屏并强制全屏窗口模式。
+            result = startMapApp(component, targetDisplay, forceNewTask = !onTarget, extraArgs = "--windowingMode 1")
+            ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
+            if (!ok && onTarget) {
+                val retry =
+                    startMapApp(component, targetDisplay, forceNewTask = true, extraArgs = "--windowingMode 1")
+                ok = retry.ok && retry.output.contains("Starting:", ignoreCase = true)
             }
-        val result =
-            if (onTarget) {
-                Shell.exec("am start -n $target --display $targetDisplay", timeoutMs = 8000)
-            } else {
-                // MULTIPLE_TASK：即使该应用在其他屏有任务，也强制在目标屏新建实例
-                Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
+        } else {
+            val target = component.flattenToShortString()
+            result =
+                if (onTarget) {
+                    Shell.exec("am start -n $target --display $targetDisplay", timeoutMs = 8000)
+                } else {
+                    // MULTIPLE_TASK：即使该应用在其他屏有任务，也强制在目标屏新建实例
+                    Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
+                }
+            ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
+            if (!ok && onTarget) {
+                // 复用路径失败（任务可能已被系统移走）：退回 MULTIPLE_TASK 新建
+                val retry = Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
+                ok = retry.ok && retry.output.contains("Starting:", ignoreCase = true)
             }
-        var ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
-        if (!ok && onTarget) {
-            // 复用路径失败（任务可能已被系统移走）：退回 MULTIPLE_TASK 新建
-            val retry = Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
-            ok = retry.ok && retry.output.contains("Starting:", ignoreCase = true)
         }
         logSink?.invoke(
             "LAUNCH(${component.packageName}): hi=$wantHi disp=$targetDisplay onTarget=$onTarget ok=$ok " +
