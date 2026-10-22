@@ -1,5 +1,6 @@
 package io.github.shaonialife.cardeck.shizuku
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.hardware.input.InputManager
 import android.os.Build
@@ -604,6 +605,7 @@ class CarInputServiceImpl(
         return null
     }
 
+    /** DisplayControl 类加载器（真息屏用）：只运行在 Shizuku UserService（shell uid）里。 */
     private val displayControlClass: Class<*>? by lazy {
         try {
             val factory = Class.forName("com.android.internal.os.ClassLoaderFactory")
@@ -636,16 +638,27 @@ class CarInputServiceImpl(
                 ) as ClassLoader
             val cls = loader.loadClass("com.android.server.display.DisplayControl")
             // 静态 JNI 方法在 libandroid_servers.so 里注册；必须加载进这个 ClassLoader
-            val loadLibrary0 =
-                Runtime::class.java.getDeclaredMethod("loadLibrary0", Class::class.java, String::class.java)
-            loadLibrary0.isAccessible = true
-            loadLibrary0.invoke(Runtime.getRuntime(), cls, "android_servers")
+            registerAndroidServersLibrary(cls)
             fileLog("DisplayControl 已就绪")
             cls
         } catch (t: Throwable) {
             fileLog("DisplayControl 加载失败（SDK ${Build.VERSION.SDK_INT}）：$t")
             null
         }
+    }
+
+    /**
+     * 把 libandroid_servers.so 的 JNI 注册进 [cls] 所在的 ClassLoader（scrcpy 同款路径）。
+     *
+     * 本类只运行在 Shizuku UserService（shell uid 2000 的 app_process），不受应用进程的
+     * hidden-API 限制；lint 的 BlockedPrivateApi 按 targetSdk 应用进程判定，故此处豁免。
+     */
+    @SuppressLint("BlockedPrivateApi")
+    private fun registerAndroidServersLibrary(cls: Class<*>) {
+        val loadLibrary0 =
+            Runtime::class.java.getDeclaredMethod("loadLibrary0", Class::class.java, String::class.java)
+        loadLibrary0.isAccessible = true
+        loadLibrary0.invoke(Runtime.getRuntime(), cls, "android_servers")
     }
 
     override fun ping(): Boolean = injector != null
