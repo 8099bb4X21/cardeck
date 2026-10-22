@@ -139,6 +139,36 @@ class Iap2SenderSessionTest {
         accessoryChannel.close()
     }
 
+    /**
+     * 0x5703 迟迟不答：发送端必须在等待窗口内**重发设备状态问候**、再**重发 0x5702**，
+     * 而不是干等到车机拆链（BMW iD8.5 卡在 0x5703 的修复点）。
+     */
+    @Test
+    fun slowWifiConfigurationTriggersResends() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory = MockAccessory(accessoryChannel, slowWifi = true)
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val endpoint =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "34:86:DA:86:BB:96",
+                deviceName = "test-device",
+            ).run(timeoutMillis = 15_000L)
+
+        assertEquals("MockAP", endpoint.ssid)
+        assertEquals(49152, endpoint.airPlayPort)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+    }
+
     /** 按 DiPlay Iap2WirelessControlClient 的时序脚本化应答。 */
     private class MockAccessory(
         private val channel: Iap2LinkChannel,
@@ -151,6 +181,8 @@ class Iap2SenderSessionTest {
          * IPv4 后跟 5 个）。用于锁定「必须去掉全部尾部 NUL」这一行为。
          */
         private val padAddresses: Boolean = false,
+        /** 0x5703 迟迟不答：发送端应重发问候、再重发 0x5702（而不是干等到车机拆链）。 */
+        private val slowWifi: Boolean = false,
     ) {
         private val parser = Iap2Csm.Parser()
         private val pending = ArrayDeque<Iap2Csm.Frame>()
@@ -178,6 +210,9 @@ class Iap2SenderSessionTest {
             send(Iap2MessageIds.MFI_RESPONSE, Iap2Csm.param(0, ByteArray(70) { (it * 7).toByte() }))
             expect(Iap2MessageIds.MFI_AUTHENTICATION_SUCCEEDED)
 
+            // 设备状态问候紧跟 0xAA05（真机次序，早于订阅与 0x5702）
+            expectDeviceStateGreetings()
+
             // 订阅 + StartHID（奥迪形态不发，发送端应直接跳过等待）
             if (!audiDeclarations) {
                 send(Iap2MessageIds.START_NOW_PLAYING_UPDATES)
@@ -194,6 +229,11 @@ class Iap2SenderSessionTest {
 
             // WiFi 配置
             expect(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
+            if (slowWifi) {
+                // 发送端 1.5s 未等到 0x5703 → 重发问候；再 1.3s → 重发 0x5702
+                expectDeviceStateGreetings()
+                expect(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
+            }
             // 迟到一条订阅请求（真实车机 bring-up 常见：0x5000 与 0x5703 相邻到达）。
             // 它必须被暂存而不是在 expectOrNull 里被反复重读——旧实现把非预期帧塞回
             // 「自己下一轮优先读取」的队列，同一帧无限循环（2026-10-18 日志刷屏根因）。
@@ -205,13 +245,6 @@ class Iap2SenderSessionTest {
                 Iap2Csm.u8(3, 2),
                 Iap2Csm.u8(4, 36),
             )
-
-            // 设备状态问候（真机顺序：0x4E0D/0x4E0A/0x4E09/0x4E0B/0x4E0C → 0x4300）
-            expect(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE)
-            expect(Iap2MessageIds.DEVICE_LANGUAGE_UPDATE)
-            expect(Iap2MessageIds.DEVICE_INFORMATION_UPDATE)
-            expect(Iap2MessageIds.DEVICE_TIME_UPDATE)
-            expect(Iap2MessageIds.DEVICE_UUID_UPDATE)
 
             // CarPlay 启动
             expect(Iap2MessageIds.CARPLAY_AVAILABILITY)
@@ -225,6 +258,15 @@ class Iap2SenderSessionTest {
                 Thread.sleep(150)
                 sendStartSession()
             }
+        }
+
+        /** 设备状态问候五连（0x4E0D/0x4E0A/0x4E09/0x4E0B/0x4E0C）。 */
+        private fun expectDeviceStateGreetings() {
+            expect(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE)
+            expect(Iap2MessageIds.DEVICE_LANGUAGE_UPDATE)
+            expect(Iap2MessageIds.DEVICE_INFORMATION_UPDATE)
+            expect(Iap2MessageIds.DEVICE_TIME_UPDATE)
+            expect(Iap2MessageIds.DEVICE_UUID_UPDATE)
         }
 
         private fun sendStartSession() {
