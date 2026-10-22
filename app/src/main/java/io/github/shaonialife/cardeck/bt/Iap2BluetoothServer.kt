@@ -31,6 +31,8 @@ class Iap2BluetoothServer(
     private val onWifiCredentials: (Iap2SenderSession.WifiConfiguration) -> Unit = {},
     /** Phase 1 之后车机补发 0x4301（CarPlay 窗口晚开）时交给主控热更新端点。 */
     private val onEndpointUpdate: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
+    /** 发送端链路断开（保活泵退出）时通知主控（释放僵尸轮次，见 SessionController.onSenderLinkClosed）。 */
+    private val onLinkClosed: () -> Unit = {},
     /** 目标车机（动态读取：拒绝非目标设备的连入；null=来者不拒）。 */
     private val targetProvider: () -> TargetDevicePrefs.Target? = { null },
 ) {
@@ -141,7 +143,7 @@ class Iap2BluetoothServer(
         activeChannel = channel
         BtSessionGate.inboundActive = true
         try {
-            channel.runSenderSession(context, SESSION_TIMEOUT_MILLIS, log, onEndpoint, onWifiCredentials, onEndpointUpdate)
+            channel.runSenderSession(context, SESSION_TIMEOUT_MILLIS, log, onEndpoint, onWifiCredentials, onEndpointUpdate, onLinkClosed)
         } catch (error: IOException) {
             log("SESSION 失败: ${error.message}")
         } finally {

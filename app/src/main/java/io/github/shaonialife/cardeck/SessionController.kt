@@ -1,6 +1,7 @@
 package io.github.shaonialife.cardeck
 
 import android.content.Context
+import android.os.SystemClock
 import android.view.KeyEvent
 import io.github.shaonialife.cardeck.airplay.AirPlayClient
 import io.github.shaonialife.cardeck.airplay.PairVerifyClient
@@ -118,7 +119,10 @@ object SessionController {
      * 等用户确认「连接车机热点」系统弹窗的上限（应用专属网络）。
      * 系统确认框可能停留很久；用户取消连接时 [connectCancelled] 会即时退出。
      */
-    private const val SPECIFIER_JOIN_TIMEOUT_MS = 120_000L
+    // 40s 总窗 = 20s 首段 + 20s 重发段（连接器内部分段）。车机 15s 拆 BT 看门狗
+    // 决定了等待必须远短于旧值 120s——旧值下首轮卡满 120s 时车机早已拆链重邀
+    // 并被僵尸轮次堵门（2026-10-22 奥迪 3315 真机定谳）。
+    private const val SPECIFIER_JOIN_TIMEOUT_MS = 40_000L
 
     /** Activity onCreate 时调用：登记 applicationContext 并创建会话对象（幂等）。 */
     fun ensure(context: Context) {
@@ -305,6 +309,25 @@ object SessionController {
     }
 
     /**
+     * 发送端 BT 链路断开（保活泵退出）。配对进行中（未推流）时本轮已注定失败——
+     * 立即释放「会话处理中」互斥并唤醒卡住的等待（车机 15s 拆链 + 我们 120s 加入
+     * 等待的窗口错配曾让僵尸轮次堵门：车机重连带来的新端点被「已有会话在处理中」
+     * 拒绝，只剩 keep-alive 干等到用户放弃，2026-10-22 奥迪 3315 真机定谳）。
+     *
+     * 置 [connectCancelled] 让卡在 WiFi 加入等分片检查的配对线程在 ≤200ms 内退场；
+     **不停 BT 组件**（车机大概率立刻回连监听）。新轮次起步处会清掉本标志——
+     * 能走到那里说明 BT 组件仍在运行（用户取消路径 disconnect 会停组件、被端点
+     * 守卫拦截），清除是安全的。
+     */
+    fun onSenderLinkClosed() {
+        if (videoSender?.isRunning == true) return
+        if (sessionStarting.compareAndSet(true, false)) {
+            connectCancelled = true
+            appendLog(">>> 本轮蓝牙链路断开——释放「会话处理中」，等待车机重连端点接手")
+        }
+    }
+
+    /**
      * 最近一次 0x5703 的热点密码（仅内存，不落盘）。
      * 「车机热点 → 去连接」按钮复制到剪贴板用（手动加入兜底场景）。
      */
@@ -362,6 +385,7 @@ object SessionController {
                     onEndpoint = { endpoint -> onCarPlayEndpoint(endpoint, "车机回连") },
                     onWifiCredentials = wifiCredentialHook,
                     onEndpointUpdate = { endpoint -> onLateEndpoint(endpoint, "车机回连") },
+                    onLinkClosed = ::onSenderLinkClosed,
                     targetProvider = targetProvider,
                 )
             bluetoothClient =
@@ -371,6 +395,7 @@ object SessionController {
                     onEndpoint = { endpoint -> onCarPlayEndpoint(endpoint, "主动连车机") },
                     onWifiCredentials = wifiCredentialHook,
                     onEndpointUpdate = { endpoint -> onLateEndpoint(endpoint, "主动连车机") },
+                    onLinkClosed = ::onSenderLinkClosed,
                     targetProvider = targetProvider,
                 )
             ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
@@ -643,6 +668,32 @@ object SessionController {
             appendLog(">>> WiFi 已加入车机热点（应用专属网络），ctrl 广播已重新注册，等待车机 ctrl 邀请")
         } else if (!connectCancelled) {
             appendLog("WIFI: 应用专属网络加入未成功（${result.javaClass.simpleName}）")
+            // 兜底：系统里保存过该热点时，系统可能已自动全局连上它——specifier 挂起
+            // 的形态下这条近路反而最稳（2026-10-22 真机：用户选「保留系统网络」+
+            // Android 16 specifier 永久 pending）。校验当前 SSID 后直接绑定现有连接。
+            val currentSsid = shellWifiStatus().second
+            if (currentSsid == wifi.ssid) {
+                appendLog("WIFI: 系统当前已连着 \"$currentSsid\"——直接绑定现有连接（保存网络自动连上的近路）")
+                var boundOk = false
+                connector.bindCurrentWifi { boundOk = it }
+                // bindCurrentWifi 异步回调：短等绑定完成（回调很快，系统已在网）
+                val waitUntil = SystemClock.uptimeMillis() + 3_000
+                while (!boundOk &&
+                    connector.currentNetwork == null &&
+                    SystemClock.uptimeMillis() < waitUntil &&
+                    !connectCancelled
+                ) {
+                    Thread.sleep(100)
+                }
+                if (connector.currentNetwork != null) {
+                    boundCarSsid = wifi.ssid
+                    phaseHint = "已加入车机热点"
+                    ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true, network = connector.currentNetwork)
+                    appendLog(">>> WiFi 已绑定现有 \"$currentSsid\" 连接，ctrl 广播已重新注册")
+                    return WifiCarPlayConnector.JoinResult.Joined(connector.currentNetwork!!)
+                }
+                appendLog("WIFI: 绑定现有连接未成功——按失败处理")
+            }
         }
         return result
     }
@@ -1559,6 +1610,10 @@ object SessionController {
             appendLog(">>> [$source] 已有会话在处理中，忽略本次端点（等待上一轮结束）")
             return
         }
+        // 新轮次起步清取消标志：上一轮可能因「BT 链路断开」置位退出（见
+        // onSenderLinkClosed）——能走到这里说明 BT 组件仍在运行（用户取消路径会
+        // 停组件、被上方守卫拦截），该标志属于已退场的旧轮次，不清会误伤本轮。
+        connectCancelled = false
         // 新一轮交接开始：清掉上一轮（可能中途失败）遗留的晚到端点暂存，
         // 否则它会在本轮的 drain 阶段覆盖掉本会话刚解析出的端点。
         pendingEndpointUpdate = null

@@ -17,6 +17,7 @@ internal fun Iap2LinkChannel.runSenderSession(
     onEndpoint: (Iap2SenderSession.CarPlayEndpoint) -> Unit,
     onWifiCredentials: (Iap2SenderSession.WifiConfiguration) -> Unit,
     onEndpointUpdate: (Iap2SenderSession.CarPlayEndpoint) -> Unit,
+    onLinkClosed: () -> Unit = {},
 ) {
     val session =
         Iap2SenderSession(
@@ -33,6 +34,9 @@ internal fun Iap2LinkChannel.runSenderSession(
     onEndpoint(endpoint)
     // Phase 2 过渡：保持控制通道存活记录配件消息；AirPlay 配对由 onEndpoint 回调发起
     session.pumpIncomingForever()
+    // 链路断开（保活泵退出）：通知主控释放「会话处理中」——否则车机拆链后重连带来的
+    // 新端点会被僵尸轮次堵门（2026-10-22 奥迪 3315 真机定谳，见 SessionController.onSenderLinkClosed）
+    onLinkClosed()
 }
 
 /**

@@ -147,9 +147,42 @@ class WifiCarPlayConnector(
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .setNetworkSpecifier(specifier)
                 .build()
+        // 等待分两段：首段未决即重发一次请求——「系统已保存该 SSID + 部分 ROM
+        // （Android 16/小米实测）」组合下 specifier 请求可能**永久 pending**，
+        // 不重发就干等满超时（2026-10-22 奥迪 3315 真机：120s 窗口内零回调，
+        // 日志里连接阶段完全静默）。车机 15s 就拆 BT，等待必须短于它一个量级。
+        val firstWindowMs = minOf(timeoutMillis, 20_000L)
+        val secondWindowMs = (timeoutMillis - firstWindowMs).coerceAtLeast(0)
+        var network: Network? = null
+        val unavailable = AtomicBoolean(false)
+        for (attempt in 1..2) {
+            val windowMs = if (attempt == 1) firstWindowMs else secondWindowMs
+            network = requestAndAwait(ssid, request, windowMs, isCancelled, unavailable)
+            // 成功 / 用户取消 / 系统明确拒绝（重发无意义，只会再拒一次）都不再试
+            if (network != null || isCancelled() || unavailable.get()) break
+            if (attempt == 1 && secondWindowMs > 0) {
+                log("WiFi: ${firstWindowMs / 1000}s 仍无回调——重发网络请求（系统已保存该热点时 specifier 可能永久挂起）")
+                release()
+            }
+        }
+        if (network == null) {
+            log("WiFi: 等待加入 \"$ssid\" 失败（${timeoutMillis / 1000}s 窗口，含一次重发）")
+            release()
+            return JoinResult.Unavailable
+        }
+        return JoinResult.Joined(network)
+    }
+
+    /** 发起一次 requestNetwork 并等待到窗口结束/成功/取消；调用方负责 release。 */
+    private fun requestAndAwait(
+        ssid: String,
+        request: NetworkRequest,
+        timeoutMillis: Long,
+        isCancelled: () -> Boolean,
+        unavailable: AtomicBoolean,
+    ): Network? {
         val latch = CountDownLatch(1)
         val result = AtomicReference<Network?>(null)
-        val unavailable = AtomicBoolean(false)
         val newCallback =
             object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
@@ -161,7 +194,6 @@ class WifiCarPlayConnector(
                 }
 
                 override fun onUnavailable() {
-                    unavailable.set(true)
                     log("WiFi: 系统未允许加入 \"$ssid\"（用户拒绝或热点不在范围内）")
                     latch.countDown()
                 }
@@ -183,33 +215,17 @@ class WifiCarPlayConnector(
                 log("WiFi: 发起应用专属网络请求失败（${error.message}）——可能需要位置权限或系统不支持")
                 false
             }
-        if (!accepted) {
-            release()
-            return JoinResult.Unavailable
-        }
+        if (!accepted) return null
         val deadline = SystemClock.uptimeMillis() + timeoutMillis
         while (SystemClock.uptimeMillis() < deadline) {
-            if (isCancelled()) {
-                release()
-                return JoinResult.Unavailable
-            }
+            if (isCancelled()) return null
             try {
                 if (latch.await(200, TimeUnit.MILLISECONDS)) break
             } catch (_: InterruptedException) {
-                release()
-                return JoinResult.Unavailable
+                return null
             }
         }
-        val network = result.get()
-        if (network == null) {
-            log(
-                "WiFi: 等待加入 \"$ssid\" 超时（${timeoutMillis / 1000}s）" +
-                    if (unavailable.get()) "——系统已判定不可用" else "——系统确认框可能仍在前台",
-            )
-            release()
-            return JoinResult.Unavailable
-        }
-        return JoinResult.Joined(network)
+        return result.get()
     }
 
     /** 构造 specifier；WEP 或参数不合法返回 null（走旧路径）。 */

@@ -587,6 +587,18 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   大包改走 `adb push + pm install`。
   几何推导集中在 `VirtualLauncher.dashSplitGeom` 纯函数（`DashSplitMathTest` 钉死
   四方一致性），改分屏相关代码勿在四处重新裸算。
+- **BT 断链僵尸轮次 + specifier 永久挂起（2026-10-22 奥迪 3315 真机定谳）**：车机 15s
+  AirPlay 看门狗（15.07s 实测，与 sysdiagnose 互证）拆链后**立即回连重发端点**，而我们的
+  「sessionStarting 互斥」只认标志不认轮次存活性——WiFi 加入卡死（120s 窗）的僵尸轮次把
+  车机的新端点堵在门外，全程只剩 keep-alive。三处修复缺一不可：① `onSenderLinkClosed`
+  （保活泵退出回调）：未推流即释放互斥+置取消（卡住的配对线程 ≤200ms 退场），**不停 BT
+  监听**；② 新轮次起步清 `connectCancelled`（用户取消路径会停 BT 组件、被既有守卫拦，
+  走到起步处说明组件在跑）；③ WiFi 加入 20s+20s 分段重发——「系统已保存该 SSID +
+  Android 16」组合下 `WifiNetworkSpecifier` 请求**永久 pending 且零回调**（三条日志路径
+  全静默），120s 干等毫无意义；加入失败且系统已连着目标 SSID 时直接 `bindCurrentWifi`
+  （「保留系统网络」的近路）。另：首连 15s 预算里弹窗 1.7s + MFi 20B 优先白等 6s 是加重
+  因素（记忆生效后仅首次付费）。判读特征：日志出现「已有会话在处理中，忽略本次端点」
+  后再无连接动作、只有 `ff 55 02 00 ee 10` 心跳 = 本病。
 - **真机 iPhone sysdiagnose 对照（2026-10-21，docs/PROTOCOL-NOTES.md §13）**：两车三份
   抓包（iOS 18，`/usr/bin/log show --archive` 读 unified log）定了四条铁律：
   ① **奥迪 MMI 3315_5GHz 首连 403 是车机固有状态**——真 iPhone 在 pair-verify 通过后
