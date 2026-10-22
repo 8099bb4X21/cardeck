@@ -308,6 +308,28 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   只保留暗幕。会话中切换经 `SessionController.applyScreenOffPreference` **立即收放**
   （车机屏可操作，不必等下次连接）。「显示」面板已套 ScrollView——车机内容区只有
   ~200dp 高，4 段内容不滚动会把最后一段裁掉。
+- **上车自动连接（ACL 广播唤醒，2026-10-23，详见 `docs/AUTO-CONNECT.md`）**：
+  `bt/CarBluetoothReceiver` 以**清单静态接收器**监听 `ACTION_ACL_CONNECTED/DISCONNECTED`
+  ——这两个在[隐式广播例外清单](https://developer.android.com/develop/background-work/background-tasks/broadcasts/broadcast-exceptions)
+  里，进程被杀也能冷启动。三条硬事实：① **Android 12+ 的后台 FGS 豁免清单里没有
+  「蓝牙广播」**，本项目能 `startForegroundService` 是因为持有 `SYSTEM_ALERT_WINDOW`
+  （暗幕/触摸探针本来就要，targetSdk 34 只看权限存在）；用户没授悬浮窗时会被
+  `ForegroundServiceStartNotAllowedException` 拦下，接收器只记日志、不崩；
+  ② FGS 必须用 `connectedDevice` 类型（2 参 `startForeground` 会带上 mediaProjection，
+  Android 14 校验 AppOps PROJECT_MEDIA 直接崩）；③ 冷启动进程里必须先
+  `SessionController.ensure(applicationContext)` 再 `startConnection(...)`——BT client /
+  WiFi 连接器都在 `ensureSessionObjects` 里建，跳过会 NullPointer。
+  自动连接**有声音**：靠 `audio/SilentProjectionActivity` 静默领 MediaProjection——
+  `appops set <pkg> PROJECT_MEDIA allow` 让 SystemUI 直接返回 RESULT_OK（Tasker 同款，
+  该 app-op **持久**，不需要时 `appops set … default` 清），再由 shell `am start` 拉起
+  1×1 透明、`exported`、`noHistory` 的跳板（shell 只有 START_ACTIVITIES_FROM_BACKGROUND，
+  没有 START_ANY_ACTIVITY，所以必须 exported）。**Android 14 铁律**：拿到授权后先
+  `upgradeToProjection()` 把 FGS 类型加上 mediaProjection，才能 `getMediaProjection`；
+  且 `onStartCommand` 里重复 `startForeground` 时若 `mediaProjection != null` 必须继续
+  带上该类型（否则类型被摘、投影被停）。**开关**：设置 → 显示 →「上车自动连接」
+  （`AutoConnectPrefs`，默认开；与「连接时真息屏」同一面板）。
+  下车走 `ACTION_AUTO_STOP_SESSION` → `disconnect()`；该 intent 用 `startService` 投递
+  （服务在跑时进程已是前台服务态，不受后台启动限制）。
 - **取消连接必须全程可中断**：`sessionStarting` 互斥标志的复位依赖配对流程线程
   走到 finally——该线程可能阻塞在不可中断的等待（无超时 connect、mDNS 等待、
   BT 保活读循环），任何一处卡住都会让取消「无效」（英雄卡永久「正在连接」）。
