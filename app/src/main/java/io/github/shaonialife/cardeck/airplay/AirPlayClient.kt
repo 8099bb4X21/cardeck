@@ -312,7 +312,7 @@ class AirPlayClient(
                 // 403 退避（真机抓包：车机首连被拒后需 18~20s 才进入可接受状态，
                 // 期间高频重试除徒增车机负载外可能一直重置其就绪状态机）；
                 // 其余失败维持快速轮询等端口开放
-                Thread.sleep(if (message.contains("403")) 5_000 else 500)
+                Thread.sleep(pairingRetryBackoffMs(message))
             }
         }
         log("AIRPLAY: 配对最终失败（接收端 RTSP 无应答）")
@@ -2856,3 +2856,10 @@ class AirPlayClient(
         }
     }
 }
+
+/**
+ * 配对失败重试退避（纯函数，回放测试钉死）：403 = 真车「信任已建立、车机未就绪」
+ * 状态（真机 sysdiagnose：就绪窗约 18~20s，期间高频重试可能一直重置其状态机）；
+ * 其余失败（端口未开等）保持快速轮询等邀请。
+ */
+internal fun pairingRetryBackoffMs(failureMessage: String): Long = if (failureMessage.contains("403")) 5_000L else 500L

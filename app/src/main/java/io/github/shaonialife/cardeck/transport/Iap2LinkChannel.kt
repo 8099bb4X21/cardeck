@@ -253,8 +253,11 @@ class Iap2LinkChannel(
         const val PACER_POLL_MILLIS = 20L
 
         /** 原始字节转储预算：rx 需覆盖车机全部协商帧（Audi 实测约 140B），给 512B 余量。 */
-        const val RAW_DUMP_LIMIT = 512
-        const val RAW_DUMP_LIMIT_TX = 256
+        // 预算按字节计。曾为 512/256：一次完整 bring-up 都盖不住（0x1D01 单帧即 565B），
+        // 提取重放 fixture（tools/extract_car_fixtures.py）会缺尾部——提到 4096 覆盖
+        // 整个识别/MFi/凭据交换，长会话靠预算封顶防日志爆炸
+        const val RAW_DUMP_LIMIT = 4096
+        const val RAW_DUMP_LIMIT_TX = 4096
 
         /** 逐帧摘要日志上限（每方向每连接）。 */
         const val FRAME_LOG_LIMIT = 40
