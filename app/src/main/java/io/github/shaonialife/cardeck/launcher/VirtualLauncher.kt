@@ -412,8 +412,16 @@ object VirtualLauncher {
         // 新会话：「本次会话不再提示」等用户级决定作废
         LetterboxHintController.resetSession()
         val density = densityDpi / 160f
-        // dock 条物理宽度 = 48dp × 密度（密度随画布短边等比，见 DOCK_WIDTH_DP 注释）
-        val thicknessPx = (DOCK_WIDTH_DP * density).toInt().coerceAtLeast(80)
+        // dock 栏宽度缩放（「显示」面板 50%–100%，下次连接起效）：厚度像素与 dock 屏
+        // 密度**同乘**比例——内容 dp 布局不变、渲染进更少像素，整条 dock（图标/时钟/
+        // 文字）等比变窄；只缩厚度不缩密度会让内容溢出或留白。下限 80px 同乘缩放防
+        // 极端画布下压没。密度下限 120 防 ROM 拒绝异常密度。
+        val dockScale = DockPrefs.widthPercent(context) / 100f
+        val thicknessPx =
+            (DOCK_WIDTH_DP * density * dockScale)
+                .toInt()
+                .coerceAtLeast((80 * dockScale).toInt().coerceAtLeast(1))
+        val dockDensityDpi = (densityDpi * dockScale).toInt().coerceAtLeast(120)
         // 车机方向决定 dock 位置：横屏 → 左侧竖条；竖屏 → 底部横条（2026-10-11 用户要求）
         dockAtBottom = totalHeight > totalWidth
         streamWidthPx = totalWidth
@@ -545,7 +553,7 @@ object VirtualLauncher {
                             "CarPlayDock",
                             dockWidthPx,
                             dockHeightPx,
-                            densityDpi,
+                            dockDensityDpi,
                             dockSurface,
                             false,
                         )
@@ -655,7 +663,7 @@ object VirtualLauncher {
                         "CarPlayDock",
                         dockWidthPx,
                         dockHeightPx,
-                        densityDpi,
+                        dockDensityDpi,
                         dockSurface,
                         DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
                             DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,

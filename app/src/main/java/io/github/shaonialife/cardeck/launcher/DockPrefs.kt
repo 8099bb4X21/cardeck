@@ -14,9 +14,38 @@ object DockPrefs {
     private const val PREFS_NAME = "settings"
     private const val KEY_SCRIM = "dockScrimOpacity"
     private const val KEY_BLUR = "dockBlur"
+    private const val KEY_WIDTH = "dockWidthPercent"
 
     /** 暗幕强度默认值（%）。 */
     const val DEFAULT_SCRIM = 20
+
+    /**
+     * 栏宽度缩放（50–100，步进 5；默认 100）。厚度像素与 dock 屏密度**同乘**——
+     * 内容 dp 布局不变、渲染进更少像素，整条 dock（图标/时钟/文字）等比变窄。
+     * **仅下次连接生效**（dock 虚拟屏按会话建立时的尺寸/密度创建，与 scrim/blur
+     * 的实时生效不同）。
+     */
+    const val WIDTH_MIN = 50
+    const val WIDTH_MAX = 100
+    const val WIDTH_STEP = 5
+    const val WIDTH_DEFAULT = 100
+
+    fun widthPercent(context: Context): Int =
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_WIDTH, WIDTH_DEFAULT)
+            .coerceIn(WIDTH_MIN, WIDTH_MAX)
+
+    fun setWidthPercent(
+        context: Context,
+        percent: Int,
+    ) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_WIDTH, percent.coerceIn(WIDTH_MIN, WIDTH_MAX))
+            .apply()
+    }
 
     /** 模糊强度默认值（%）。 */
     const val DEFAULT_BLUR = 40

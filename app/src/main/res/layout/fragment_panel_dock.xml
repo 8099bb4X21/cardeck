@@ -79,4 +79,44 @@
             android:textColor="#FF8E8E93"
             android:textSize="12sp" />
     </LinearLayout>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:text="栏宽度"
+        android:textColor="#FFF5F5F7"
+        android:textSize="14sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <SeekBar
+            android:id="@+id/dockWidthSeek"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:max="10" />
+
+        <TextView
+            android:id="@+id/dockWidthValue"
+            android:layout_width="52dp"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="8dp"
+            android:gravity="right"
+            android:textColor="#FF8E8E93"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="整条 Dock（图标/时钟/文字）等比缩放，50%–100%；保存后下次连接起效"
+        android:textColor="#FF8E8E93"
+        android:textSize="12sp" />
 </LinearLayout>

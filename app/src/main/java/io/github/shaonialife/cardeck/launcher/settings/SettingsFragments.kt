@@ -437,6 +437,34 @@ class DockPanelFragment : SettingsPanelFragment() {
         val scrimValue = view.findViewById<TextView>(R.id.dockScrimValue)
         val blurSeek = view.findViewById<SeekBar>(R.id.dockBlurSeek)
         val blurValue = view.findViewById<TextView>(R.id.dockBlurValue)
+        // 栏宽度（50%–100%，步进 5；**下次连接起效**——与上方 scrim/blur 的
+        // 实时生效不同：dock 虚拟屏的像素尺寸/密度按会话建立时的偏好创建）
+        val widthSeek = view.findViewById<SeekBar>(R.id.dockWidthSeek)
+        val widthValue = view.findViewById<TextView>(R.id.dockWidthValue)
+        val savedWidth = DockPrefs.widthPercent(requireContext())
+        widthSeek.progress = (savedWidth - DockPrefs.WIDTH_MIN) / DockPrefs.WIDTH_STEP
+        widthValue.text = "$savedWidth%"
+        widthSeek.setOnSeekBarChangeListener(
+            object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(
+                    seekBar: SeekBar?,
+                    progress: Int,
+                    fromUser: Boolean,
+                ) {
+                    if (!fromUser) return
+                    widthValue.text = "${DockPrefs.WIDTH_MIN + progress * DockPrefs.WIDTH_STEP}%"
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    val percent =
+                        DockPrefs.WIDTH_MIN + widthSeek.progress * DockPrefs.WIDTH_STEP
+                    DockPrefs.setWidthPercent(requireContext(), percent)
+                    hostToast("Dock 栏宽度 $percent% 已保存，下次连接起效")
+                }
+            },
+        )
 
         scrimSeek.progress =
             DockPrefs
