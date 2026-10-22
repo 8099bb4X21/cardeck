@@ -1423,29 +1423,70 @@ object VirtualLauncher {
 
     fun launchableApps(context: Context): List<AppEntry> = scanLaunchableApps(context)
 
+    /**
+     * 扫描所有可启动应用（桌面网格与设置页共用）。
+     *
+     * 三处必须容错（2026-10-23 用户反馈「部分 app 没被扫描出来」后复查）：
+     *  1. **不再 `take(200)`**：旧实现把上限写在 `sortedBy` **之前**，取的是
+     *     `queryIntentActivities` 返回顺序的前 200 个——应用装得多时后面的直接丢失，
+     *     且丢哪些取决于系统返回顺序（看起来像「随机漏几个」）。现在全部保留。
+     *  2. **逐应用 try/catch**：`loadLabel`/`loadIcon` 对资源异常的 APK 会抛
+     *     `Resources.NotFoundException` 等；旧实现是 Sequence 链，一个坏应用就让
+     *     `toList()` 整体抛出 → 桌面**一个应用都不显示**。现在单个失败就跳过并计数。
+     *  3. **同包去重**：一个包可以有多个 launcher activity（实测 K40 上 83 个
+     *     activity 只对应 82 个包，com.android.contacts 有 4 个），旧实现会重复显示。
+     *
+     * 仍然查不到的应用属于 Android 包可见性/多用户层面，不在本函数的控制范围：
+     *  - 工作资料（work profile）、应用分身/双开运行在别的 userId 下，
+     *    `queryIntentActivities` 只返回当前用户的；
+     *  - ROM 的「应用隐藏」功能会让应用对本进程不可见；
+     *  - 只有 LEANBACK/自定义 category 入口的应用不属于 LAUNCHER 语义。
+     */
     private fun scanLaunchableApps(context: Context): List<AppEntry> {
         val pm = context.packageManager
         val intent =
             android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
                 addCategory(android.content.Intent.CATEGORY_LAUNCHER)
             }
+        val resolved =
+            try {
+                pm.queryIntentActivities(intent, 0)
+            } catch (error: Throwable) {
+                logSink?.invoke("LAUNCHER: 应用扫描失败 - ${error.message}（桌面将为空）")
+                return emptyList()
+            }
+        var skipped = 0
+        val infos = resolved.mapNotNull { it.activityInfo }
+        // 同包多入口去重（策略见 dedupeLauncherPackages，有单测）：保留每个包的首个入口
+        val keepOrder = dedupeLauncherPackages(infos.map { it.packageName }, context.packageName)
+        val firstInfoByPackage = LinkedHashMap<String, android.content.pm.ActivityInfo>(keepOrder.size)
+        infos.forEach { info -> firstInfoByPackage.putIfAbsent(info.packageName, info) }
         // 拼音键每应用只算一次（此前在比较器里逐对重复转写，150 应用 ≈ 上千次 ICU 调用）
-        return pm
-            .queryIntentActivities(intent, 0)
-            .asSequence()
-            .map { it.activityInfo }
-            .filter { it.packageName != context.packageName }
-            .map { info ->
-                val label = info.loadLabel(pm).toString()
-                AppEntry(
-                    component = ComponentName(info.packageName, info.name),
-                    label = label,
-                    icon = info.loadIcon(pm),
-                ) to pinyinKey(label)
-            }.take(200)
-            .toList()
-            .sortedBy { it.second }
-            .map { it.first }
+        val apps =
+            keepOrder
+                .mapNotNull { firstInfoByPackage[it] }
+                .mapNotNull { info ->
+                    // 单个应用 loadLabel/loadIcon 抛异常不能拖垮整张列表
+                    runCatching {
+                        val label = info.loadLabel(pm).toString().ifBlank { info.packageName }
+                        AppEntry(
+                            component = ComponentName(info.packageName, info.name),
+                            label = label,
+                            icon = info.loadIcon(pm),
+                        ) to pinyinKey(label)
+                    }.onFailure {
+                        skipped++
+                    }.getOrNull()
+                }
+        if (skipped > 0 || resolved.size != apps.size) {
+            // 诊断留痕：用户反馈「少应用」时，凭这一行就能区分
+            // 「系统只给了这么多 / 同包多入口被合并」与「标签/图标加载失败被跳过」
+            logSink?.invoke(
+                "LAUNCHER: 应用扫描 系统返回 ${resolved.size} 个 activity → ${apps.size} 个应用" +
+                    if (skipped > 0) "（跳过 $skipped 个：标签/图标加载失败）" else "（同包多入口已合并）",
+            )
+        }
+        return apps.sortedBy { it.second }.map { it.first }
     }
 
     /** 字母导航条分组键：数字→"#"，ASCII 字母→大写字母，汉字→拼音首字母。 */
@@ -1566,4 +1607,21 @@ object VirtualLauncher {
         val label: String,
         val icon: Drawable,
     )
+}
+
+/**
+ * 应用扫描结果的**去重与过滤**（[VirtualLauncher.scanLaunchableApps] 的纯函数部分）。
+ *
+ * 抽出来是为了可单测：旧实现用 `take(200)` 且**写在排序之前**，应用多的机型上
+ * 会按系统返回顺序砍掉尾部、表现为「偶尔漏几个 app」（2026-10-23 用户反馈）。
+ *
+ * @param candidates 系统 `queryIntentActivities` 的 packageName 序列（保持原顺序）
+ * @param selfPackage 本应用包名（不出现在桌面）
+ */
+internal fun dedupeLauncherPackages(
+    candidates: List<String>,
+    selfPackage: String,
+): List<String> {
+    val seen = HashSet<String>(candidates.size)
+    return candidates.filter { pkg -> pkg != selfPackage && seen.add(pkg) }
 }
