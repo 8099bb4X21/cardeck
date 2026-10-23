@@ -377,6 +377,20 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   解析用 `WifiSavedNetworks.idsOf`（纯函数，有单测：SSID 含空格/非 ASCII/同网多行
   同 netId/畸形行都覆盖；宁可漏判不误删）。手动兜底（`manualJoinCarWifi`）会把热点
   存回系统网络，日志与弹窗都明确写出这个代价。
+  **specifier 挂起的兜底节奏必须按「车机窗口」倒排**（2026-10-23 奥迪 3315 毫秒级
+  日志定谳）：车机从 0x4301 起 **~15s 拆 BT、~21s 后 AirPlay 服务窗关闭**（晚到即
+  7000 端口 ECONNREFUSED，BT 再健康也无法激活）——从 0x5703 起算入网预算只有
+  ~9-14s。因此 specifier 首窗只能给 5s（正常入网 0.03~3s；5s 零回调=挂起特征），
+  之后依次：快速探测（系统已自己连上则直接绑定，≤3s）→ **重发 specifier（实测
+  release→重发 1.6s 即入网，是被验证有效的恢复手段，必须紧跟探测）** 20s 窗 →
+  connect-network 深度兜底（本轮窗口必然已过，只为下一轮占位）。曾犯的错：把兜底
+  排在 20s 首窗**之后**——第 1 轮首窗没走完车机就拆链（15.2s），兜底根本轮不到执行；
+  第 2 轮 21.6s 入网时服务窗已关。**connect-network 存系统网络的清理面**：登记必须
+  在命令返回 ok 的**瞬间**（等「切网+bind 成功」才登记的话，取消/超时/bind 失败三条
+  路径都会遗留）；清理挂 disconnect 与推流 onEnded **两端**（车机拆链是最常见的
+  离场方式）；该 SSID 本轮之前已保存（用户选过「保留」）的不登记不删。
+  **bindCurrentWifi 的 onLost 必须转发 onNetworkLost**（兜底入网成主路径后，不转发
+  则熄火后英雄卡停在「已连接」、会话拖到心跳超时才死）。
   **WEP 无法用 specifier 表达**（无对应 Builder API）→ `JoinResult.Unsupported`，
   走旧的 `connect-network` 兜底路径（`legacyJoinCarWifi`）。
   specifier 在 **Android 12/12L 仍需位置权限 + 位置服务**（13+ 由 NEARBY_WIFI_DEVICES
@@ -498,6 +512,12 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   两个 ID 必须**各自**带 `name=`——只注册一个时用整段 `grep name=` 会误判）；
   `WriteResult.UNSUPPORTED`（永久：偏好**不落盘**，否则下次连接白跑 applyAll
   且 UI 与系统脱节）vs `FAILED`（Shizuku 临时故障，保留用户意愿待重试）；
+  **写入入队点在配对起步（端点处理）而非 attach**（2026-10-23）：`am compat enable`
+  会杀名单内应用，必须先于任何应用启动完成——配对阶段有几十秒空窗让写入自然排空，
+  attach 只 `awaitPending()` drain（~0ms）。别在 attach 里同步跑 applyAll：屏幕口
+  keepAlive 帧自 attach 返回后才起发，attach 每阻塞 1s 都吃掉「RECORD→首条
+  keepAlive」的 ~10s 拆链预算；`awaitPending` 超时（6s）**必须留日志**——静默失效
+  会让「先写覆盖再拉应用」的保证悄悄作废；
   `applyAll` 探测失败即整体跳过，不再逐应用空跑 2×4s 的 shell 往返；
   面板顶部显示黄色横幅并整列置灰。
   **查证方法教训**：gitiles 的 `?format=TEXT` 单文件抓取失败时会返回空/错误页，
@@ -621,6 +641,17 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   （合计 ≥10 项，iD9 形态）仍无 0x5703/0x5702，稀疏清单判 UNKNOWN 走旧协议
   （0x5703 有超时兜底）；③ identityKey 存原文（与 0x1D01 逐字一致），持久化键的
   清洗由 MfiLengthMemory.receiverKey 负责——后续 Memory 并表共用此键。
+  **链路代际（LinkGeneration，2026-10-23）**：同一信号源产出第三维判定
+  `linkGenerationOf`——CLASSIC_MIB3（DELPHI 制造 + AUDI 型号 + 双清单合计 1~9 项，
+  三条件同时命中）在 AirPlay 阶段**忽略隧道 marker 永不协商**；EVENT_LINK（其余
+  一切，含本田/宝马/信号缺失）保留 marker 升级协商。分代默认值全链一致取
+  EVENT_LINK（兼容侧），**CLASSIC_MIB3 必须显式声明**（`VirtualIap2Link.generation`
+  字段、`senderLinkGenerationCache` 读取兜底、`armMib3VirtualLink` 兜底三处皆然）——
+  默认 CLASSIC 的话，未来新增布防点漏传 setGeneration 时本田媒体键会静默失效。
+  判定与 wifiGen 相互独立（BMW iD9：wifiGen=NEW 跳 0x5702 + EVENT_LINK marker 升级，
+  两维互不干扰；§9h 的 SYN|ACK 修复在 Iap2LinkEngine，分代不触碰）。判定纯函数有
+  单测（`ReceiverProfileTest` 五条：真实签名/满清单/缺身份/缺清单/非奥迪 DELPHI 件）。
+  代际缓存随 disconnect 清零（防跨车换连读到上一辆的判定）。
 - **能力清单只能证明「有」，不能证明「没有」——绝不可当硬门禁**（2026-10-22 奥迪
   3315 真车定谳，0.1.13 回归的根因）：8b64147 把 WiFi 凭据分派写成「清单没声明
   0x5702 就跳过旧协议」，而奥迪的可收清单只有 5 项（`0x4e0c 0x4e09 0x4300 0xea00
@@ -736,7 +767,12 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   10s 拆链另有主因（缺 WiFi 隧道，见下条）；心跳是必要条件，不是充分条件。
   keepAlive 帧不加密（catplay 只加密 opcode=VideoFrame），不消耗 ChaCha 帧 nonce。
 - **MIB3 需要第二条 iAP2 链路（WiFi 隧道），只回 ACK 会被 ~10s 拆链**（2026-10-19
-  定谳，当晚日志 + AADisplay Frida 对照）：AirPlay 会话建立后，手机必须在屏幕流
+  定谳，当晚日志 + AADisplay Frida 对照；**⚠ 2026-10-23 修正：该结论已被推翻**——
+  当年 10.2s 拆链的真因是「响应车机 marker 触发隧道协商」本身挂起了 CarPlay UI。
+  真 iPhone sysdiagnose 成功会话 `iAPChannel FeatureKey=0`（不建隧道），0.1.9 忽略
+  marker 时奥迪照常进入。现行按链路代际分派：CLASSIC_MIB3（DELPHI+AUDI+稀疏清单）
+  **忽略 marker 永不协商**，本条流程只适用于 EVENT_LINK（Honda HFT 等事件通道建链
+  形态）；别按本条把 CLASSIC_MIB3 改回建隧道，详见 PROTOCOL-NOTES §12 顶部修正）：AirPlay 会话建立后，手机必须在屏幕流
   SETUP 成功后**主动经控制通道** POST /command（iAPSendMessage 信封）发一次 DETECT，
   车机回 SYN（事件通道）→ 手机 SYN|ACK（控制通道）→ 链路 NORMAL 后重跑控制会话
   （0x1D00→0x1D01→0x1D02+0xAA00→0xAA06→0xAA02 挑战【长度按车机记忆，隧道独立键，

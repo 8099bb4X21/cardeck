@@ -677,11 +677,20 @@ ACK 位与 ack 字段，裸 ACK 本就是冗余的；catplay 主机路径也只�
 
 ## 12. MIB3 WiFi 隧道（AirPlay 会话之上的第二条 iAP2 链路，2026-10-19）
 
+> **⚠ 2026-10-23 修正**：本节「MIB3 必须建隧道否则 10~12s 拆链」的结论**已被推翻**——
+> 当年 10.2s 拆链的真因是「响应车机 marker 触发了隧道协商」本身：协商让车机进入
+> 「等仪表盘数据」状态、挂起 CarPlay UI（卡原界面）。真 iPhone sysdiagnose 的成功
+> 会话里 `iAPChannel FeatureKey = 0`（§13a-5，真 iPhone 根本不建隧道）；0.1.9 忽略
+> marker 时奥迪照常进入 CarPlay。现行实现按链路代际分派（`ReceiverProfile.
+> linkGenerationOf`）：CLASSIC_MIB3（DELPHI+AUDI+稀疏清单）忽略 marker 永不协商，
+> 只有 EVENT_LINK（Honda HFT 等事件通道建链形态）走本节的协商流程。**本节保留**，
+> 作为 EVENT_LINK 协商与协议常量的事实源；不要按本节把 CLASSIC_MIB3 改回「建隧道」。
+
 > 事实源：`reference/AADisplay`（分支 AADisplay-Split-Lite-Carplay，**GPL-3.0 只读参考**）。
 > 他们用 Frida 挂越狱 iPhone 的 mediaserverd 抓的真机握手；本仓库据此实现
 > `airplay/VirtualIap2Link.kt`（协议事实照抄，代码独立编写）。
 
-**为什么需要**：MIB3 在 AirPlay 会话建立后还要求手机在**事件通道**上开第二条 iAP2
+**「为什么需要」（原始结论，仅 EVENT_LINK 形态适用）**：MIB3 在 AirPlay 会话建立后还要求手机在**事件通道**上开第二条 iAP2
 链路并重跑控制会话——只回链路 ACK（空回显）时 MIB3 约 10~12 秒整链拆除（本仓库
 2026-10-19 两轮实车日志 10.2s 复现；此前误判为心跳缺失，§9e 的三条心跳修复并不能
 救这台车）。AADisplay 源码注释原文："Empty ACK alone makes MIB3 tear AirPlay control
