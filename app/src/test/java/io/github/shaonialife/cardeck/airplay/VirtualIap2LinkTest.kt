@@ -164,11 +164,9 @@ class VirtualIap2LinkTest {
      * 探测态、在等**我们**的会话表。连着第 2 个 marker 起必须升级为「marker + 本表
      * 同步包」，且**只能走控制通道**——出站写在事件通道上车机不读（r6 踩过的坑）。
      *
-     * 2026-10-23 分代重构：升级行为仅在 Generation.EVENT_LINK 下生效。
-     * CLASSIC_MIB3（奥迪真车）的 marker 是周期探测——响应它会启动 MIB3 隧道协商、
-     * 挂起车机的 CarPlay UI 启动（卡原界面、要重启车机，0.1.13/0.1.14 双车复现）；
-     * 0.1.9 忽略 marker 时奥迪照常进入 CarPlay，真 iPhone sysdiagnose 的
-     * iAPChannel=0 也证明真 iPhone 不建这条隧道。
+     * 2026-10-23 二次定谳：该行为是**全代际**的（不再按 EVENT_LINK 分派）——奥迪
+     * 同样要求链路 NORMAL，否则 RECORD 后 ~10s 被拆（0.1.9/0.1.17 双日志实证）。
+     * 当年「协商挂起奥迪 UI」的真因是协商完成后缺 modesChanged 重申。
      */
     @Test
     fun repeatedMarkersUpgradeToControlChannelHandshake() {
@@ -200,22 +198,30 @@ class VirtualIap2LinkTest {
     }
 
     /**
-     * CLASSIC_MIB3（奥迪真车）：detect 后的 marker 是周期探测——必须忽略。响应它会
-     * 启动 MIB3 隧道协商，车机随即订阅我们的「仪表盘数据」通道并等待填充，CarPlay
-     * UI 启动被挂起（卡原界面、要重启车机）。注意 CLASSIC 必须**显式声明**——
-     * 生产里由 armMib3VirtualLink 先 setGeneration 再 arm，字段默认是 EVENT_LINK
-     * （漏设时落兼容侧，见 VirtualIap2Link.generation 文档）。
+     * 2026-10-23 二次定谳：**所有代际都必须响应 marker 完成链路协商**。车机的
+     * marker 以 1Hz 无限重发（0.1.17 车主日志：远超旧注释的「2~5 个后静默」），
+     * 不回应则链路永远到不了 NORMAL，RECORD 后 ~10s 被车机拆整条会话（0.1.9 实测
+     * 10.17s、0.1.17 实测 10.18s）。当年「协商挂起奥迪 UI」的真因是协商完成后缺
+     * modesChanged 重申（SessionController.scheduleModesReclaim）。
      */
     @Test
-    fun classicMib3MarkersAreIgnoredAndNeverEscalate() {
-        val h = Harness()
-        h.link.setGeneration(ReceiverProfile.LinkGeneration.CLASSIC_MIB3)
-        h.link.armMib3()
-        val detect = h.controlSent.size
-        // 模拟奥迪：发 5 个 marker（真车实测 2~5 个后自行静默）
-        repeat(5) { h.link.onCarBytes(Iap2LinkEngine.MARKER) }
-        assertEquals("CLASSIC_MIB3 的 marker 不得触发协商字节", detect, h.controlSent.size)
-        assertTrue("出站不得落到事件通道", h.eventSent.isEmpty())
+    fun markersEscalateRegardlessOfGeneration() {
+        for (generation in ReceiverProfile.LinkGeneration.entries) {
+            val h = Harness()
+            h.link.setGeneration(generation)
+            h.link.armMib3()
+            val detect = h.controlSent.size
+            // 第 1 个：还不判定（车机会再发探测重发）
+            h.link.onCarBytes(Iap2LinkEngine.MARKER)
+            assertEquals("$generation 首个 marker 不应额外发字节", detect, h.controlSent.size)
+            // 第 2 个：升级为 marker + 会话表
+            h.link.onCarBytes(Iap2LinkEngine.MARKER)
+            assertTrue(
+                "$generation 第 2 个 marker 必须触发协商字节（0.1.17 证伪「忽略」路线）",
+                h.controlSent.size > detect,
+            )
+            assertTrue("$generation 出站不得落到事件通道", h.eventSent.isEmpty())
+        }
     }
 
     @Test

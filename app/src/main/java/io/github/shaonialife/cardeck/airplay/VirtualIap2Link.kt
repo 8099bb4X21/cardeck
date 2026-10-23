@@ -64,29 +64,19 @@ class VirtualIap2Link(
     private var mib3Armed = false
 
     /**
-     * 车机链路代际（2026-10-23 分代重构）。
+     * 车机链路代际（枚举与判定收口在 [ReceiverProfile]，判定依据随 PROFILE/IAPLINK
+     * 日志输出）。
      *
-     * 此前三代车机的行为差异散落在同一组运行时标志（marker 计数、升级阈值、轮次）
-     * 里互相横跳——为 Honda HFT 加的「第 2 个 marker 即升级协商」把奥迪 MIB3 也带进了
-     * 隧道协商，而奥迪根本不需要它（0.1.9 忽略 marker 时 CarPlay 照常进入；真 iPhone
-     * sysdiagnose 的 iAPChannel=0 同样证明不需要）——结果就是「车机卡在原界面、
-     * 要重启车机」（2026-10-23 用户反馈，0.1.13/0.1.14 双车复现）。
+     * **2026-10-23 二次定谳：marker 协商不再按代际分派**——所有车机都必须完成链路
+     * 协商（车机 marker = 它在等我们的会话表，1Hz 无限重发；不回应则链路永远到不了
+     * NORMAL，RECORD 后 ~10s 被车机拆链：0.1.9 实测 10.17s、0.1.17 实测 10.18s）。
+     * 此前 0.1.16/0.1.17 曾对 CLASSIC_MIB3 忽略 marker，依据是「0.1.9 忽略 marker
+     * 时奥迪照常进入」——该论断被 0.1.9 自己的日志（10.17s 拆链）与 0.1.17 车主日志
+     * 推翻。当年「协商挂起车机 UI 卡原界面」的真因是协商完成后缺 modesChanged 重申
+     * （见 [onControlSessionComplete]）。
      *
-     * 现在按代际显式分派，各自的 marker 策略互不污染：
-     *  - [ReceiverProfile.LinkGeneration.CLASSIC_MIB3]（奥迪 3315/0628 等真车）：detect 后 **忽略 marker**——
-     *    它们的 CarPlay 启动不依赖隧道；车机发 2~5 个 marker 后自行静默。
-     *    隧道协商不再自动启动（保留 [forceControlNegotiation] 供调试/未来分派）。
-     *  - [ReceiverProfile.LinkGeneration.EVENT_LINK]（Honda HFT 等）：marker 是「等会话表建链」的硬需求
-     *    （重发 160 次量级），按阈值升级协商——媒体键的载体就在建链后的 0x6802 里。
-     */
-    /**
-     * 当前代际（枚举与判定收口在 [ReceiverProfile]）。
-     *
-     * 默认取 EVENT_LINK（0.1.13 前兼容行为）——与判定层/缓存层/画像层的默认一致：
-     * 信号不足时落在「协商无应答后静默」而非「挂死车机」。CLASSIC_MIB3 必须经
-     * [setGeneration] **显式声明**（生产接线 armMib3VirtualLink 总是先 set 再 arm）；
-     * 若这里默认 CLASSIC，未来新增布防调用点一旦漏传，Honda 会静默丢媒体键且无任何
-     * 日志线索（2026-10-23 审阅定谳）。
+     * 代际现在仅用于日志与未来分派，marker 策略统一：按阈值升级协商（Honda HFT 的
+     * 媒体键载体在建链后的 0x6802 里，奥迪的切屏前提是链路 NORMAL + 资源重声明）。
      */
     private var generation: ReceiverProfile.LinkGeneration = ReceiverProfile.LinkGeneration.EVENT_LINK
     private var mib3SynAckQueued = false
@@ -96,6 +86,7 @@ class VirtualIap2Link(
     private var mib3MarkerIgnores = 0
     private var mib3DeferredLogs = 0
     private var mib3WirelessSessionId: String? = null
+    private var mib3ControlSessionNotified = false
 
     /**
      * 事件通道链路模式（2026-10-20 Honda HFT 实测新增）。
@@ -211,9 +202,8 @@ class VirtualIap2Link(
     }
 
     /**
-     * 显式声明车机链路代际（布防前后均可，幂等）。
-     * 未声明时默认 [ReceiverProfile.LinkGeneration.CLASSIC_MIB3]——真车形态优先安全侧：
-     * 错把 MIB3 当 EVENT_LINK 会挂起车机 UI（重启才能恢复），反向只是少媒体键。
+     * 显式声明车机链路代际（布防前后均可，幂等）。代际现仅用于日志与未来分派，
+     * marker 协商策略全代际统一（2026-10-23 二次定谳，见 [generation] 文档）。
      */
     fun setGeneration(generation: ReceiverProfile.LinkGeneration) {
         synchronized(lock) {
@@ -224,8 +214,8 @@ class VirtualIap2Link(
     }
 
     /**
-     * 调试/未来分派用：强制开启一轮控制通道协商（CLASSIC_MIB3 默认不自动协商）。
-     * 一经调用，后续 marker 按协商态处理（同 EVENT_LINK 的已升级分支）。
+     * 调试/特殊形态用：强制开启一轮控制通道协商（正常路径由车机 marker 触发）。
+     * 一经调用，后续 marker 按协商态处理。
      */
     fun forceControlNegotiation(reason: String) {
         synchronized(lock) {
@@ -234,6 +224,17 @@ class VirtualIap2Link(
             startControlRoundLocked(reason)
         }
     }
+
+    /**
+     * MIB3 控制会话完成回调（auth+burst 发出时触发一次）：宿主应在此之后按
+     * AADisplay r17 验证过的时序重申 modesChanged 资源声明（+1.5s 首发、
+     * +4/+12/+30s 重申）。**082446 定谳**：协商/MFi/订阅全部成功但只在会话
+     * 建立早期声明过一次资源 → 车机全程健康却永不切到 CarPlay 画面——第二控制
+     * 会话把车机的资源仲裁重置了一遍，旧声明已失效，它在等一份新的。
+     * 注意不得在 0xAA00/0xAA05 进行中声明（与 iAP POST 抢控制通道会把奥迪搞死，
+     * AADisplay 注释原话），必须等 burst 完成。
+     */
+    var onControlSessionComplete: (() -> Unit)? = null
 
     /**
      * 开一轮控制通道协商：marker + 本表同步包（会话 10/11/12），刷新引擎重发节拍。
@@ -264,24 +265,20 @@ class VirtualIap2Link(
                     mib3MarkerIgnores++
                     val now = nowMillis()
                     when (generation) {
-                        // 奥迪真车：marker 是周期探测，忽略即可——车机发几个后自行静默，
-                        // CarPlay 启动不依赖隧道（0.1.9 验证；隧道协商反而挂起它的 UI 启动）
-                        ReceiverProfile.LinkGeneration.CLASSIC_MIB3 -> {
-                            if (mib3MarkerIgnores <= 5 || mib3MarkerIgnores % 30 == 0) {
-                                log(
-                                    "IAPLINK: 车机 marker（#$mib3MarkerIgnores）——CLASSIC_MIB3 忽略" +
-                                        "（不协商；CarPlay 启动不依赖隧道）",
-                                )
-                            }
-                        }
-
-                        // Honda HFT 形态：marker 重发 = 等会话表，按阈值升级
-                        ReceiverProfile.LinkGeneration.EVENT_LINK -> {
+                        // 2026-10-23 定谳：**所有代际都必须完成链路协商**。曾按「奥迪忽略
+                        // marker」分派（0.1.16/0.1.17），被车主 0.1.17 日志证伪——车机 marker
+                        // 以 1Hz **无限重发**（远超旧注释的「2~5 个后静默」），链路永远到不了
+                        // NORMAL，RECORD 后 10.18s 车机拆掉整条会话（0.1.9 同款 10.17s）。
+                        // 协商完成本身无副作用（082446 全程健康），缺的是协商完成后的
+                        // modesChanged 重申（见 onControlSessionComplete）。
+                        ReceiverProfile.LinkGeneration.CLASSIC_MIB3,
+                        ReceiverProfile.LinkGeneration.EVENT_LINK,
+                        -> {
                             if (!eventLinkArmed && mib3MarkerIgnores >= EVENT_LINK_MARKER_THRESHOLD) {
                                 eventLinkArmed = true
                                 log(
                                     "IAPLINK: 车机连续发 SYN marker ×$mib3MarkerIgnores" +
-                                        "（EVENT_LINK：它在等我们的会话表）→ 控制通道补发协商轮次",
+                                        "（它在等我们的会话表）→ 控制通道补发协商轮次",
                                 )
                                 startControlRoundLocked("车机 marker 重发")
                             } else if (eventLinkArmed) {
@@ -515,7 +512,10 @@ class VirtualIap2Link(
     /** 直接投递完整 CSM 帧（Frida 抓的逐字节常量，勿重新编码）。 */
     private fun sendRawCsmLocked(frame: ByteArray) {
         val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L)
-        val messageId = ((frame[2].toInt() and 0xFF) shl 8) or (frame[3].toInt() and 0xFF)
+        // CSM 帧布局：FF 5A [len:2] [msgId:2] …——消息号在 [4..5]，[2..3] 是载荷长度。
+        // 曾误取 [2..3]，日志把 0xFFFA 打成 0x32、0xFFF0 打成 0x0E、0x4158 打成 0x64
+        // （长度值），排查时极易被带偏（2026-10-23 实际误导过一轮）。
+        val messageId = ((frame[4].toInt() and 0xFF) shl 8) or (frame[5].toInt() and 0xFF)
         log(
             "IAPLINK: 隧道 tx 0x${messageId.toString(16)} " +
                 "(${Iap2MessageIds.nameOf(messageId)}) ${frame.size}B raw ok=$ok",
@@ -782,6 +782,10 @@ class VirtualIap2Link(
         sendRawCsmLocked(MIB3_START_LOCATION_INFORMATION)
         sendRawCsmLocked(MIB3_GPRMC_DATA_STATUS)
         log("IAPLINK: MIB3 突发已发（会话标识 $sessionId）——等待车机订阅")
+        if (!mib3ControlSessionNotified) {
+            mib3ControlSessionNotified = true
+            onControlSessionComplete?.invoke()
+        }
     }
 
     /** 0x4E0B：u64 秒 + s16 时区偏移(分) + u8 夏令时。 */

@@ -36,9 +36,8 @@ class AirPlayClient(
     private val context: Context? = null,
     /**
      * 车机链路代际（蓝牙侧 0x1D01 画像判定，见 [ReceiverProfile.linkGenerationOf]）。
-     * MIB3 布防时据此分派 marker 策略：CLASSIC_MIB3 忽略 marker（响应会挂起车机
-     * CarPlay UI），EVENT_LINK 按阈值升级协商（Honda HFT 媒体键依赖）。null = 未
-     * 识别，取 EVENT_LINK（0.1.13 前兼容行为）。
+     * 2026-10-23 二次定谳后仅用于日志——marker 协商策略全代际统一（不完成链路协商
+     * 车机 ~10s 拆链；切屏靠协商完成后的 modesChanged 重申）。
      */
     private val linkGeneration: ReceiverProfile.LinkGeneration? = null,
     /**
@@ -1316,6 +1315,21 @@ class AirPlayClient(
      */
     var onMediaKey: ((Int) -> Unit)? = null
 
+    /**
+     * MIB3 隧道控制会话完成（auth+burst 已发）回调：宿主据此调度 modesChanged
+     * 资源重申 burst（AADisplay r17 时序 +1.5/4/12/30s）。082446 定谳：不重申的
+     * 话车机全程健康却永不切到 CarPlay 画面。
+     */
+    var onTunnelControlSessionComplete: (() -> Unit)? = null
+
+    /** MIB3 虚拟链路是否已布防（armMib3 成功）——拆链归因用：布防了但控制会话没完成就被拆 = 链路看门狗，与音频档位无关。 */
+    var mib3LinkArmed: Boolean = false
+        private set
+
+    /** MIB3 控制会话是否完成过（auth+burst 已发）。 */
+    var mib3ControlSessionDone: Boolean = false
+        private set
+
     /** 虚拟链路唯一实例（出站路由/三形态语义见 [VirtualIap2Link]）。 */
     private fun obtainIapLink(): VirtualIap2Link =
         iapLink ?: synchronized(this) {
@@ -1328,6 +1342,10 @@ class AirPlayClient(
                     alive = { socket?.isClosed == false },
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
+                    it.onControlSessionComplete = {
+                        mib3ControlSessionDone = true
+                        onTunnelControlSessionComplete?.invoke()
+                    }
                     it.begin()
                     iapLink = it
                 }
@@ -1349,6 +1367,7 @@ class AirPlayClient(
         val generation = linkGeneration ?: ReceiverProfile.LinkGeneration.EVENT_LINK
         obtainIapLink().setGeneration(generation)
         obtainIapLink().armMib3()
+        mib3LinkArmed = true
     }
 
     /**

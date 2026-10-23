@@ -1466,6 +1466,19 @@ object SessionController {
         val profile = activeAudioProfile ?: return
         val startedAt = activeAudioStartedAt
         val identity = activeAudioReceiverKey
+        // 链路看门狗守卫（2026-10-23 车主 0.1.17 日志定谳）：MIB3 布防了但控制会话
+        // 没完成就被拆 = 车机 ~10s 链路看门狗（RECORD 后 10.18s，与 0.1.9 的 10.17s
+        // 同款），与音频档位无关。不守卫的话 t102/media 档被误记「不兼容」，下一轮
+        // 自动换到 compatibility 档——那条通路车机根本不接（AGENTS 音频三条硬约束），
+        // 从此永远没声。
+        currentClient?.let { client ->
+            if (client.mib3LinkArmed && !client.mib3ControlSessionDone) {
+                appendLog("AUDIO: 会话在链路协商完成前被车机拆掉（~10s 看门狗形态）——不记音频档位")
+                activeAudioProfile = null
+                activeAudioStartedAt = 0L
+                return
+            }
+        }
         val lived = if (startedAt > 0) android.os.SystemClock.uptimeMillis() - startedAt else -1L
         // 本轮记忆很快失效：下次连接重新按最新记忆选档
         activeAudioProfile = null
@@ -1506,6 +1519,36 @@ object SessionController {
             val alternate = client.audioCandidates(preferCompat = !audioPreferCompat).map { it.key }
             (preferred + alternate).toSet()
         }.getOrDefault(emptySet())
+
+    /**
+     * modesChanged 资源重申调度（MIB3 控制会话完成事件驱动）。
+     *
+     * AADisplay r17 在奥迪上长播验证的时序：auth+burst 之后 **+1.5s 首发、+4s/+12s/
+     * +30s 各重申一次**（绝对时刻）。声明若落在 0xAA00/0xAA05 进行中，会与 iAP POST
+     * 抢控制通道、奥迪 ~12s 后死（AADisplay 注释原话）——所以只能由 burst 完成事件
+     * 触发，不能在会话建立时一次性发完。082446 定谳：第二控制会话会重置车机的资源
+     * 仲裁，早先那份 200 OK 的声明到订阅簇完成时已经失效，车机在等一份新的。
+     */
+    @Volatile
+    private var modesReclaimEpoch = 0L
+
+    private fun scheduleModesReclaim(client: AirPlayClient) {
+        val epoch = ++modesReclaimEpoch
+        Bg.run("modes-reclaim") {
+            val start = android.os.SystemClock.uptimeMillis()
+            for (atMs in longArrayOf(1_500, 4_000, 12_000, 30_000)) {
+                while (true) {
+                    if (epoch != modesReclaimEpoch || client.cancelled || connectCancelled) return@run
+                    val remain = atMs - (android.os.SystemClock.uptimeMillis() - start)
+                    if (remain <= 0) break
+                    Thread.sleep(minOf(remain, 200L))
+                }
+                if (epoch != modesReclaimEpoch || client.cancelled || connectCancelled) return@run
+                if (!client.assertModes()) return@run
+                appendLog("AIRPLAY: modesChanged 资源重申（burst 后 +${atMs / 1000}s，AADisplay r17 时序）")
+            }
+        }
+    }
 
     /**
      * 端点补全：优先吸收 mDNS 解析出的地址，再决定是否等待/兜底。
@@ -1921,6 +1964,12 @@ object SessionController {
                             created.onMediaKey = { keyCode ->
                                 dispatchMediaKey(keyCode)
                                 appendLog("EVENT: 车机媒体键（iAP2 0x6802）→ keyCode=$keyCode 已注入")
+                            }
+                            // MIB3 控制会话完成 → modesChanged 资源重申 burst（082446 定谳：
+                            // 只在会话早期声明过一次的话，第二控制会话把车机资源仲裁重置，
+                            // 车机全程健康却永不切 CarPlay 画面）。
+                            created.onTunnelControlSessionComplete = {
+                                scheduleModesReclaim(created)
                             }
                         }
                     // 「强制应用横屏」覆盖写入在配对起步就入队：`am compat enable` 会立即

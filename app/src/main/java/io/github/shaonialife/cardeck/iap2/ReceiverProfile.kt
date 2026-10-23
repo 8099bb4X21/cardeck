@@ -22,22 +22,20 @@ object ReceiverProfile {
     enum class WifiGen { LEGACY, NEW, UNKNOWN }
 
     /**
-     * iAP2 虚拟链路代际（2026-10-23 分代重构的判定，纯函数）。
+     * iAP2 虚拟链路代际（2026-10-23 判定，纯函数）。
      *
-     * 三代车机对「detect 之后事件通道上的 marker」响应策略不同，必须显式分派：
-     *  - [LinkGeneration.CLASSIC_MIB3]（奥迪 DELPHI 真车）：marker 是周期探测，
-     *    **忽略**——响应它会启动 MIB3 隧道协商，车机随即订阅「仪表盘数据」通道并
-     *    等待填充，CarPlay UI 启动被挂起：推流中但停在原车界面、要重启车机
-     *    （0.1.13/0.1.14 双车复现）。0.1.9 忽略 marker 时 CarPlay 照常进入；
-     *    真 iPhone sysdiagnose 的 iAPChannel=0 证明真 iPhone 不建隧道。
-     *  - [LinkGeneration.EVENT_LINK]（Honda HFT 等）：marker 是「等会话表建链」的
-     *    硬需求（1Hz 重发 160 次量级），按阈值升级协商——媒体键（0x6802）的载体。
+     * **2026-10-23 二次定谳：代际不再分派 marker 行为**——所有车机都必须完成链路
+     * 协商（marker = 车机在等我们的会话表，1Hz 无限重发；不回应则链路到不了
+     * NORMAL，RECORD 后 ~10s 被拆：0.1.9 实测 10.17s、0.1.17 车主实测 10.18s）。
+     * 曾据此对 CLASSIC_MIB3 忽略 marker（0.1.16/0.1.17），其依据「0.1.9 忽略 marker
+     * 时奥迪照常进入」被 0.1.9 自己的日志推翻；「协商挂起车机 UI」的真因是协商完成
+     * 后缺 modesChanged 资源重申（AADisplay r17 时序）。判定保留用于日志与未来
+     * 分派（如 MFi 挑战长度先验、隧道内消息差异）。
      *
      * 判据（全部来自协议自报，零品牌猜测之外的新依赖）：
      * DELPHI 制造 + AUDI 型号 + 稀疏清单（合计 <10 项，实测 2+5）→ CLASSIC_MIB3。
      * 三条同时命中才算——单条都可能误伤（清单稀疏的其它车机、非奥迪的 DELPHI 件）。
-     * 其余一切（含未知车机）→ EVENT_LINK：与 0.1.13 前行为兼容，协商轮次有上限
-     * （5 轮后静默），不可恢复的挂死风险只存在于 CLASSIC_MIB3 被误判时。
+     * 其余一切（含未知车机）→ EVENT_LINK。
      */
     enum class LinkGeneration { CLASSIC_MIB3, EVENT_LINK }
 
