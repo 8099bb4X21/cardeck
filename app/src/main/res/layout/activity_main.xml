@@ -691,7 +691,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:text="手机不锁屏，无操作时自动暗幕 · 防车机触摸冻结"
+                            android:text="手机不锁屏，无操作时真息屏（断电） · 车机不受影响"
                             android:textColor="@color/m3_on_var"
                             android:textSize="12sp" />
                     </LinearLayout>

@@ -9,6 +9,7 @@ import android.view.InputDevice
 import android.view.InputEvent
 import android.view.MotionEvent
 import android.view.Surface
+import android.view.SurfaceControl
 import java.lang.reflect.Method
 
 /**
@@ -343,6 +344,9 @@ class CarInputServiceImpl(
         }
     }
 
+    // WrongConstant：flags 里的 TRUSTED/ALWAYS_UNLOCKED/OWN_DISPLAY_GROUP 是 @hide 常量
+    // （运行时可行性已真机实证），lint 的 IntDef 模型只认公开 API。
+    @android.annotation.SuppressLint("WrongConstant")
     override fun createDisplay(
         name: String,
         width: Int,
@@ -377,13 +381,47 @@ class CarInputServiceImpl(
             // 公开化只放宽窗口访问；ROM 的「公开屏默认自动镜像」仅在未声明
             // OWN_CONTENT_ONLY 时生效，我们已声明，不受影响。dock 屏不受信、无输入场景，
             // 维持私有（也避免无关窗口挂上去）。
-            val flags =
+            val baseFlags =
                 (if (trusted) FLAG_TRUSTED or android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC else 0) or
                     FLAG_SUPPORTS_TOUCH or
                     android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+            // VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED（@hide；AOSP 定义 = 1 << 12）：
+            // KeyguardController.setKeyguardShown 对带此 flag 的屏**直接忽略锁屏状态**
+            // （AOSP KeyguardController.java：isKeyguardAlwaysUnlocked → early return），
+            // 锁屏（含 PIN 安全锁）不会给该屏发 keyguard sleep token，屏上活动保持
+            // 可见/可交互——手机锁屏后车机画面冻结、触摸失效的根治手段。
+            // 权限 ADD_ALWAYS_UNLOCKED_DISPLAY（signature|privileged）经实测 shell 已持有
+            // （dumpsys package com.android.shell granted=true，2026-10-23 荣耀 Magic7 Pro）。
+            // 注意必须同时声明 OWN_DISPLAY_GROUP（1 << 11，需 ADD_TRUSTED_DISPLAY）：
+            // 该 flag「只对不在默认 display group 的虚拟屏有效」（DisplayManager 文档），
+            // 默认组内的屏会被系统剥掉（2026-10-23 实测：不带 OWN_DISPLAY_GROUP 时创建
+            // 成功无异常，但读回 display.flags 无 ALWAYS_UNLOCKED）。
+            // ROM 不认这个组合时（抛异常或静默返回 null）降级去掉重试，行为与旧版一致。
+            val flags = baseFlags or FLAG_ALWAYS_UNLOCKED or FLAG_OWN_DISPLAY_GROUP
             fileLog("flags=0x${flags.toString(16)}")
-            val vd = dm.createVirtualDisplay(name, width, height, dpi, surface, flags, null, null)
+            val vd =
+                try {
+                    dm.createVirtualDisplay(name, width, height, dpi, surface, flags, null, null)
+                        ?: throw IllegalStateException("createVirtualDisplay 返回 null")
+                } catch (t: Throwable) {
+                    fileLog("带 ALWAYS_UNLOCKED 创建失败（$t），降级重试 flags=0x${baseFlags.toString(16)}")
+                    dm.createVirtualDisplay(name, width, height, dpi, surface, baseFlags, null, null)
+                }
             val id = vd?.display?.displayId ?: -1
+            if (id >= 0) {
+                // 读回校验：flag 生效时 display.flags 应带 FLAG_ALWAYS_UNLOCKED（Display 层 = 1 << 9）
+                val realFlags =
+                    try {
+                        dm.getDisplay(id)?.flags ?: 0
+                    } catch (_: Throwable) {
+                        0
+                    }
+                val effective = (realFlags and 0x200) != 0
+                fileLog(
+                    "ALWAYS_UNLOCKED 读回 display.flags=0x${realFlags.toString(16)} -> " +
+                        if (effective) "生效" else "未生效（锁屏仍会影响该屏）",
+                )
+            }
             fileLog("createVirtualDisplay -> vd=$vd id=$id")
             if (vd == null || id < 0) {
                 Log.w(TAG, "createDisplay $name -> null")
@@ -439,6 +477,85 @@ class CarInputServiceImpl(
 
     override fun ping(): Boolean = injector != null
 
+    override fun setScreenPower(on: Boolean): Boolean =
+        try {
+            val token = builtInDisplayToken()
+            if (token == null) {
+                fileLog("setScreenPower($on) 失败：各入口都拿不到内置屏 token")
+                false
+            } else {
+                val mode = if (on) powerModeNormal else powerModeOff
+                screenPowerMethod().invoke(null, token, mode)
+                fileLog("setScreenPower($on) ok mode=$mode")
+                true
+            }
+        } catch (t: Throwable) {
+            fileLog("setScreenPower($on) failed: $t")
+            false
+        }
+
+    /**
+     * 内置屏 token：静态方法随系统版本迁移，逐级回退并留痕——
+     * ① SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken（Android 11~14）
+     * ② DisplayControl.getPhysicalDisplayIds/getPhysicalDisplayToken（新系统入口，@hide 类）
+     * ③ SurfaceControl.getInternalDisplayToken（更老 API，部分 ROM 仍保留）
+     * 首个物理屏 id 即内置屏（AOSP 约定数组首元素为默认屏）。
+     */
+    // BlockedPrivateApi：本方法就是刻意走隐藏 API（UserService 跑在 shell 域，不受应用层
+    // hidden API 强制约束；三分支运行时行为已真机实证）。
+    @android.annotation.SuppressLint("BlockedPrivateApi")
+    private fun builtInDisplayToken(): Any? {
+        val sc = SurfaceControl::class.java
+        // ① SurfaceControl
+        runCatching {
+            val ids = sc.getDeclaredMethod("getPhysicalDisplayIds").invoke(null) as LongArray
+            val id = ids.firstOrNull() ?: return@runCatching
+            val token = sc.getDeclaredMethod("getPhysicalDisplayToken", Long::class.javaPrimitiveType).invoke(null, id)
+            if (token != null) {
+                fileLog("token via SurfaceControl id=$id")
+                return token
+            }
+        }.onFailure { fileLog("SurfaceControl token 入口失败：$it") }
+        // ② DisplayControl（新系统：SurfaceControl 上的两个方法已迁出）
+        runCatching {
+            val dc = Class.forName("android.hardware.display.DisplayControl")
+            val ids = dc.getDeclaredMethod("getPhysicalDisplayIds").invoke(null) as LongArray
+            val id = ids.firstOrNull() ?: return@runCatching
+            val token = dc.getDeclaredMethod("getPhysicalDisplayToken", Long::class.javaPrimitiveType).invoke(null, id)
+            if (token != null) {
+                fileLog("token via DisplayControl id=$id")
+                return token
+            }
+        }.onFailure { fileLog("DisplayControl token 入口失败：$it") }
+        // ③ 内部屏旧入口
+        return runCatching {
+            val token = sc.getDeclaredMethod("getInternalDisplayToken").invoke(null)
+            if (token != null) fileLog("token via getInternalDisplayToken")
+            token
+        }.onFailure {
+            fileLog("getInternalDisplayToken 入口失败：$it")
+        }.getOrNull()
+    }
+
+    @Volatile
+    private var screenPowerMethodCache: Method? = null
+
+    // SoonBlockedPrivateApi：setDisplayPowerMode 对普通应用会被逐步封锁，但 UserService
+    // 跑在 shell 域不受约束（真机实证：断电/恢复均已生效）。
+    @android.annotation.SuppressLint("SoonBlockedPrivateApi")
+    private fun screenPowerMethod(): Method {
+        screenPowerMethodCache?.let { return it }
+        // 常量 reflective 读 + 字面量兜底：POWER_MODE_OFF=0 / POWER_MODE_NORMAL=2（AOSP 稳定值）
+        try {
+            powerModeNormal = SurfaceControl::class.java.getField("POWER_MODE_NORMAL").getInt(null)
+            powerModeOff = SurfaceControl::class.java.getField("POWER_MODE_OFF").getInt(null)
+        } catch (_: Throwable) {
+        }
+        return SurfaceControl::class.java
+            .getDeclaredMethod("setDisplayPowerMode", IBinder::class.java, Integer.TYPE)
+            .also { screenPowerMethodCache = it }
+    }
+
     override fun diag(): String =
         "injector=" + (injector?.let { "${it.receiver.javaClass.name} ${it.method}" } ?: "null") +
             " setDisplayId=${setDisplayIdMethod != null}"
@@ -456,5 +573,16 @@ class CarInputServiceImpl(
 
         /** VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH（@hide；AOSP 定义 = 1 << 6 = 0x40）。 */
         private const val FLAG_SUPPORTS_TOUCH = 1 shl 6
+
+        /** VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED（@hide；AOSP 定义 = 1 << 12 = 0x1000）。 */
+        private const val FLAG_ALWAYS_UNLOCKED = 1 shl 12
+
+        /** VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP（@hide；AOSP 定义 = 1 << 11 = 0x800）。 */
+        private const val FLAG_OWN_DISPLAY_GROUP = 1 shl 11
+
+        /** SurfaceControl 显示电源模式（@hide；AOSP 定义 OFF=0 / NORMAL=2，反射失败时兜底用）。 */
+        private var powerModeOff = 0
+
+        private var powerModeNormal = 2
     }
 }

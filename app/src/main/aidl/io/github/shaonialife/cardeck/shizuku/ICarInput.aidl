@@ -28,6 +28,12 @@ interface ICarInput {
     boolean ping();
     String diag();
 
+    // 真·假息屏：SurfaceControl 层直接断/上内置屏电源（POWER_MODE_OFF/NORMAL）。
+    // 系统保持交互态（不睡眠、无 keyguard、虚拟屏零影响），物理面板真正断电。
+    // 需要 ACCESS_SURFACE_FLINGER——shell 已持有（实测荣耀 Magic7 Pro granted=true）。
+    // 反射链 SurfaceControl → DisplayControl（新系统 token 入口迁移），逐级回退。
+    boolean setScreenPower(boolean on);
+
     // 服务进程 PID：应用侧清理「非当前绑定进程」的陈旧 UserService 时用于排除自己
     // （旧进程持有的虚拟屏跨进程无法 release，杀进程是唯一释放途径，见 CarInputClient）。
     int pid();

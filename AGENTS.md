@@ -269,6 +269,49 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   只允许单向转调 `DefaultMapPrefs`。
 - **会话生命周期钩子**：强制横屏覆盖（AppOrientationCompat）attach 时 applyAll、
   retireSession/onEnded 时 resetAll——新加系统级写入（settings/cmd）照此模式收口。
+- **锁屏/息屏对虚拟屏的影响：两条独立 token 路径 + ALWAYS_UNLOCKED 豁免**（2026-10-23
+  荣耀 Magic7 Pro 真机实证，flag 修复已落地、整车链路待车验证）：
+  手机按电源键后车机冻结/黑屏是系统两条休眠路径叠加：① **keyguard sleep token**
+  （锁屏时 KeyguardController 给每块屏发 token → 活动暂停）；② **Display-off sleep
+  token**（PUBLIC 虚拟屏没有 `FLAG_NEVER_BLANK`——AOSP 只给非 PUBLIC 屏配，系统熄屏时
+  虚拟屏电源态跟随主屏变 OFF/DOZE → WM 发 token）。修复：`CarInputServiceImpl.
+  createDisplay` 给屏加 **`VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED`（@hide，1<<12）**——
+  `setKeyguardShown` 对带此 flag 的屏直接忽略（连 PIN 安全锁也不影响），锁屏不再发
+  keyguard token；**必须同时声明 `VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP`（1<<11）**，
+  否则 flag 被系统剥掉（文档明说「只对不在默认 display group 的虚拟屏有效」，实测不带
+  时创建成功但读回 display.flags 无此位）。权限 `ADD_ALWAYS_UNLOCKED_DISPLAY`/
+  `ADD_TRUSTED_DISPLAY` 经实测 shell 已持有（dumpsys package com.android.shell）；
+  ROM 拒绝时降级去掉重试（createDisplay 内置回退）。真机验证：带 flag 的屏锁屏后
+  无 keyguard token，亮屏（仍 PIN 锁定）即自动苏醒、活动 RESUMED、画面帧恢复。
+  **配套认知**：① 屏在**熄屏态创建**会出生即带 Display-off token（休眠），交互态创建
+  才出生即醒——产品建屏发生在用户操作手机时，无此问题；② 系统真休眠（按电源键）期间
+  窗口表面会被剥离，唤醒后表面重挂在本 ROM 上不稳定（活动 RESUMED 但 mHasSurface=
+  false，靠后续亮屏稳态/活动重启恢复）——所以「按电源键」场景仍需产品侧配合：
+  引导用「假息屏」而非电源键。
+  **真·假息屏已实现（2026-10-23 真机验证）**：`ICarInput.setScreenPower(on)` 在
+  UserService 里反射 `SurfaceControl.setDisplayPowerMode(token, POWER_MODE_OFF/NORMAL)`
+  （需要 ACCESS_SURFACE_FLINGER，shell 已持有）。系统保持交互态 → 虚拟屏零影响
+  （`dumpsys power` mWakefulness 一直 Awake），物理面板真断电（
+  `dumpsys SurfaceFlinger` 头部 `powerMode=Off/On/Doze` 可直接核对）。屏幕暗着
+  但**没锁屏没睡眠**，触摸探针唤醒、会话结束/暗幕开关/detach 三路收口恢复供电、
+  SCREEN_OFF 广播（真休眠）清 `panelOffByUs` 标记把面板交还系统。
+  **token 获取入口随系统版本迁移，荣耀 A17 实测只有 ③ 通**：①
+  `SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken`（Android 11~14，
+  本机 NoSuchMethodException）→ ② `android.hardware.display.DisplayControl`（部分
+  新系统，本机 ClassNotFoundException）→ ③ `SurfaceControl.getInternalDisplayToken`
+  （本机可用）。三分支都失败时 setScreenPower 返回 false，暗幕自动退回纯遮罩态。
+  **注意**：面板断电后物理触摸能否唤醒未在真机验证（bench 用的是注入事件）——
+  若数字死屏不拾取，唤醒路径 = 电源键（真休眠一次再亮）。
+  **暗幕仍保留，角色变化**：①setScreenPower 失败（老 ROM/Shizuku 未就绪）时的降级
+  手段；②假息屏期间的误触盾——面板灭着时若无这层可点击遮罩，兜里触摸会点到前台
+  应用（如「断开连接」）。面板断电时暗幕不可见，不影响观感。
+  **生命周期收口（2026-10-23 用户实测 bug）**：假息屏中按电源键真休眠时，SCREEN_OFF
+  必须**同时**清面板标记、撤暗幕、停计时——否则解锁后暗幕还盖在锁屏上，要多点一下
+  才消失；USER_PRESENT（解锁）再重排计时——指纹/人脸解锁不产生屏幕触摸事件，探针
+  收不到，不补排的话解锁后自动假息屏是停摆的。
+  诊断：`dumpsys window displays` 看各屏 `mSleeping`/`mAllSleepTokens`；
+  `dumpsys display` 看虚拟屏 `state`； UserService 建屏读回校验打在
+  `/data/local/tmp/carinput_svc.log`（含 token 入口与 setScreenPower 结果）。
 - **暗幕/常亮必须由会话驱动，不能由 App 启动驱动**（2026-10-19 用户实测
   「会话已断开、过一会儿仍然启动暗幕」）：`ScreenDimmer.attach` 原先在启动时就
   `schedule()` 45 秒定时器，而车机侧断开走的是 `VideoSender.onEnded`——它**不经过

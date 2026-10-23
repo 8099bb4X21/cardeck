@@ -1,6 +1,9 @@
 package io.github.shaonialife.cardeck.ui
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.Handler
@@ -11,6 +14,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import io.github.shaonialife.cardeck.shizuku.CarInputClient
 import io.github.shaonialife.cardeck.shizuku.Shell
 import io.github.shaonialife.cardeck.util.Bg
 
@@ -43,6 +47,16 @@ object ScreenDimmer {
     private var dimShown = false
 
     /**
+     * 真·假息屏：物理面板已由我们断电（SurfaceControl POWER_MODE_OFF）。
+     * 只在本对象置位时才会在收口路径恢复供电；系统真休眠（按电源键）时由
+     * SCREEN_OFF 广播清零——此后面板归 DisplayPowerController 管，不要去抢。
+     */
+    @Volatile
+    private var panelOffByUs = false
+
+    private var screenOffReceiver: BroadcastReceiver? = null
+
+    /**
      * 当前是否有活跃的投屏会话。
      *
      * **自动暗幕与常亮只在会话期间生效**（2026-10-19 用户实测反馈）：
@@ -71,6 +85,7 @@ object ScreenDimmer {
             h?.removeCallbacks(showRunnable)
             // 会话结束时如果暗幕正盖着（车机自己断开），立即撤掉，让用户看到手机正常界面
             h?.post { hideDim() }
+            restorePanelIfNeeded()
             restoreTimeout(ctx)
             Log.i("CarPlaySender", "DIMMER: 会话结束——自动暗幕已停、屏幕超时已恢复")
         }
@@ -100,6 +115,7 @@ object ScreenDimmer {
         if (enabled && sessionActive) enableStayAwake(context)
         handler?.post {
             addWatcher()
+            registerScreenOffReceiver(context)
             if (enabled && sessionActive) schedule()
         }
         if (!enabled) {
@@ -118,6 +134,7 @@ object ScreenDimmer {
         restoreTimeout(ctx)
         handler?.removeCallbacks(showRunnable)
         handler?.post { hideDim() }
+        restorePanelIfNeeded()
         Log.i("CarPlaySender", "DIMMER: 常亮/暗幕已关闭（触摸探针保留）")
     }
 
@@ -139,6 +156,8 @@ object ScreenDimmer {
         // 会话标记必须一并清零：否则下次 attach（未连接时启动 App）会沿用上一轮的
         // true 而立即排程，又变回「没会话也自动变暗」的老问题。
         sessionActive = false
+        restorePanelIfNeeded()
+        appContext?.let { unregisterScreenOffReceiver(it) }
         h?.removeCallbacksAndMessages(null)
         val wm = windowManager
         val dim = dimView
@@ -178,6 +197,10 @@ object ScreenDimmer {
     /** 物理触摸（任意 app/界面）或暗幕点击时调用：重置自动暗幕计时。 */
     fun onUserInteraction() {
         val h = handler ?: return
+        if (panelOffByUs) {
+            // 真·假息屏下的唤醒：先把面板电供上，再走暗幕移除（否则用户看到的是黑屏）
+            restorePanelIfNeeded()
+        }
         if (dimShown) hideDim()
         if (enabled && sessionActive) schedule()
     }
@@ -223,6 +246,9 @@ object ScreenDimmer {
                 dimView = view
                 dimShown = true
                 Log.i("CarPlaySender", "DIMMER: 暗幕已显示")
+                // 真·假息屏：暗幕上好后直接断物理屏电源。系统保持交互态（常亮超时已设
+                // 为永不，不会真睡下去），虚拟屏完全不受影响；触摸经探针唤醒。
+                setPanelPower(false)
             }.onFailure { Log.w(TAG, "暗幕添加失败：${it.message}") }
     }
 
@@ -266,6 +292,86 @@ object ScreenDimmer {
         runCatching { wm.addView(view, params) }
             .onSuccess { watchView = view }
             .onFailure { Log.w(TAG, "触摸探针添加失败：${it.message}") }
+    }
+
+    // ---- 真·假息屏：SurfaceControl 层断/上物理屏电源（经 Shizuku UserService） ----
+
+    /** 断电/恢复面板电。AIDL 是阻塞 binder 调用，一律后台执行；失败时留在暗幕态（旧行为）。 */
+    private fun setPanelPower(on: Boolean) {
+        Bg.run("dimmer-panel") {
+            val svc = CarInputClient.service
+            if (svc == null) {
+                Log.i(TAG, "面板电源跳过（UserService 未就绪，仅暗幕）")
+                return@run
+            }
+            val ok =
+                runCatching { svc.setScreenPower(on) }
+                    .onFailure { Log.w(TAG, "setScreenPower($on) 调用失败：$it") }
+                    .getOrDefault(false)
+            if (ok) {
+                panelOffByUs = !on
+                Log.i("CarPlaySender", "DIMMER: 面板电源 ${if (on) "恢复" else "断开"}（真·假息屏）")
+            } else {
+                Log.i(TAG, "面板电源 $on 失败（ROM 不支持？保持暗幕态）")
+            }
+        }
+    }
+
+    /** 收口路径统一出口：只有「我们断的电」才恢复，避免与系统电源管理抢面板。 */
+    private fun restorePanelIfNeeded() {
+        if (panelOffByUs) setPanelPower(true)
+    }
+
+    /**
+     * 真休眠（按电源键）与解锁的生命周期收口：
+     * - SCREEN_OFF：面板交还系统电源管理（清标记）、撤暗幕、停计时——锁屏界面自己就是
+     *   「遮蔽 + 防误触」，暗幕留着只会在解锁后变成要多点一下的残留（2026-10-23 用户实测）。
+     * - USER_PRESENT：解锁后重排自动假息屏计时——指纹/人脸解锁不产生屏幕触摸事件，
+     *   探针收不到，不在这里补排的话解锁后计时器是停着的。
+     */
+    private fun registerScreenOffReceiver(context: Context) {
+        if (screenOffReceiver != null) return
+        val receiver =
+            object : BroadcastReceiver() {
+                override fun onReceive(
+                    ctx: Context,
+                    intent: Intent,
+                ) {
+                    when (intent.action) {
+                        Intent.ACTION_SCREEN_OFF -> {
+                            if (panelOffByUs) {
+                                panelOffByUs = false
+                                Log.i(TAG, "系统真休眠——面板交还系统电源管理（假息屏标记已清）")
+                            }
+                            if (dimShown) {
+                                handler?.removeCallbacks(showRunnable)
+                                hideDim()
+                                Log.i(TAG, "真休眠——暗幕已撤（锁屏接管遮蔽职责）")
+                            }
+                        }
+
+                        Intent.ACTION_USER_PRESENT -> {
+                            if (enabled && sessionActive && isAttached()) {
+                                schedule()
+                                Log.i(TAG, "解锁——重新排程自动假息屏计时")
+                            }
+                        }
+                    }
+                }
+            }
+        screenOffReceiver = receiver
+        context.registerReceiver(
+            receiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_USER_PRESENT)
+            },
+        )
+    }
+
+    private fun unregisterScreenOffReceiver(context: Context) {
+        screenOffReceiver?.let { runCatching { context.unregisterReceiver(it) } }
+        screenOffReceiver = null
     }
 
     // ---- 屏幕常亮：改系统屏幕超时为永不，断开时恢复 ----

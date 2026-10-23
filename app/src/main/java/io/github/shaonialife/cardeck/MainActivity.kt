@@ -2273,8 +2273,8 @@ class MainActivity : AppCompatActivity() {
             title = "需要「显示在其他应用上层」权限",
             message =
                 "$reason\n\n" +
-                    "用途：无操作时在屏幕上盖一层暗幕（替代息屏，防止手机锁屏后车机触摸失效）。" +
-                    "不会读取或遮挡其他应用内容，点击屏幕立即消失。",
+                    "用途：无操作时真息屏（屏幕断电但不锁屏，防止手机锁屏后车机触摸失效）。" +
+                    "不会读取或遮挡其他应用内容，点击屏幕立即恢复。",
             actions =
                 listOf(
                     DarkMessageDialog.Action("暂不") {
