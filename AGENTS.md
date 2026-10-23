@@ -684,17 +684,14 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   （合计 ≥10 项，iD9 形态）仍无 0x5703/0x5702，稀疏清单判 UNKNOWN 走旧协议
   （0x5703 有超时兜底）；③ identityKey 存原文（与 0x1D01 逐字一致），持久化键的
   清洗由 MfiLengthMemory.receiverKey 负责——后续 Memory 并表共用此键。
-  **链路代际（LinkGeneration，2026-10-23）**：同一信号源产出第三维判定
-  `linkGenerationOf`——CLASSIC_MIB3（DELPHI 制造 + AUDI 型号 + 双清单合计 1~9 项，
-  三条件同时命中）在 AirPlay 阶段**忽略隧道 marker 永不协商**；EVENT_LINK（其余
-  一切，含本田/宝马/信号缺失）保留 marker 升级协商。分代默认值全链一致取
-  EVENT_LINK（兼容侧），**CLASSIC_MIB3 必须显式声明**（`VirtualIap2Link.generation`
-  字段、`senderLinkGenerationCache` 读取兜底、`armMib3VirtualLink` 兜底三处皆然）——
-  默认 CLASSIC 的话，未来新增布防点漏传 setGeneration 时本田媒体键会静默失效。
-  判定与 wifiGen 相互独立（BMW iD9：wifiGen=NEW 跳 0x5702 + EVENT_LINK marker 升级，
-  两维互不干扰；§9h 的 SYN|ACK 修复在 Iap2LinkEngine，分代不触碰）。判定纯函数有
-  单测（`ReceiverProfileTest` 五条：真实签名/满清单/缺身份/缺清单/非奥迪 DELPHI 件）。
-  代际缓存随 disconnect 清零（防跨车换连读到上一辆的判定）。
+  **链路代际（LinkGeneration，2026-10-23；当日二次定谳后仅存日志意义）**：
+  `linkGenerationOf`——DELPHI 制造 + AUDI 型号 + 双清单合计 1~9 项（三条件同时命中）
+  → CLASSIC_MIB3，否则 EVENT_LINK。**marker 协商已全代际统一**（见 MIB3 条目二次
+  定谳），代际仅用于日志与未来分派。教训：当天下出的「CLASSIC 忽略 marker」分派
+  当晚即被车主日志证伪——单一车辆的现象归因（「协商挂起 UI」）在拿到反例日志前
+  不要固化成分派逻辑。判定与 wifiGen 相互独立（BMW iD9：wifiGen=NEW 跳 0x5702，
+  两维互不干扰；§9h 的 SYN|ACK 修复在 Iap2LinkEngine）。判定纯函数有单测
+  （`ReceiverProfileTest` 五条）。代际缓存随 disconnect 清零。
 - **能力清单只能证明「有」，不能证明「没有」——绝不可当硬门禁**（2026-10-22 奥迪
   3315 真车定谳，0.1.13 回归的根因）：8b64147 把 WiFi 凭据分派写成「清单没声明
   0x5702 就跳过旧协议」，而奥迪的可收清单只有 5 项（`0x4e0c 0x4e09 0x4300 0xea00
@@ -810,12 +807,11 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   10s 拆链另有主因（缺 WiFi 隧道，见下条）；心跳是必要条件，不是充分条件。
   keepAlive 帧不加密（catplay 只加密 opcode=VideoFrame），不消耗 ChaCha 帧 nonce。
 - **MIB3 需要第二条 iAP2 链路（WiFi 隧道），只回 ACK 会被 ~10s 拆链**（2026-10-19
-  定谳，当晚日志 + AADisplay Frida 对照；**⚠ 2026-10-23 修正：该结论已被推翻**——
-  当年 10.2s 拆链的真因是「响应车机 marker 触发隧道协商」本身挂起了 CarPlay UI。
-  真 iPhone sysdiagnose 成功会话 `iAPChannel FeatureKey=0`（不建隧道），0.1.9 忽略
-  marker 时奥迪照常进入。现行按链路代际分派：CLASSIC_MIB3（DELPHI+AUDI+稀疏清单）
-  **忽略 marker 永不协商**，本条流程只适用于 EVENT_LINK（Honda HFT 等事件通道建链
-  形态）；别按本条把 CLASSIC_MIB3 改回建隧道，详见 PROTOCOL-NOTES §12 顶部修正）：AirPlay 会话建立后，手机必须在屏幕流
+  定谳，当晚日志 + AADisplay Frida 对照；**2026-10-23 二次定谳：本条成立**——当天
+  早些时候「CLASSIC_MIB3 忽略 marker 永不协商」的修正被车主 0.1.17 日志证伪：marker
+  是车机在等会话表，1Hz 无限重发，不回应则 RECORD 后 ~10s 拆链（0.1.9=10.17s、
+  0.1.17=10.18s），「0.1.9 忽略 marker 照常进入」系误传。marker 升级协商已全代际
+  统一。当年「协商挂起车机 UI」的真因见下条 modesChanged）：AirPlay 会话建立后，手机必须在屏幕流
   SETUP 成功后**主动经控制通道** POST /command（iAPSendMessage 信封）发一次 DETECT，
   车机回 SYN（事件通道）→ 手机 SYN|ACK（控制通道）→ 链路 NORMAL 后重跑控制会话
   （0x1D00→0x1D01→0x1D02+0xAA00→0xAA06→0xAA02 挑战【长度按车机记忆，隧道独立键，
@@ -829,6 +825,17 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   ③ 回显 LSP 声明自己的 maxOutgoing=0x7F（原样回显对端表=自己限死在小窗口，突发
   积压）；④ 0xFFFA/0xFFF0/0x4158/0x5001 用逐字节常量，**勿重新编码**；⑤ 参考仓库
   `reference/AADisplay` 是 GPL-3.0：只看协议事实，代码不抄。
+- **MIB3 切屏靠 modesChanged 资源重申，不是协商本身**（2026-10-23 双代理对照
+  AADisplay 定谳）：082446（0.1.14）协商/MFi/突发/订阅全部成功、会话健康 35s+，
+  车机却不切 CarPlay 画面——第二控制会话把车机资源仲裁重置，会话早期那份
+  modesChanged 已失效。AADisplay r17 长播验证时序：auth+burst 后 **+1.5s 首发、
+  +4/+12/+30s 重申**；声明落在 0xAA00/0xAA05 进行中会与 iAP POST 抢控制通道、
+  奥迪 ~12s 死。实现：`VirtualIap2Link.onControlSessionComplete` →
+  `SessionController.scheduleModesReclaim`。0.1.12「出画面 3 秒断」= 协商砸进
+  刚起步的 HMI，同源不同症。配套两课：**拆链归因守卫**——MIB3 布防了但控制会话
+  没完成就被拆 = 链路看门狗形态，严禁记音频档位不兼容（否则 media 通路被误拉黑、
+  永远没声）；**sendRawCsmLocked 日志取消息号在 frame[4..5]**（[2..3] 是长度——
+  曾把 0xFFFA 打成 0x32 误导排查一整轮）。
 - **MFi 挑战长度按车机持久化，不要全局写死某一档**（2026-10-19 奥迪 MMI 3315 实测）：
   20B 挑战在该车静默 **6.0 秒**无应答，32B 才在 0.64 秒回签名——只靠「真车都 20B
   优先」的基线，每次连接都白等 6 秒。而各接收端偏好相反：DiPlay 只认 32B（长度不符

@@ -677,14 +677,23 @@ ACK 位与 ack 字段，裸 ACK 本就是冗余的；catplay 主机路径也只�
 
 ## 12. MIB3 WiFi 隧道（AirPlay 会话之上的第二条 iAP2 链路，2026-10-19）
 
-> **⚠ 2026-10-23 修正**：本节「MIB3 必须建隧道否则 10~12s 拆链」的结论**已被推翻**——
-> 当年 10.2s 拆链的真因是「响应车机 marker 触发了隧道协商」本身：协商让车机进入
-> 「等仪表盘数据」状态、挂起 CarPlay UI（卡原界面）。真 iPhone sysdiagnose 的成功
-> 会话里 `iAPChannel FeatureKey = 0`（§13a-5，真 iPhone 根本不建隧道）；0.1.9 忽略
-> marker 时奥迪照常进入 CarPlay。现行实现按链路代际分派（`ReceiverProfile.
-> linkGenerationOf`）：CLASSIC_MIB3（DELPHI+AUDI+稀疏清单）忽略 marker 永不协商，
-> 只有 EVENT_LINK（Honda HFT 等事件通道建链形态）走本节的协商流程。**本节保留**，
-> 作为 EVENT_LINK 协商与协议常量的事实源；不要按本节把 CLASSIC_MIB3 改回「建隧道」。
+> **⚠ 2026-10-23 二次修正（以本块为准）**：本节「MIB3 必须建隧道否则 10~12s 拆链」
+> 的结论**成立**；当天早些时候「CLASSIC_MIB3 忽略 marker 永不协商」的修正**被证伪**。
+> 统一模型（证据链齐全）：
+> ① **链路必须协商到 NORMAL**——车机的 marker 是它在等我们的会话表，1Hz **无限重发**
+>   （0.1.17 车主日志实测远超「2~5 个」旧说）；不回应则 RECORD 后 ~10s 车机拆整条
+>   无线栈（0.1.9 实测 10.17s、0.1.17 实测 10.18s，与心跳全健康无关）。
+>   「0.1.9 忽略 marker 时奥迪照常进入 CarPlay」系误传——0.1.9 自己的日志就是 10.17s
+>   拆链。真 iPhone `iAPChannel FeatureKey=0` 的含义是链路协商**完成**后结果为零隧道，
+>   不是「不参与协商」。
+> ② **切屏靠协商完成后的 modesChanged 资源重申**——082446（0.1.14）协商/MFi/订阅
+>   全部成功、会话健康 35s+，车机却不切画面：第二控制会话把车机资源仲裁重置了一遍，
+>   会话早期那份 modesChanged 已失效。AADisplay r17 长播验证的时序：auth+burst 后
+>   **+1.5s 首发、+4/+12/+30s 重申**（不得在 0xAA00/0xAA05 进行中声明——与 iAP POST
+>   抢控制通道会把奥迪搞死 ~12s）。0.1.12「出画面 3 秒断」= 协商砸进刚起步的 HMI，
+>   时序错位同源。
+> 现行实现：marker 升级协商全代际统一；`VirtualIap2Link.onControlSessionComplete`
+> → `SessionController.scheduleModesReclaim`。曾据此写的「忽略 marker」分派已删。
 
 > 事实源：`reference/AADisplay`（分支 AADisplay-Split-Lite-Carplay，**GPL-3.0 只读参考**）。
 > 他们用 Frida 挂越狱 iPhone 的 mediaserverd 抓的真机握手；本仓库据此实现
