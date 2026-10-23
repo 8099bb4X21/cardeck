@@ -131,6 +131,14 @@ class Iap2SenderSession(
      */
     private var wifiGen: ReceiverProfile.WifiGen = ReceiverProfile.WifiGen.UNKNOWN
 
+    /**
+     * 车机链路代际（[ReceiverProfile.linkGenerationOf]，0x1D01 到达时算一次）。
+     * CLASSIC_MIB3（奥迪 DELPHI 真车）= detect 后忽略 marker；
+     * EVENT_LINK（其余/未知）= 按阈值升级控制通道协商。详见 [ReceiverProfile]。
+     */
+    var linkGeneration: ReceiverProfile.LinkGeneration = ReceiverProfile.LinkGeneration.EVENT_LINK
+        private set
+
     /** 车机是否声明会发某消息；null = 未提供清单（未知，按保守策略等待）。 */
     private fun accessoryDeclaresSend(messageId: Int): Boolean? = if (accessorySendIds.isEmpty()) null else messageId in accessorySendIds
 
@@ -960,6 +968,17 @@ class Iap2SenderSession(
                     ),
                 )
             wifiGen = profile.wifiGen
+            linkGeneration =
+                ReceiverProfile.linkGenerationOf(
+                    ReceiverProfile.Signals(
+                        name = name,
+                        model = model,
+                        manufacturer = manufacturer,
+                        sendIds = sends?.toSet(),
+                        receiveIds = receives.toSet(),
+                    ),
+                )
+            log("IAPLINK: 链路代际判定 = $linkGeneration（AirPlay 阶段据此分派 marker 策略）")
             log(ReceiverProfile.describe(profile))
             log(
                 "iap2 0x1d01 协议代际：请求 WiFi 配置(0x5702)=" +

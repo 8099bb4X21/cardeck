@@ -9,6 +9,7 @@ import io.github.shaonialife.cardeck.audio.AudioTuning
 import io.github.shaonialife.cardeck.iap2.Iap2Csm
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
+import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import io.github.shaonialife.cardeck.net.EndpointHosts
 import io.github.shaonialife.cardeck.net.TcpLiveness
 import io.github.shaonialife.cardeck.util.DeviceIdentity
@@ -33,6 +34,13 @@ class AirPlayClient(
     initialEndpoint: Iap2SenderSession.CarPlayEndpoint,
     private val log: (String) -> Unit,
     private val context: Context? = null,
+    /**
+     * 车机链路代际（蓝牙侧 0x1D01 画像判定，见 [ReceiverProfile.linkGenerationOf]）。
+     * MIB3 布防时据此分派 marker 策略：CLASSIC_MIB3 忽略 marker（响应会挂起车机
+     * CarPlay UI），EVENT_LINK 按阈值升级协商（Honda HFT 媒体键依赖）。null = 未
+     * 识别，取 EVENT_LINK（0.1.13 前兼容行为）。
+     */
+    private val linkGeneration: ReceiverProfile.LinkGeneration? = null,
     /**
      * 配对窗口内的端点刷新器（每轮重试前调用，必须非阻塞）：返回并入 mDNS 新结果后的
      * 端点，null = 无新信息。Audi MIB3 的 `_airplay._tcp` 常在首次解析之后才上线，
@@ -1338,6 +1346,8 @@ class AirPlayClient(
     private fun armMib3VirtualLink() {
         if (cipher == null) return
         if (iapTunnel != null) return // DiPlay 隧道形态：不需要（也不该）布防
+        val generation = linkGeneration ?: ReceiverProfile.LinkGeneration.EVENT_LINK
+        obtainIapLink().setGeneration(generation)
         obtainIapLink().armMib3()
     }
 

@@ -2,6 +2,7 @@ package io.github.shaonialife.cardeck.bt
 
 import android.content.Context
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
+import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import io.github.shaonialife.cardeck.transport.Iap2LinkChannel
 import io.github.shaonialife.cardeck.util.DeviceIdentity
 
@@ -20,6 +21,8 @@ internal fun Iap2LinkChannel.runSenderSession(
     onLinkClosed: () -> Unit = {},
     /** 本进程已知的车机热点 SSID（无新凭据时沿用，避免每轮拆链）。 */
     knownCarSsid: () -> String? = { null },
+    /** 0x1D01 画像判定的链路代际（CLASSIC_MIB3/EVENT_LINK），Phase 1 完成后回调。 */
+    onGeneration: (ReceiverProfile.LinkGeneration) -> Unit = {},
 ) {
     val session =
         Iap2SenderSession(
@@ -34,6 +37,7 @@ internal fun Iap2LinkChannel.runSenderSession(
             context.applicationContext,
         )
     val endpoint = session.run(timeoutMillis)
+    onGeneration(session.linkGeneration)
     onEndpoint(endpoint)
     // Phase 2 过渡：保持控制通道存活记录配件消息；AirPlay 配对由 onEndpoint 回调发起
     session.pumpIncomingForever()

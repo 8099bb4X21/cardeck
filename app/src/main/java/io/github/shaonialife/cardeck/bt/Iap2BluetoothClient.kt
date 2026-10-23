@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
+import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import io.github.shaonialife.cardeck.transport.Iap2LinkChannel
 import io.github.shaonialife.cardeck.transport.StreamDuplexStream
 import java.io.IOException
@@ -38,6 +39,8 @@ class Iap2BluetoothClient(
     private val onLinkClosed: () -> Unit = {},
     /** 本进程已知的车机热点 SSID（本轮无新凭据时沿用，避免每轮 8 秒拆链）。 */
     private val knownCarSsid: () -> String? = { null },
+    /** 0x1D01 画像判定的链路代际（Phase 1 完成后回调，AirPlay 阶段分派用）。 */
+    private val onGeneration: (ReceiverProfile.LinkGeneration) -> Unit = {},
     /** 目标车机（动态读取：选择后无需重启链路，下一轮尝试即生效）。 */
     private val targetProvider: () -> TargetDevicePrefs.Target? = { null },
 ) {
@@ -356,6 +359,7 @@ class Iap2BluetoothClient(
                 onEndpointUpdate,
                 onLinkClosed,
                 knownCarSsid,
+                onGeneration,
             )
         } catch (error: IOException) {
             log("BT-C: SESSION 失败 - ${error.message}")
