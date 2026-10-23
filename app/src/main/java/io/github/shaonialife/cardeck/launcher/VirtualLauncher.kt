@@ -412,6 +412,18 @@ object VirtualLauncher {
         detach()
         // 新会话：「本次会话不再提示」等用户级决定作废
         LetterboxHintController.resetSession()
+        // 「强制应用横屏」覆盖**必须先于任何应用启动**写入（2026-10-23 奥迪 3315 真机
+        // 定谳）：`am compat enable` 会立即杀掉目标应用（覆盖只能在新进程生效）——
+        // 若写在应用拉起之后，桌面上刚 spawn 的地图/桌面进程会被当场杀死，虚拟屏
+        // 只剩静态壁纸，车机收到的画面永远不变、不切换 CarPlay UI（表现为「推流中
+        // 但车机还在原界面」）。写入在配对起步（SessionController 端点处理）就入队，
+        // attach 这里只 drain——通常已完成（~0ms）。注意别在这里同步跑 applyAll：
+        // 屏幕口 keepAlive 帧只从 drainEncoder 循环发出，而 drain 线程在本方法返回
+        // 后才启动——这里每阻塞 1s 都直接吃掉「RECORD→首条 keepAlive」的 ~10s
+        // 拆链预算（奥迪实测阈值）。
+        if (!AppOrientationCompat.awaitPending()) {
+            log("ORIENTATION: ⚠ 覆盖写入未在 6s 内排空——应用可能带着旧方向配置启动（后台写完后首个启动的应用会被杀一次）")
+        }
         val density = densityDpi / 160f
         // dock 栏宽度缩放（「显示」面板 50%–100%，下次连接起效）：厚度像素与 dock 屏
         // 密度**同乘**比例——内容 dp 布局不变、渲染进更少像素，整条 dock（图标/时钟/
@@ -642,11 +654,8 @@ object VirtualLauncher {
                         "app=$appDisplayId(${appWidth}x$appHeightPx @${appNativeDensity}dpi) " +
                         "appHi=$appHiDisplayId(${appHiWidth}x$appHiHeight @${appHiDensity}dpi scale=x$appScaleFactor)",
                 )
-                // 会话建立：为「强制应用横屏」名单内的应用逐个写入兼容覆盖
-                // （会话结束/断开时由 SessionController 统一复原，见 retireSession/onEnded）。
-                // 异步：6 个应用 × 2 次 am compat ≈1.6s，此前同步跑在虚拟屏 attach 里，
-                // 直接推迟首帧（2026-10-18 实测）。
-                AppOrientationCompat.applyAllAsync(context, log)
+                // 会话建立：为「强制应用横屏」名单写入兼容覆盖——**已提前到 attach 开头**
+                // （先写覆盖再拉应用，见 attach 开头注释；此处不再重复入队）。
                 // 音乐卡数据源前置：会话建立是「Shizuku 一定可用」的可靠时机，
                 // 补一次通知使用权（幂等；已授权直接返回）。
                 // 覆盖「App 启动时 Shizuku 未就绪、之后才就绪」的整条路径。

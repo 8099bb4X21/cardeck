@@ -1,6 +1,7 @@
 package io.github.shaonialife.cardeck
 
 import android.content.Context
+import android.net.Network
 import android.os.SystemClock
 import android.view.KeyEvent
 import io.github.shaonialife.cardeck.airplay.AirPlayClient
@@ -335,7 +336,20 @@ object SessionController {
      * 2026-10-22 奥迪 3315 日志：第 2 轮起手机就已在车机热点上，却因「无凭据」每轮
      * 8 秒自杀一次，把车机侧邀请窗口反复清零（真 iPhone 实录要约 21 秒才邀请）。
      */
+
+    /** 本轮蓝牙会话判定的链路代际缓存（0x1D01 画像回调写入；null=未识别）。 */
+    @Volatile
+    private var senderLinkGenerationCache: ReceiverProfile.LinkGeneration? = null
+
     private fun knownCarHotspotSsid(): String? = boundCarSsid ?: lastCarWifiSsid
+
+    /**
+     * 本轮蓝牙会话判定的车机链路代际（0x1D01 画像，CLASSIC_MIB3 / EVENT_LINK）。
+     * 会话对象未建或尚未识别时回退 EVENT_LINK（0.1.13 前兼容行为）——
+     * 错把 MIB3 当 EVENT_LINK 只是协商无应答后静默，反向会挂死车机。
+     */
+    private fun senderLinkGeneration(): ReceiverProfile.LinkGeneration =
+        senderLinkGenerationCache ?: ReceiverProfile.LinkGeneration.EVENT_LINK
 
     /**
      * 最近一次 0x5703 的热点密码（仅内存，不落盘）。
@@ -407,6 +421,10 @@ object SessionController {
                     onEndpointUpdate = { endpoint -> onLateEndpoint(endpoint, "车机回连") },
                     onLinkClosed = ::onSenderLinkClosed,
                     knownCarSsid = ::knownCarHotspotSsid,
+                    onGeneration = { g ->
+                        senderLinkGenerationCache = g
+                        appendLog("IAPLINK: 代际缓存更新 → $g（AirPlay 阶段布防分派用）")
+                    },
                     targetProvider = targetProvider,
                 )
             bluetoothClient =
@@ -418,6 +436,10 @@ object SessionController {
                     onEndpointUpdate = { endpoint -> onLateEndpoint(endpoint, "主动连车机") },
                     onLinkClosed = ::onSenderLinkClosed,
                     knownCarSsid = ::knownCarHotspotSsid,
+                    onGeneration = { g ->
+                        senderLinkGenerationCache = g
+                        appendLog("IAPLINK: 代际缓存更新 → $g（AirPlay 阶段布防分派用）")
+                    },
                     targetProvider = targetProvider,
                 )
             ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
@@ -524,6 +546,15 @@ object SessionController {
         endpointBrowser?.stop()
         wifiConnector?.release()
         boundCarSsid = null
+        // 「强制应用横屏」覆盖的用户终态复原（原先在 retireSession 里——那里每轮
+        // 配对起步也执行，会杀掉新一轮刚拉起的应用，2026-10-23 移出到真实终态）。
+        appContext?.let { ctx -> AppOrientationCompat.resetAllAsync(ctx, ::appendLog) }
+        // shell 兜底存下的系统网络（connect-network）自动 forget 还原：无互联网热点
+        // 被系统当默认网会挤掉移动数据。失败只记日志（用户可到 WLAN 手动删）。
+        cleanupShellFallbackNetwork()
+        // 代际缓存随会话清零：读取侧有 `?: EVENT_LINK` 兜底，语义不变；留着的话
+        // 跨车换连（奥迪→本田）存在读到上一辆缓存的理论窗口（2026-10-23 审阅）。
+        senderLinkGenerationCache = null
         if (hadProjection) {
             // Android 14+：MediaProjection 与保活服务（mediaProjection FGS 类型）绑定，
             // 停服务会连带失效授权——下次连接需重新点「申请投屏权限」
@@ -557,11 +588,15 @@ object SessionController {
         // （2026-10-16 实测）。BT 退役只在用户终态做，见 disconnect()。
         // 解除会话静默：出站探测恢复（下次会话建立时会再次置位）
         BtSessionGate.sessionActive = false
-        // 「强制应用横屏」覆盖随会话结束统一复原（应用回到手机侧正常竖屏形态）。
-        // 异步：每应用两次 am compat shell 往返，6 个应用实测 ~1.6s；此前同步跑在
-        // 配对前，等于每次连接白等 1.6s（2026-10-18 实测）。执行器串行保证
-        // 「先复原上一会话、后写入本会话」的顺序。
-        appContext?.let { ctx -> AppOrientationCompat.resetAllAsync(ctx, ::appendLog) }
+        // 「强制应用横屏」覆盖的复原**不在这里做**（2026-10-23 奥迪 3315 真机日志定谳）：
+        // 本方法在每轮配对起步时也会执行，此时距离上一轮会话结束只有几秒——上一轮的
+        // 桌面/地图应用（与新一轮是同一批包）多半还活着；而本会话的应用在 attach 里
+        // 随即拉起。resetAll 的 am compat disable 若在此窗口执行，杀掉的正是**新一轮
+        // 刚拉起的应用** → 虚拟屏只剩静态壁纸 → 车机收到的画面永远不变 → 不切换
+        // CarPlay UI（用户看到「推流中但车机还在原界面」）。
+        // 复原只在真实终态执行：disconnect()（用户断开）与推流 onEnded（车机拆链），
+        // 两处各自调用 resetAllAsync。新一轮的 applyAll 与旧覆盖幂等（enable 覆盖
+        // enable），无需先复原再写入。
     }
 
     /** 会话已建立且投影就绪、但音频尚未启动时，动态补启（投影授权晚于连接的场景）。 */
@@ -681,6 +716,8 @@ object SessionController {
                         securityType = wifi.securityType,
                         timeoutMillis = SPECIFIER_JOIN_TIMEOUT_MS,
                         isCancelled = { connectCancelled },
+                        quickFallback = { specifierQuickFallback(wifi) },
+                        deepFallback = { specifierDeepFallback(wifi) },
                     )
                 }
             }
@@ -698,18 +735,8 @@ object SessionController {
             val currentSsid = shellWifiStatus().second
             if (currentSsid == wifi.ssid) {
                 appendLog("WIFI: 系统当前已连着 \"$currentSsid\"——直接绑定现有连接（保存网络自动连上的近路）")
-                var boundOk = false
-                connector.bindCurrentWifi { boundOk = it }
                 // bindCurrentWifi 异步回调：短等绑定完成（回调很快，系统已在网）
-                val waitUntil = SystemClock.uptimeMillis() + 3_000
-                while (!boundOk &&
-                    connector.currentNetwork == null &&
-                    SystemClock.uptimeMillis() < waitUntil &&
-                    !connectCancelled
-                ) {
-                    Thread.sleep(100)
-                }
-                if (connector.currentNetwork != null) {
+                if (bindExistingCarWifi(connector, wifi.ssid) != null) {
                     boundCarSsid = wifi.ssid
                     phaseHint = "已加入车机热点"
                     ctrlAdvertiser?.ensureForNetwork(wifi.ssid, force = true, network = connector.currentNetwork)
@@ -721,6 +748,125 @@ object SessionController {
         }
         return result
     }
+
+    /**
+     * 本轮 shell 兜底把热点存成了系统网络时记录的 SSID——会话终态（disconnect 与
+     * 推流 onEnded）自动 `forget` 还原。系统级保存无互联网热点会被当成默认网、
+     * 部分 ROM 连带挤掉移动数据。
+     */
+    @Volatile
+    private var shellFallbackCleanupSsid: String? = null
+
+    /**
+     * specifier 挂起时的快速兜底（首窗 5s 零回调后调用，运行于连接流程线程）。
+     *
+     * 探测：`forget` 旧网络后系统可能已自动重连同 SSID——是则直接绑定现有连接。
+     * 必须保持毫秒级 shell 往返 + ≤3s 绑定等待：车机从 0x5703 起算的入网预算只有
+     * ~9-14s（0x4301 后 ~15s 拆 BT），这里每多 1s 都在挤后面「重发 specifier」
+     * （实测 1.6s 入网、被验证有效的恢复手段）的窗口。
+     *
+     * @return 已绑定并可直接使用的网络；null = 未命中（调用方继续重发 specifier）。
+     */
+    private fun specifierQuickFallback(wifi: Iap2SenderSession.WifiConfiguration): Network? {
+        if (!shellWifiReady()) return null
+        val connector = wifiConnector ?: return null
+        val current = shellWifiStatus().second
+        if (current != wifi.ssid) return null
+        appendLog("WIFI: 系统已连着 \"$current\"——直接绑定（快速兜底）")
+        val network = bindExistingCarWifi(connector, wifi.ssid)
+        if (network != null) boundCarSsid = wifi.ssid
+        return network
+    }
+
+    /**
+     * specifier 重发窗也无回调后的深度兜底：`cmd wifi connect-network` 直连热点。
+     *
+     * 执行到这一步时本轮车机窗口（~15s）必然已过——价值是让手机先挂上车机热点，
+     * 下一轮（车机拆链后 0.17s 即重连 BT）走「系统已连着」快速兜底/近路，不再空转。
+     *
+     * 清理登记的时机是**关键**：connect-network 返回 ok 的瞬间该热点已进系统配置，
+     * 必须立即登记 [shellFallbackCleanupSsid]——若等「轮询到切网 + bind 成功」才
+     * 登记，取消/超时/bind 失败三条路径会在登记前退出，系统网络就此遗留（全局
+     * 自动连无互联网热点、挤掉移动数据，2026-10-23 审阅定谳）。forget 一个没保存过
+     * 的 SSID 是无害 no-op，宁多勿漏。
+     *
+     * 例外：该 SSID 在本轮**之前**就已保存在系统里（用户在弹窗里明确选过「保留」）
+     * ——connect-network 只是幂等复连，**不登记**清理，否则会话末会把用户决定保留
+     * 的网络删掉（违背「绝不擅自删除」）。
+     */
+    private fun specifierDeepFallback(wifi: Iap2SenderSession.WifiConfiguration): Network? {
+        if (!shellWifiReady()) return null
+        val connector = wifiConnector ?: return null
+        appendLog(
+            "WIFI: specifier 两窗均无回调——深度兜底 connect-network 直连 \"${wifi.ssid}\"" +
+                "（本轮窗口大概率已过，为下一轮占位）",
+        )
+        val preExisting = savedNetworkIds(wifi.ssid).isNotEmpty()
+        val security =
+            if (wifi.passphrase.isEmpty()) "open" else "wpa2 ${shellQuote(wifi.passphrase)}"
+        val r = Shell.exec("cmd wifi connect-network ${shellQuote(wifi.ssid)} $security", 10_000L)
+        if (!r.ok) {
+            appendLog("WIFI: connect-network 失败（${r.output.take(80)}）")
+            return null
+        }
+        if (preExisting) {
+            appendLog("WIFI: \"${wifi.ssid}\" 此前已保存在系统（用户选过保留）——不作会话末清除")
+        } else {
+            shellFallbackCleanupSsid = wifi.ssid
+            appendLog("WIFI: connect-network 已执行（新存系统网络，已登记会话末自动清除）")
+        }
+        // 轮询切网完成（断旧网/关联/DHCP，实测 2-10s）
+        repeat(30) {
+            if (connectCancelled) return null
+            Thread.sleep(300)
+            if (shellWifiStatus().second == wifi.ssid) {
+                val network = bindExistingCarWifi(connector, wifi.ssid)
+                if (network != null) {
+                    boundCarSsid = wifi.ssid
+                    appendLog("WIFI: connect-network 已连上 \"${wifi.ssid}\"")
+                }
+                return network
+            }
+        }
+        appendLog("WIFI: connect-network 后 9s 未切到车机热点——按失败返回（系统网络已登记，会话末清除）")
+        return null
+    }
+
+    /** 绑定当前已连接的 WiFi 并短等绑定完成（兜底路径共用）。返回绑定的网络或 null。 */
+    private fun bindExistingCarWifi(
+        connector: WifiCarPlayConnector,
+        ssid: String,
+    ): Network? {
+        var boundOk = false
+        // ssidHint：绑定断开（熄火）时经 onNetworkLost 通知会话层——兜底入网是主路径，
+        // 不通知的话英雄卡停在「已连接」、会话拖到心跳超时才死
+        connector.bindCurrentWifi(ssid) { boundOk = it }
+        val waitUntil = SystemClock.uptimeMillis() + 3_000
+        while (!boundOk &&
+            connector.currentNetwork == null &&
+            SystemClock.uptimeMillis() < waitUntil &&
+            !connectCancelled
+        ) {
+            Thread.sleep(100)
+        }
+        return connector.currentNetwork
+    }
+
+    /** 会话终态清理 shell 兜底存的系统网络（[disconnect] 与推流 onEnded 共用）。 */
+    private fun cleanupShellFallbackNetwork() {
+        val ssid = shellFallbackCleanupSsid ?: return
+        shellFallbackCleanupSsid = null
+        Bg.run("wifi-fallback-cleanup") {
+            val r = Shell.exec("cmd wifi forget-network ${shellQuote(ssid)}", 5_000L)
+            appendLog(
+                "WIFI: 会话末清除 shell 兜底保存的 \"$ssid\" ok=" + r.ok +
+                    (if (!r.ok) "（请到 系统设置>WLAN 手动删除）" else ""),
+            )
+        }
+    }
+
+    /** Shizuku 就绪才可跑 `cmd wifi`（与其它 shell 调用同一守卫）。 */
+    private fun shellWifiReady(): Boolean = appContext?.let { ShizukuGate.state(it) == ShizukuGate.State.READY } == true
 
     /**
      * 系统里已保存同名热点时，询问用户是否清除（**不擅自删除**）。
@@ -1011,7 +1157,7 @@ object SessionController {
                 bound = true
             } else {
                 val latch = java.util.concurrent.CountDownLatch(1)
-                wifiConnector?.bindCurrentWifi { ok ->
+                wifiConnector?.bindCurrentWifi(ssid) { ok ->
                     bound = ok
                     latch.countDown()
                 }
@@ -1747,6 +1893,9 @@ object SessionController {
                             effectiveEndpoint,
                             log = { line -> appendLog(line) },
                             context = context.applicationContext,
+                            // 链路代际：蓝牙侧 0x1D01 画像已判定（CLASSIC_MIB3/EVENT_LINK），
+                            // AirPlay 阶段的 MIB3 布防据此分派 marker 策略（2026-10-23 分代重构）
+                            linkGeneration = senderLinkGeneration(),
                             endpointRefresher = { current -> enrichEndpointFromBrowser(current, source) },
                             retryTick = { attempt ->
                                 // 配对重试期间车机仍可能没探测到 ctrl（Bonjour 漏掉首次公告）：
@@ -1774,6 +1923,12 @@ object SessionController {
                                 appendLog("EVENT: 车机媒体键（iAP2 0x6802）→ keyCode=$keyCode 已注入")
                             }
                         }
+                    // 「强制应用横屏」覆盖写入在配对起步就入队：`am compat enable` 会立即
+                    // 杀名单内应用，必须赶在 attach 拉起任何应用之前完成。配对阶段有几十秒
+                    // 空窗，写入在此期间自然排空，attach 只需 drain（~0ms）——原先在 attach
+                    // 里同步跑（1.6s，串行时 3.2s）会侵占「RECORD→屏幕口 keepAlive」的
+                    // ~10s 拆链预算（keepAlive 帧自 attach 返回后才起发，2026-10-23 定谳）。
+                    appContext?.let { ctx -> AppOrientationCompat.applyAllAsync(ctx, ::appendLog) }
                     retireSession()
                     // 会话静默降噪（2026-10-10）：从交接点起暂停其它接收端的出站连接探测
                     // （典型：连着 DiPlay 测试台时不再噪音式探测 Audi）。会话结束/断开时解除。
@@ -2147,6 +2302,11 @@ object SessionController {
                                                 appContext?.let { ctx ->
                                                     AppOrientationCompat.resetAllAsync(ctx, ::appendLog)
                                                 }
+                                                // shell 兜底存的系统网络也要在这里还原：车机拆链是
+                                                // 最常见的离场方式（熄火），用户未必点「断开」——只挂
+                                                // disconnect 一端必遗留（2026-10-23 审阅定谳）。下一轮
+                                                // 若走深度兜底会重新登记，语义自洽。
+                                                cleanupShellFallbackNetwork()
                                                 // 音频拆链归因：起过音频却很快被拆 → 记下该档位
                                                 // 不兼容，下次连接自动换档（见 attributeAudioTeardown）。
                                                 attributeAudioTeardown()

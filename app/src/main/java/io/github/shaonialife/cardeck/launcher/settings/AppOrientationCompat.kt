@@ -252,14 +252,18 @@ object AppOrientationCompat {
      * **应用启动前必须调用**：`am compat enable` 会立即杀掉目标应用。覆盖写入改成
      * 异步后，用户在写入完成前点桌面图标，就会出现「应用刚起来就被覆盖写入杀掉」。
      * 执行器是单线程 FIFO，投一个空任务并等它完成即等价于 drain。
+     *
+     * @return 是否在时限内排空；false = 超时（调用方必须留痕——静默失效会让
+     * 「先写覆盖再拉应用」的保证悄悄失效，应用照样被杀，2026-10-23 审阅定谳）。
      */
-    fun awaitPending(timeoutMs: Long = 6_000L) {
+    fun awaitPending(timeoutMs: Long = 6_000L): Boolean {
         val done = java.util.concurrent.CountDownLatch(1)
         executor.execute { done.countDown() }
-        try {
+        return try {
             done.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
+            false
         }
     }
 
