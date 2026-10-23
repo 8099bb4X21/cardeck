@@ -80,6 +80,13 @@ object SessionController {
     private const val JOIN_DIALOG_TIMEOUT_S = 90L
 
     /**
+     * 空端点（车机声明会发 0x4301 但窗口内未到）的等待上限。
+     * 奥迪 MMI 9310 实测 0x4301 晚到 2 分 35 秒——保活窗口必须显著长于它；
+     * 超时拆链让 BT 重连循环接管（与旧「8s 拆链」的区别只在窗口长度）。
+     */
+    private const val PENDING_START_SESSION_WAIT_MS = 5 * 60_000L
+
+    /**
      * 等车机 ctrl 邀请的上限（事件驱动，收到即走）。
      * catplay 以邀请为连接触发点；实测邀请在 ctrl 重注册后 ~1.0-1.3s 到达。
      * 车机不发邀请时（旧机型）由「已发现 _airplay._tcp」提前放行，最坏也只等这么久。
@@ -1699,6 +1706,57 @@ object SessionController {
     }
 
     /**
+     * 空端点等待期（车机声明会发 0x4301 但迟迟未到）的观察任务：
+     * 1. 每 5s 轮询当前 WiFi——用户手动连上车机热点后弹窗确认，确认即以该 SSID
+     *    合成端点重走 [onCarPlayEndpoint]（无端口 → mDNS/网关兜底）；
+     * 2. 晚到 0x4301 触发新一轮交接（sessionStarting 重新置位）时让位退出；
+     * 3. 超过 [PENDING_START_SESSION_WAIT_MS] 无进展：记日志并拆掉保活链路，
+     *    让 BT 重连循环接管（与旧「8s 拆链」的区别只在窗口长度）。
+     */
+    private fun watchForPendingStartSession(
+        endpoint: Iap2SenderSession.CarPlayEndpoint,
+        source: String,
+    ) {
+        Bg.run("pending-start-session-watch") {
+            var promptedSsid: String? = null
+            val deadline = android.os.SystemClock.uptimeMillis() + PENDING_START_SESSION_WAIT_MS
+            while (!connectCancelled && android.os.SystemClock.uptimeMillis() < deadline) {
+                Thread.sleep(5_000)
+                if (connectCancelled) return@run
+                // 晚到 0x4301 已触发新一轮交接——观察任务让位。
+                if (sessionStarting.get()) return@run
+                val ssid = shellWifiStatus().second ?: continue
+                // 同一 SSID 只问一次（用户选「继续等待」后不再打扰）；换网络再问。
+                if (ssid.isEmpty() || promptedSsid == ssid) continue
+                promptedSsid = ssid
+                val choice =
+                    askWifiJoinChoice(
+                        DialogSpec(
+                            title = "检测到已连接 $ssid",
+                            message =
+                                "车机尚未经蓝牙下发连接信息（0x4301）。是否把当前网络 \"$ssid\" 当车机热点，" +
+                                    "直接尝试 mDNS/网关连接？（点「继续等待」则保持蓝牙保活等车机下发）",
+                            positive = "按车机热点继续",
+                            negative = "继续等待",
+                        ),
+                    )
+                if (choice == true && !connectCancelled && !sessionStarting.get()) {
+                    appendLog(">>> [$source] 用户确认当前网络 \"$ssid\" 为车机热点——以合成端点重走连接")
+                    onCarPlayEndpoint(endpoint.copy(ssid = ssid), "$source/手动入网")
+                    return@run
+                }
+            }
+            if (!connectCancelled && !sessionStarting.get()) {
+                appendLog(
+                    ">>> [$source] 空端点等待 ${PENDING_START_SESSION_WAIT_MS / 60_000} 分钟超时——" +
+                        "车机未下发 0x4301。拆掉保活链路让重连循环接管，请导出日志反馈",
+                )
+                detachActiveBtSessions()
+            }
+        }
+    }
+
+    /**
      * 配对循环的端点刷新器（非阻塞）：只读浏览器缓存的 `_airplay._tcp`，
      * 有则并入 IP/端口/公钥等字段。返回 null = 无新信息（配对循环继续用当前端点）。
      */
@@ -1830,6 +1888,21 @@ object SessionController {
         // 新一轮交接开始：清掉上一轮（可能中途失败）遗留的晚到端点暂存，
         // 否则它会在本轮的 drain 阶段覆盖掉本会话刚解析出的端点。
         pendingEndpointUpdate = null
+        // 空端点 = 新协议车机声明会发 0x4301 但窗口内未到（Iap2SenderSession 已不拆链，
+        // 保活泵会把晚到的 0x4301 经 onLateEndpoint 送回本函数重走完整流程）。
+        // 这里不占 sessionStarting：晚到端点走「上一轮已结束」分支；等待期间轮询手机
+        // WiFi——用户手动连上车机热点（密码车机设置可知，凯迪拉克 CT5 实测）后经确认
+        // 可直接以该 SSID 合成端点走 mDNS/网关路径。
+        if (endpoint.ssid.isEmpty()) {
+            appendLog(
+                ">>> [$source] 端点无 AP 信息（车机未在窗口内下发 0x4301）——蓝牙保持保活等待晚到 0x4301；" +
+                    "检测到手机已连 WiFi 时会询问是否按车机热点继续",
+            )
+            phaseHint = "等待车机下发连接信息（0x4301）…"
+            sessionStarting.set(false)
+            watchForPendingStartSession(endpoint, source)
+            return
+        }
         appendLog(
             ">>> [$source] 拿到接收端热点：SSID=${endpoint.ssid}；" +
                 "密码=${if (endpoint.passphrase.isEmpty()) "(空)" else "已获取"}",

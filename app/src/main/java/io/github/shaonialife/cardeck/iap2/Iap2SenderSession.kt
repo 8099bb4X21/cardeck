@@ -402,24 +402,46 @@ class Iap2SenderSession(
                         ipAddresses = emptyList(),
                     )
                 } else {
-                    // 既没有 0x5703、也没有 0x4301。只要「还知道车机热点 SSID」
-                    // （上一轮拿过 / 已入网过）就不要拆链：合成 airPlayPort=0 的端点让
-                    // 主控按当前网络继续走 mDNS/网关，0x4301 晚到时仍会热更新。
-                    // 2026-10-22 奥迪：第 2 轮起手机已在车机热点上，却因「无凭据」
-                    // 每轮 8 秒自杀，把车机侧邀请窗口反复清零（iPhone 实录要 21s）。
+                    // 无 0x5703。三级兜底，前两级都不拆链：
+                    // ① 已知热点（上一轮拿过/已入网过，2026-10-22 奥迪：第 2 轮起手机已在
+                    //    车机热点上，空端点会让主控走 mDNS/网关，0x4301 晚到仍热更新）
                     val fallback = credentiallessEndpoint(knownCarSsid?.invoke())
-                    if (fallback == null) {
-                        // 一点线索都没有（连 SSID 都不知道），继续等只会空转。
+                    if (fallback != null) {
+                        log(
+                            "iap2 无新凭据——沿用已知热点 \"${fallback.ssid}\" 继续" +
+                                "（绑定当前网络后走 mDNS/网关，晚到的 0x4301 会热更新端点），不拆链",
+                        )
+                        fallback
+                    } else if (declaresStartSession == true) {
+                        // ② 新协议车机（GM/Cinemo、BMW iD9 同族：无 0x5702/0x5703，AP 信息只在
+                        //    0x4301 里）声明会发但窗口内未到。凯迪拉克 CT5 实测（2026-10-21 日志）：
+                        //    8s 窗口全空、拆链后 6 轮循环车机始终静默；但真 iPhone 忘掉热点仍能
+                        //    无线连上——车机会发 0x4301（凭据经蓝牙推送），只是晚发/等前置条件。
+                        //    奥迪 MMI 9310 先例：Phase 1 结束后 2 分 35 秒才发。**不拆链**：
+                        //    返回空端点，主控进入等待态；晚到 0x4301 由保活泵经
+                        //    handleLateStartSession → onEndpointUpdate 重新触发配对。
+                        log(
+                            "iap2 0x4301 窗口内未到但车机声明会发——不拆链，返回空端点进入保活；" +
+                                "晚到 0x4301 将重新触发配对（Audi MMI 9310 先例：2 分 35 秒）",
+                        )
+                        CarPlayEndpoint(
+                            ssid = "",
+                            passphrase = "",
+                            channel = 0,
+                            securityType = 0,
+                            airPlayPort = 0,
+                            deviceIdentifier = null,
+                            publicKey = null,
+                            sourceVersion = null,
+                            ipAddresses = emptyList(),
+                        )
+                    } else {
+                        // ③ 一点线索都没有（连 SSID 都不知道、车机也没承诺），继续等只会空转。
                         throw IOException(
                             "未拿到车机热点凭据：本轮 0x5702/0x4301 都没给出 AP 信息，" +
                                 "且本进程没有已知的车机热点（请先在车机上重新选择本机）",
                         )
                     }
-                    log(
-                        "iap2 无新凭据——沿用已知热点 \"${fallback.ssid}\" 继续" +
-                            "（绑定当前网络后走 mDNS/网关，晚到的 0x4301 会热更新端点），不拆链",
-                    )
-                    fallback
                 }
             }
         if (startSession != null) {
@@ -443,13 +465,18 @@ class Iap2SenderSession(
         // 后续（Phase 2）：加入热点 → mDNS 解析 _airplay._tcp → AirPlay 主会话。
         // 0x5703 缺席时 AP 信息来自 0x4301（已并入 endpoint）——保活期车机重发
         // 0x5703/0x4301 都要用它解析，不能留空。
-        this.wifi =
-            wifiFromExchange ?: WifiConfiguration(
-                ssid = endpoint.ssid,
-                passphrase = endpoint.passphrase,
-                channel = endpoint.channel,
-                securityType = endpoint.securityType,
-            )
+        // 空端点（声明会发 0x4301 但窗口内未到）必须保持 wifi=null：否则保活期
+        // parseStartSession 的 `ap = wifi ?: fromSession` 会用空凭据覆盖晚到 0x4301
+        // 自带的 AP 信息，把唯一的凭据来源丢掉。
+        if (endpoint.ssid.isNotEmpty()) {
+            this.wifi =
+                wifiFromExchange ?: WifiConfiguration(
+                    ssid = endpoint.ssid,
+                    passphrase = endpoint.passphrase,
+                    channel = endpoint.channel,
+                    securityType = endpoint.securityType,
+                )
+        }
         return endpoint
     }
 

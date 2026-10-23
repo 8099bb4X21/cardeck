@@ -101,6 +101,58 @@ class Iap2SenderSessionTest {
     }
 
     /**
+     * PR #19（凯迪拉克 CT5）：新协议车机声明会发 0x4301 但窗口内未到——
+     * **不拆链**，返回空端点进入保活；保活泵把晚到的 0x4301 解析成完整端点
+     * 经 onEndpointUpdate 回调（Audi MMI 9310 晚到 2 分 35 秒的同族形态）。
+     */
+    @Test
+    fun newProtocolCarWithoutCredentialsKeepsLinkForLateStartSession() {
+        val pair = InMemoryStreamPair()
+        val phoneChannel = Iap2LinkChannel(pair.sideA, name = "phone")
+        val accessoryChannel = Iap2LinkChannel(pair.sideB, name = "accessory")
+        val accessory =
+            MockAccessory(
+                accessoryChannel,
+                shape = MockAccessory.Shape.CT5_NEW_PROTOCOL,
+                lateStartSession = true,
+            )
+
+        val accessoryThread = Thread({ accessory.run() }, "mock-accessory")
+        accessoryThread.isDaemon = true
+        accessoryThread.start()
+
+        val updates = AtomicReference<Iap2SenderSession.CarPlayEndpoint?>()
+        val updateLatch = CountDownLatch(1)
+        val session =
+            Iap2SenderSession(
+                phoneChannel,
+                log = { line -> println("PHONE $line") },
+                bluetoothMac = "34:86:DA:86:BB:96",
+                deviceName = "test-device",
+                onEndpointUpdate = {
+                    updates.set(it)
+                    updateLatch.countDown()
+                },
+            )
+
+        val endpoint = session.run(timeoutMillis = 10_000L)
+        assertEquals("", endpoint.ssid)
+
+        val pumpThread = Thread({ session.pumpIncomingForever() }, "phone-pump")
+        pumpThread.isDaemon = true
+        pumpThread.start()
+        assertTrue("晚到 0x4301 未在 10s 内经 onEndpointUpdate 回调", updateLatch.await(10, TimeUnit.SECONDS))
+        val late = updates.get()
+        assertNotNull(late)
+        assertEquals("MockAP", late!!.ssid)
+        assertEquals("secret-passphrase", late.passphrase)
+        assertEquals(49152, late.airPlayPort)
+
+        phoneChannel.close()
+        accessoryChannel.close()
+    }
+
+    /**
      * **奥迪 MMI 3315 真实形态必须发 0x5702**（2026-10-22 回归的钉子）。
      *
      * 它的可收清单只有 5 项且不含 0x5702，旧实现据此判「跳过旧协议」→ 整轮一次
@@ -276,13 +328,17 @@ class Iap2SenderSessionTest {
             AUDI_9310,
             AUDI_3315,
             BMW_ID9,
+
+            // 凯迪拉克 CT5（GM/Cinemo）：声明会发 0x4301、无 0x5702/0x5703——
+            // AP 信息只能在 0x4301 里，且窗口内常不到（PR #19，2026-10-21 日志）
+            CT5_NEW_PROTOCOL,
         }
 
         /** 老式奥迪/测试台：不声明接收清单，也不发 StartHID。 */
         private val legacyHid: Boolean get() = shape != Shape.TEST_BENCH
 
-        /** 是否应答 0x5702（旧协议在网络侧有凭据交换）。 */
-        private val answersWifiRequest: Boolean get() = shape != Shape.BMW_ID9
+        /** 是否应答 0x5702（旧协议在网络侧有凭据交换）。CT5 与 BMW 同为纯新协议。 */
+        private val answersWifiRequest: Boolean get() = shape != Shape.BMW_ID9 && shape != Shape.CT5_NEW_PROTOCOL
 
         fun run() {
             check(channel.awaitReady(10_000)) { "mock link not ready" }
@@ -362,6 +418,7 @@ class Iap2SenderSessionTest {
             when (shape) {
                 Shape.AUDI_9310, Shape.AUDI_3315 -> "Audi_MMI_3315"
                 Shape.BMW_ID9 -> "BMW 87866"
+                Shape.CT5_NEW_PROTOCOL -> "CADILLAC_2179"
                 Shape.TEST_BENCH -> "MockCarPlay"
             }
 
@@ -393,6 +450,18 @@ class Iap2SenderSessionTest {
                         Iap2Csm.u16List(
                             7,
                             intArrayOf(0xaa00, 0xaa02, 0xaa04, 0xaa05, 0xea00, 0xea01, 0x5001, 0x5201, 0x4300, 0x4e0d),
+                        ),
+                    )
+                // 凯迪拉克 CT5（PR #19）：发 11 项含 0x4301、收 9 项，均无 0x57xx → NEW
+                Shape.CT5_NEW_PROTOCOL ->
+                    arrayOf(
+                        Iap2Csm.u16List(
+                            6,
+                            intArrayOf(0xaa06, 0x6800, 0x6802, 0x6803, 0x4c00, 0x4c02, 0x4c03, 0x4c05, 0x5000, 0x5002, 0x4301),
+                        ),
+                        Iap2Csm.u16List(
+                            7,
+                            intArrayOf(0x6801, 0x4c01, 0x4c04, 0x5001, 0x4e09, 0x4e0a, 0x4e0b, 0x4e0c, 0x4300),
                         ),
                     )
             }
