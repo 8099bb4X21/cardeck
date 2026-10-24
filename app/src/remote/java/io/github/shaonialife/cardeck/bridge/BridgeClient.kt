@@ -285,6 +285,36 @@ object BridgeClient {
             }
 
             "ping" -> send(JSONObject().put("t", "pong").put("id", msg.optString("id")))
+
+            // 文件日志上传（差分 ring 之外的历史事实源）：读 main_debug.log 尾部
+            // → gzip → 单消息 base64 回传。只读自身日志文件，无副作用。
+            "log_file.req" -> {
+                val reqId = msg.optString("id")
+                val maxKB = msg.optInt("maxKB", 512).coerceIn(16, 4096)
+                Bg.run("bridge-log-file") {
+                    val ctx = appContext ?: return@run
+                    val raw =
+                        io.github.shaonialife.cardeck.util.DebugFileLog
+                            .readTail(ctx, maxKB * 1024)
+                            ?: ByteArray(0)
+                    val gz =
+                        java.io.ByteArrayOutputStream().use { bos ->
+                            java.util.zip
+                                .GZIPOutputStream(bos)
+                                .use { it.write(raw) }
+                            bos.toByteArray()
+                        }
+                    val payload =
+                        JSONObject()
+                            .put("t", "log_file.data")
+                            .put("id", reqId)
+                            .put("rawSize", raw.size)
+                            .put("truncated", raw.size >= maxKB * 1024)
+                            .put("gzB64", android.util.Base64.encodeToString(gz, android.util.Base64.NO_WRAP))
+                    send(payload)
+                    debugLog("文件日志已回传（原始 ${raw.size / 1024}KB → gzip ${gz.size / 1024}KB）")
+                }
+            }
         }
     }
 

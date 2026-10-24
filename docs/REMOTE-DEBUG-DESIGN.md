@@ -79,6 +79,12 @@ MCP 工具：`bridge_status` / `logs_tail(device,lines)` / `logs_fetch(device,si
   `readLong` 只读大端——首版 LE + 头缓冲 72<88 截断 baseSha，差分首跳静默回退
   全量，真机抓到后修正）。
 
+## 日志通道三层（2026-10-24）
+
+内存环形（实时 tail，例行高频行降噪）→ 磁盘 JSONL（`logs_fetch`，全量、跨进程
+世代、20MB 轮换）→ 设备文件日志（`logs_file`，含 RAW 转储的完整事实源，gzip
+单消息回传落盘 `cardeck-bridge/logs/`）。排查历史问题（装包前的建流段）用后两者。
+
 ## 安装确认三重保险与悬浮窗豁免（2026-10-24 实测定谳）
 
 - PENDING_USER_ACTION 的系统确认 Intent，从后台 Receiver 直接 `startActivity`

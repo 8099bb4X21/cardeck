@@ -61,6 +61,25 @@ object DebugFileLog {
         }.getOrNull()
 
     /**
+     * 读文件尾部原始字节（远程调试桥 `log_file.req` 用，最大 [maxBytes]）。
+     * 与写线程并发安全：只读不写；文件不存在返回 null。
+     */
+    fun readTail(
+        context: Context,
+        maxBytes: Int,
+    ): ByteArray? =
+        runCatching {
+            val file = File(context.filesDir, "main_debug.log")
+            if (!file.isFile) return null
+            val len = file.length()
+            val start = if (len <= maxBytes) 0L else len - maxBytes
+            file.inputStream().use { input ->
+                input.channel.position(start)
+                input.readBytes()
+            }
+        }.getOrNull()
+
+    /**
      * 取最后一条启动标记之后的内容（纯函数，单测覆盖边界）。
      * 无标记 → 全文：旧版本写入的文件里没有标记，此时全量比空更好。
      */
