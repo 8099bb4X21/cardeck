@@ -77,3 +77,44 @@ internal fun <T> resolveDefaultMap(
     priority.forEach { pkg -> componentFor(pkg)?.let { return it } }
     return null
 }
+
+/**
+ * 车机版地图的「地图主界面」Activity（`am start -n` 的显式入口；未知则返回 null）。
+ *
+ * 为什么要显式指定：车机版地图的 LAUNCHER intent 常落在启动页/引导页（会丢
+ * `--display`，导致界面跑到手机主屏而不是地图屏）。高德车机版实测必须显式启动
+ * `MainMapActivity`。
+ *
+ * 百度车机版（`com.baidu.naviauto`）**不需要**显式入口，返回 null 交给系统解析：
+ * 实测 22.0.1（versionCode 1645）的 launcher 是
+ * `com.baidu.naviauto/.SlashActivity.DefaultActivity`，包内**没有独立的地图主界面
+ * Activity**——地图由 `com.baidu.mapautosdk` 在该 Activity 内渲染。
+ * （曾误写成 `.NaviAutoActivity`：该版本不存在，`am start` 直接报
+ * "Activity class does not exist"；虽有候选回退兜住，但每次启动会白跑一次
+ * 失败的 shell 往返并留下误导性日志，2026-10-23 真机实测删除。）
+ *
+ * ⚠️ 显式入口**不保证**在所有版本存在，所以调用方必须用 [mapLaunchCandidates]
+ * 拿候选列表并逐个尝试，失败后退回 launcher 解析出的 component——单点写死会让
+ * 地图屏黑着且无从排查。
+ */
+internal fun carMapMainActivity(packageName: String): String? =
+    when (packageName) {
+        "com.autonavi.amapauto" -> "com.autonavi.amapauto/.MainMapActivity"
+        else -> null
+    }
+
+/**
+ * 地图启动的 `am start -n` 候选目标（按顺序尝试）：
+ * ① 车机版的显式主界面（若已知）→ ② launcher 解析出的 component。
+ */
+internal fun mapLaunchCandidates(
+    packageName: String,
+    launcherComponent: String,
+): List<String> {
+    val explicit = carMapMainActivity(packageName)?.takeIf { it != launcherComponent }
+    return listOfNotNull(explicit, launcherComponent).distinct()
+}
+
+/** [mapLaunchCandidates] 的 ComponentName 重载（真机路径用；单测走纯字符串版）。 */
+internal fun mapLaunchCandidates(component: ComponentName): List<String> =
+    mapLaunchCandidates(component.packageName, component.flattenToShortString())

@@ -9,6 +9,7 @@ import io.github.shaonialife.cardeck.launcher.resolveCardGesture
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.shizuku.CarInputClient
+import io.github.shaonialife.cardeck.util.Bg
 
 /**
  * 触摸路由：把车机 hidSendReport 触点注入到车机侧虚拟屏（隐形屏模式）。
@@ -110,16 +111,21 @@ object TouchRouter {
         if (dockW <= 0 || launcher.appDisplayId < 0 || launcher.dockDisplayId < 0) return
         var svc = CarInputClient.service
         if (svc == null) {
-            // 主动触发重绑（手机重启/Shizuku 重启后 binder 丢失）
-            CarInputClient.ensure(context)
+            // 主动触发重绑（手机重启/Shizuku 重启后 binder 丢失）。
+            // **必须在后台**：ensure 内部是 bindUserService 同步 binder 调用，而本条
+            // 触摸来自 iAP2 事件线程；主线程更不行（Shizuku 回调也走主线程，会自锁）。
+            Bg.run("touch-rebind") { CarInputClient.ensure(context) }
             svc = CarInputClient.service
         }
         if (svc == null) {
             failStreak++
-            diag(
-                "注入服务不可用（连续 $failStreak 次，自动重绑中；" +
-                    "若持续失效请打开 Shizuku App 或在系统设置中允许其后台运行）",
-            )
+            // 首次以及每 200 次报一条：真机上每秒几十次触摸，逐条刷会淹没日志
+            if (failStreak == 1 || failStreak % 200 == 0) {
+                diag(
+                    "注入服务不可用（连续 $failStreak 次，后台重绑中；" +
+                        "若持续失效请打开 Shizuku App 或在系统设置中允许其后台运行）",
+                )
+            }
             return
         }
         failStreak = 0

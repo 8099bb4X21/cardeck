@@ -542,7 +542,7 @@ class DefaultMapPanelFragment : SettingsPanelFragment() {
         if (installed.isEmpty()) {
             container.addView(
                 TextView(requireContext()).apply {
-                    text = "未安装任何受支持的地图应用（高德/百度/腾讯）"
+                    text = "未安装任何受支持的地图应用（高德/百度车机版、高德/百度/腾讯手机版）"
                     setTextColor(0xFF8E8E93.toInt())
                     textSize = 13f
                 },

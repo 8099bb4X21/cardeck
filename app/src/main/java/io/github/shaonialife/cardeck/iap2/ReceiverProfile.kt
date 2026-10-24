@@ -21,6 +21,41 @@ object ReceiverProfile {
     /** WiFi 凭据交换协议代际（PR #10 的分派依据，收口进画像）。 */
     enum class WifiGen { LEGACY, NEW, UNKNOWN }
 
+    /**
+     * iAP2 虚拟链路代际（2026-10-23 判定，纯函数）。
+     *
+     * **2026-10-23 二次定谳：代际不再分派 marker 行为**——所有车机都必须完成链路
+     * 协商（marker = 车机在等我们的会话表，1Hz 无限重发；不回应则链路到不了
+     * NORMAL，RECORD 后 ~10s 被拆：0.1.9 实测 10.17s、0.1.17 车主实测 10.18s）。
+     * 曾据此对 CLASSIC_MIB3 忽略 marker（0.1.16/0.1.17），其依据「0.1.9 忽略 marker
+     * 时奥迪照常进入」被 0.1.9 自己的日志推翻；「协商挂起车机 UI」的真因是协商完成
+     * 后缺 modesChanged 资源重申（AADisplay r17 时序）。判定保留用于日志与未来
+     * 分派（如 MFi 挑战长度先验、隧道内消息差异）。
+     *
+     * 判据（全部来自协议自报，零品牌猜测之外的新依赖）：
+     * DELPHI 制造 + AUDI 型号 + 稀疏清单（合计 <10 项，实测 2+5）→ CLASSIC_MIB3。
+     * 三条同时命中才算——单条都可能误伤（清单稀疏的其它车机、非奥迪的 DELPHI 件）。
+     * 其余一切（含未知车机）→ EVENT_LINK。
+     */
+    enum class LinkGeneration { CLASSIC_MIB3, EVENT_LINK }
+
+    /**
+     * 从 0x1D01 自报信号判定链路代际（见 [LinkGeneration] 文档）。
+     * 信号不足（清单未提供/身份缺失）→ EVENT_LINK（0.1.13 前兼容行为）。
+     */
+    fun linkGenerationOf(signals: Signals): LinkGeneration {
+        val manufacturer = signals.manufacturer?.lowercase().orEmpty()
+        val model = signals.model?.lowercase().orEmpty()
+        val listTotal = (signals.sendIds?.size ?: 0) + (signals.receiveIds?.size ?: 0)
+        val listsSparse = signals.sendIds != null && signals.receiveIds != null && listTotal in 1..9
+        val isDelphiAudi = manufacturer.contains("delphi") && model.contains("audi")
+        return if (isDelphiAudi && listsSparse) {
+            LinkGeneration.CLASSIC_MIB3
+        } else {
+            LinkGeneration.EVENT_LINK
+        }
+    }
+
     /** 画像输入：全字段可空——信号到多少算多少。 */
     data class Signals(
         val name: String? = null,

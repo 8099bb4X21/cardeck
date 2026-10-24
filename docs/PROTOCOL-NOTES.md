@@ -80,7 +80,9 @@ FF 5A | u16 总长 | u8 控制 | u8 seq | u8 ack | u8 会话ID | u8 头校验和
 配件 → 手机: IdentificationInformation (0x1D01)   车机身份 + 收发消息能力清单
 手机 → 配件: IdentificationAccepted    (0x1D02)
 配件 → 手机: MFi 认证序列              (0xAA00 段)  ← 手机侧可跳过校验 ❓细节待读
-手机 → 配件: RequestAccessoryWiFiConfiguration (0x5702)
+手机 → 配件: RequestAccessoryWiFiConfiguration (0x5702)   ← **必备**：四个独立
+                                                   实现都声明它；车机漏声明也要发
+                                                   （见 §5b / §9j）
 配件 → 手机: AccessoryWiFiConfiguration (0x5703)   明文 TLV: SSID/密码/信道/安全类型
    （安全类型: 0=None 1=WEP 2=WPA/WPA2 3=WPA3过渡 4=WPA3）
 手机加入车机热点 → mDNS 解析 _airplay._tcp
@@ -98,6 +100,77 @@ FF 5A | u16 总长 | u8 控制 | u8 seq | u8 ack | u8 会话ID | u8 头校验和
 5=hardwareVersion, 6=发出的消息ID列表(u16[]), 7=接收的消息ID列表(u16[]),
 8=电源类型, 9=最大电流(mA), 10=EA协议组, 12=语言, 13=语言列表,
 16=USB传输组件(有线), 17=蓝牙传输组件(无线), 18=HID组件, 24=无线CarPlay组件(含SSID)。
+
+## 5b. 0x5702 是「必备但常被漏声明」——四个独立实现的外部佐证（2026-10-22）
+
+起因：0.1.13 在奥迪 MMI 3315 上从「能连」变成「连不上」。8b64147 把 WiFi 凭据
+分派写成「车机可收清单里没有 0x5702 就跳过旧协议」，而奥迪稀疏清单（发 2 项 /
+收 5 项）不含它。结果整轮一次 0x5702 都没发，车机 AirPlay 服务始终没起来
+（端口 7000 全程 ECONNREFUSED），4 轮会话每轮 8 秒自拆。
+
+**四个独立实现全部把 0x5702 列进「车机可接收」清单**，说明它是规范要求的必备项：
+
+| 项目 | 角色 | 证据位置 |
+|---|---|---|
+| catplay | 车机（rx gadget） | `catplay_carplay_rx_gadget/src/iap2_session.rs`：`(identity.wifi_ssid.is_some(), &[RequestAccessoryWiFiConfigurationInformation::PACKET_ID])` |
+| xcertplay | 车机 | `Iap2IdentificationClient.kt:315`：`WIRELESS_PHONE_MESSAGES = intArrayOf(0x4e0d, 0x4e0e, 0x5702)` |
+| amineross/showcase | 车机（越狱 iPhone） | `source/carplay_bt.m` 的 `msgs_recv[]` 含 `0x5702 /* RequestAccessoryWiFiConfigInfo */` |
+| wiomoc/iap2 | 车机（Python） | `iap2/__main__.py` 的 `msgs_recv` 含 `RequestAccessoryWiFiConfigurationInformation` |
+
+**推论**：缺席的 0x5702 只能说明「清单不完整」，不能反证「不支持」。现实车机常漏写
+（奥迪 MMI 3315 就是），而它们对未声明消息照常处理——同日日志里 `0x4e0d/0x4e0b/0x4e0e`
+三条不在清单里，车机逐条 ACK 到位（seq 107→ack=107、110→ack=110、113→ack=113）。
+
+现行分派只认 `ReceiverProfile.wifiGen`：`NEW`（两清单合计 ≥10 项仍无 0x57xx，
+BMW iD9 形态）才跳过 0x5702；`LEGACY` 与 `UNKNOWN` 一律发，等待窗口 1.5s
+（奥迪八轮实测应答 122/136/166/166/198/246/266/368ms）。
+
+### 0x5703 的两个发送时机（传输通知前 / 后）
+
+`amineross/showcase` 的 `send_accessory_wifi_config(phase)` 区分 pre-/post-transport：
+`mfi_auth_succeeded → wireless_carplay_connecting_seen → transport_notification_seen
+→ wifi_config_sent_post_transport`（最多重发 5 次）。它的注释记录了一个反例：
+
+> iPhone8,1 / iOS 15.8.3 上，对端在 0x4E0E **之前**就请求 WiFi 配置，旧代码因此先发
+> 了 0x4301，然后网络阶段再也没启动过。
+
+即顺序本身不一定致命（我们 10-19/10-20 的奥迪日志里 0x5703 早于 0x4e0d/0x4e0e
+到达也照常成功），但**时序敏感是真的**。我们的保活泵对重发的 0x5702 会重新应答
+（`Iap2SenderSession` 的 `wifi` 缓存），与 showcase 的重发语义一致。
+
+### 两种端点发现流（Apple 官方口径）
+
+`harman-f/mhi2_altscreen_carplay` 的 `docs/research/mhi2-native-wireless-2026-10/
+11_CONNECTION_FLOW_VARIANTS.md` 整理了 Apple 的两套设计：
+
+```
+A. 经典流（WWDC 2017）：
+   配对 → BT iAP2（识别+MFi+传输标识）→ 凭据交换 → WLAN 关联
+   → Bonjour browse/resolve → Controller Connect → 会话 → iAP2 交接 → ACTIVE
+
+B. 简化流（WWDC 2023，iOS 14+）：
+   iAP2 里直接交换 IP 端点 + TCP 端口 → 直接建会话 → 安全+传输交接 → ACTIVE
+   （**不需要 Bonjour**，支持 WPA3-only）
+```
+
+同一文档强调 Apple 的显式警告：**WLAN 关联之后、CarPlay/iAP 交接到达预期状态之前，
+蓝牙/iAP2 都不能拆**。这条正是「每轮 8 秒自拆链 = 永远等不到邀请」的理论依据——
+真 iPhone 实录里车机入网后约 21 秒才发 `StartSessionHost`。
+
+对应实现：奥迪 MMI 3315 的 TXT `features=0x4040280,0x61`（bit37 CARPLAY_CONTROL
+与 bit38 HK_PAIRING 均置位）、`srcvers=450.14.2`，实际走 A（mDNS）+ B（0x4301）混合。
+
+### 一条与 iOS 18 相关的反例（不适用于奥迪，但要知道）
+
+`amineross/showcase` 故意**不声明** 0x4301，注释解释了原因：
+
+> iPhone 16 Pro / iOS 18 rejects identification if 0x4301 is in msgs_sent。
+> 而 0x4300 不能加进 msgs_recv——iPhone 校验 0x4300/0x4301 是强制配对，
+> 缺 0x4301 就拒绝。所以整个 0x43xx 路径在 iOS 18+ 上是堵死的。
+
+奥迪并不受此限：它的发送清单里明确有 `0x4301`（日志 `车机发送清单(2)=0x4301 0xea03`）。
+**相反，它愿意声明 0x4301 却漏掉 0x5702**——进一步说明清单是不完整，不是能力受限。
+改这条相关代码时，别把 showcase 的「iOS 18 限制」当成所有车机的通则。
 
 ## 6. mDNS/Bonjour（✅ xcertplay `network/CarPlayBonjour.kt`）
 
@@ -602,6 +675,69 @@ param 1: id=1, u16 = protocolId          ← 错：规范这里要 **EA 协议�
    RFCOMM 完全静默 5s 是否触发 BMW 的空闲拆链——若①无效，下一轮加 1s 裸 ACK 保活；
 3. 我们出站 `BT-C` 连车机的 iAP2 服务每 3s 失败（全靠车机回连），SDP 通道选择值得复核。
 
+## §9j 0.1.13 奥迪 MMI 3315 连不上：清单当硬门禁 + 每轮自拆链（2026-10-22）
+
+日志：`CarDeck-log-20261022-185112.txt`（0.1.13，Xiaomi 15 / Android 16 / Audi_MMI_3315_5GHz）。
+
+### 现象链（逐毫秒）
+
+```
+18:47:59.934  0x1D01：Audi_MMI_3315 / AUDI 5163 / DELPHI
+              发送清单(2)=0x4301 0xea03   可收清单(5)=0x4e0c 0x4e09 0x4300 0xea00 0xea01
+18:48:00.634  ⚠「车机未声明支持 0x5702/0x5703 —— 跳过旧协议」
+              → 整份日志 [tx=0x5702] 出现 0 次
+18:48:03.72   0x4301 到达一次（含 SSID/PSK/fe80::900c:…/10.174.189.1:7000）
+18:48:05→49:29  specifier 入网 84 秒无回调 → onUnavailable
+18:49:37.885  第二次入网成功（1.9s，bindProcessToNetwork=true）
+18:49:37→51:07  45 次连 7000 全部 ECONNREFUSED；_airplay._tcp 未发现；车机邀请=0 次
+18:49:55 起 5 轮  每轮 0x1D00→0x1D01→MFi→0x4300 → 8s 无 0x4301
+                 →「SESSION 失败: 未拿到车机热点凭据」→ 自拆链
+```
+
+### 与旧版本对照（同一台车、同一个热点）
+
+| 日志 | 0x5702 | 结果 |
+|---|---|---|
+| `CarDeck-log-20261019-101353-all.txt` | 发（每轮） | 0x5703 应答 122~368ms；入网 30ms 后 `TCP 已连通 10.174.189.1:7000`；SETUP/RECORD 全通 |
+| `CarDeck-log-20261020-103031.txt` | 发（每轮） | 同上，`0x5703` 166ms、入网 1.9s、端口立即可用 |
+| `CarDeck-log-20261022-185112.txt`（0.1.13） | **0 次** | 端口 7000 **全程 RST**，4 轮全灭 |
+
+**关键推断**：这台奥迪要先收到 0x5702 才会把 AirPlay 服务拉起来。缺了它，车机只吐
+一次孤立的 0x4301，之后整轮沉默、端口不监听。
+
+### 两个根因
+
+1. **清单当硬门禁**：`legacyWifiExchange = declaresReceiveWifi != false && declaresSendWifi != false`。
+   奥迪给了清单且不含 0x5702 → 跳过。而同一份日志里 `PROFILE` 行算的却是
+   `wifiGen=UNKNOWN`（理由写着「保守按旧协议」）——**两套判定没接线**，日志说一套做一套。
+2. **每轮 8 秒自拆链**：`wifiFromExchange == null && 无 0x4301` 时直接 `throw IOException`。
+   而真 iPhone 实录（§13a）里车机入网后 **21 秒**才发 ctrl 邀请——每轮重启等于
+   把车机的等待计时反复清零，永远等不到。
+
+### 修复（0.1.14）
+
+- 分派只认 `ReceiverProfile.wifiGen`：`NEW` 才跳过 0x5702；`LEGACY`/`UNKNOWN` 一律发；
+  等待窗口 1.5s（奥迪实测 4 倍余量）。
+- 无凭据但有已知热点 SSID 时合成 `airPlayPort=0` 端点继续（`credentiallessEndpoint`），
+  晚到的 0x4301 仍走 `onLateEndpoint` 热更新。
+- 0x4301 路径补写 `lastWifiPsk`/`lastCarWifiSsid`（此前只有 0x5703 路径写，手动兜底
+  按钮因此误报「尚未拿到热点密码」）。
+- ctrl 广播端口固定（重注册只换 mDNS 注册、复用 socket；旧实现每次都换端口，
+  实测 43857→33383→33125→38151→40697→38015，中间还有最长 1.2s 空窗）。
+- 长连接加 `TcpLiveness`（控制/事件/视频三处，idle=10s/count=3/userTimeout=20s）。
+- 单测钉死双向：`sparseDeclarationsStillSendWifiRequest`（奥迪 3315 形态必须发）、
+  `fullDeclarationsWithoutOldProtocolSkipWifiRequest`（宝马 iD9 形态不发）、
+  `knownCarSsidAvoidsCredentiallessAbort` / `noCredentialAndNoKnownSsidStillFails`。
+
+### 判读要点（下次同类问题）
+
+- 日志出现「跳过 0x5702」+ 之后 **`ECONNREFUSED`（不是超时/路由不可达）** = 车机在网但
+  没有进程监听 7000 —— 优先怀疑车机侧 CarPlay 栈没被拉起，而不是网络/地址问题。
+- `[tx=0x5702]` 计数为 0 是这次的决定性证据；排查任何「无线连不上」先数它。
+- iPhone sysdiagnose 侧的对应节奏：入网 → **21s** 邀请 → 首轮 MFi 403（正常）→
+  **再等 18~20s** 车机自行重邀 → 成功。客户端任何「十几秒没进展就重来」的策略
+  都会与这个节奏冲突。
+
 ## 10. 参考文件速查
 
 > 表中路径均指 `reference/` 下**代码精读来源**（xcertplay 与 DiPlay 同源，
@@ -625,11 +761,29 @@ param 1: id=1, u16 = protocolId          ← 错：规范这里要 **EA 协议�
 
 ## 12. MIB3 WiFi 隧道（AirPlay 会话之上的第二条 iAP2 链路，2026-10-19）
 
+> **⚠ 2026-10-23 二次修正（以本块为准）**：本节「MIB3 必须建隧道否则 10~12s 拆链」
+> 的结论**成立**；当天早些时候「CLASSIC_MIB3 忽略 marker 永不协商」的修正**被证伪**。
+> 统一模型（证据链齐全）：
+> ① **链路必须协商到 NORMAL**——车机的 marker 是它在等我们的会话表，1Hz **无限重发**
+>   （0.1.17 车主日志实测远超「2~5 个」旧说）；不回应则 RECORD 后 ~10s 车机拆整条
+>   无线栈（0.1.9 实测 10.17s、0.1.17 实测 10.18s，与心跳全健康无关）。
+>   「0.1.9 忽略 marker 时奥迪照常进入 CarPlay」系误传——0.1.9 自己的日志就是 10.17s
+>   拆链。真 iPhone `iAPChannel FeatureKey=0` 的含义是链路协商**完成**后结果为零隧道，
+>   不是「不参与协商」。
+> ② **切屏靠协商完成后的 modesChanged 资源重申**——082446（0.1.14）协商/MFi/订阅
+>   全部成功、会话健康 35s+，车机却不切画面：第二控制会话把车机资源仲裁重置了一遍，
+>   会话早期那份 modesChanged 已失效。AADisplay r17 长播验证的时序：auth+burst 后
+>   **+1.5s 首发、+4/+12/+30s 重申**（不得在 0xAA00/0xAA05 进行中声明——与 iAP POST
+>   抢控制通道会把奥迪搞死 ~12s）。0.1.12「出画面 3 秒断」= 协商砸进刚起步的 HMI，
+>   时序错位同源。
+> 现行实现：marker 升级协商全代际统一；`VirtualIap2Link.onControlSessionComplete`
+> → `SessionController.scheduleModesReclaim`。曾据此写的「忽略 marker」分派已删。
+
 > 事实源：`reference/AADisplay`（分支 AADisplay-Split-Lite-Carplay，**GPL-3.0 只读参考**）。
 > 他们用 Frida 挂越狱 iPhone 的 mediaserverd 抓的真机握手；本仓库据此实现
 > `airplay/VirtualIap2Link.kt`（协议事实照抄，代码独立编写）。
 
-**为什么需要**：MIB3 在 AirPlay 会话建立后还要求手机在**事件通道**上开第二条 iAP2
+**「为什么需要」（原始结论，仅 EVENT_LINK 形态适用）**：MIB3 在 AirPlay 会话建立后还要求手机在**事件通道**上开第二条 iAP2
 链路并重跑控制会话——只回链路 ACK（空回显）时 MIB3 约 10~12 秒整链拆除（本仓库
 2026-10-19 两轮实车日志 10.2s 复现；此前误判为心跳缺失，§9e 的三条心跳修复并不能
 救这台车）。AADisplay 源码注释原文："Empty ACK alone makes MIB3 tear AirPlay control

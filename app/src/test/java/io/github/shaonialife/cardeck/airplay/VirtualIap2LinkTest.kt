@@ -3,6 +3,7 @@ package io.github.shaonialife.cardeck.airplay
 import io.github.shaonialife.cardeck.iap2.Iap2Csm
 import io.github.shaonialife.cardeck.iap2.Iap2LinkEngine
 import io.github.shaonialife.cardeck.iap2.MfiLengthMemory
+import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -142,6 +143,7 @@ class VirtualIap2LinkTest {
     @Test
     fun mib3ArmSendsExactlyOneDetectOnControlChannel() {
         val h = Harness()
+        h.link.setGeneration(ReceiverProfile.LinkGeneration.CLASSIC_MIB3)
         h.link.armMib3()
         h.link.armMib3()
         assertEquals(listOf(Iap2LinkEngine.MARKER.toList()), h.controlSent.map { it.toList() })
@@ -161,10 +163,15 @@ class VirtualIap2LinkTest {
      * Honda HFT（2026-10-20 实测）：车机在事件通道上 1Hz 反复发 marker，说明它卡在
      * 探测态、在等**我们**的会话表。连着第 2 个 marker 起必须升级为「marker + 本表
      * 同步包」，且**只能走控制通道**——出站写在事件通道上车机不读（r6 踩过的坑）。
+     *
+     * 2026-10-23 二次定谳：该行为是**全代际**的（不再按 EVENT_LINK 分派）——奥迪
+     * 同样要求链路 NORMAL，否则 RECORD 后 ~10s 被拆（0.1.9/0.1.17 双日志实证）。
+     * 当年「协商挂起奥迪 UI」的真因是协商完成后缺 modesChanged 重申。
      */
     @Test
     fun repeatedMarkersUpgradeToControlChannelHandshake() {
         val h = Harness()
+        h.link.setGeneration(ReceiverProfile.LinkGeneration.EVENT_LINK)
         h.link.armMib3()
         val detect = h.controlSent.size
         // 第 1 个：还不判定（MIB3 会再发一次探测重发）
@@ -190,9 +197,37 @@ class VirtualIap2LinkTest {
         assertTrue("出站绝不能落到事件通道", h.eventSent.isEmpty())
     }
 
+    /**
+     * 2026-10-23 二次定谳：**所有代际都必须响应 marker 完成链路协商**。车机的
+     * marker 以 1Hz 无限重发（0.1.17 车主日志：远超旧注释的「2~5 个后静默」），
+     * 不回应则链路永远到不了 NORMAL，RECORD 后 ~10s 被车机拆整条会话（0.1.9 实测
+     * 10.17s、0.1.17 实测 10.18s）。当年「协商挂起奥迪 UI」的真因是协商完成后缺
+     * modesChanged 重申（SessionController.scheduleModesReclaim）。
+     */
+    @Test
+    fun markersEscalateRegardlessOfGeneration() {
+        for (generation in ReceiverProfile.LinkGeneration.entries) {
+            val h = Harness()
+            h.link.setGeneration(generation)
+            h.link.armMib3()
+            val detect = h.controlSent.size
+            // 第 1 个：还不判定（车机会再发探测重发）
+            h.link.onCarBytes(Iap2LinkEngine.MARKER)
+            assertEquals("$generation 首个 marker 不应额外发字节", detect, h.controlSent.size)
+            // 第 2 个：升级为 marker + 会话表
+            h.link.onCarBytes(Iap2LinkEngine.MARKER)
+            assertTrue(
+                "$generation 第 2 个 marker 必须触发协商字节（0.1.17 证伪「忽略」路线）",
+                h.controlSent.size > detect,
+            )
+            assertTrue("$generation 出站不得落到事件通道", h.eventSent.isEmpty())
+        }
+    }
+
     @Test
     fun fullMib3HandshakeWithBurstAndSubscriptions() {
         val h = Harness()
+        h.link.setGeneration(ReceiverProfile.LinkGeneration.CLASSIC_MIB3)
         h.link.armMib3()
         h.car.start(0)
         h.exchangeUntilNormal()
@@ -235,6 +270,7 @@ class VirtualIap2LinkTest {
     @Test
     fun nowPlayingIdleReplyIsTheFridaConstantVerbatim() {
         val h = Harness()
+        h.link.setGeneration(ReceiverProfile.LinkGeneration.CLASSIC_MIB3)
         h.link.armMib3()
         h.car.start(0)
         h.exchangeUntilNormal()
@@ -262,6 +298,7 @@ class VirtualIap2LinkTest {
         val identity = "MemCar MemModel MemMfr tunnel"
         MfiLengthMemory.recordSuccess(null, identity, 32)
         val h = Harness()
+        h.link.setGeneration(ReceiverProfile.LinkGeneration.CLASSIC_MIB3)
         h.link.armMib3()
         h.car.start(0)
         h.exchangeUntilNormal()
@@ -274,6 +311,7 @@ class VirtualIap2LinkTest {
     @Test
     fun silentChallengeRetriesNextLengthWithinSession() {
         val h = Harness()
+        h.link.setGeneration(ReceiverProfile.LinkGeneration.CLASSIC_MIB3)
         h.link.armMib3()
         h.car.start(0)
         h.exchangeUntilNormal()

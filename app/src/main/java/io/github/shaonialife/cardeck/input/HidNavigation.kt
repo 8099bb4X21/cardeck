@@ -137,12 +137,13 @@ object HidNavigation {
         var index = 0
         while (index < descriptor.size) {
             val prefix = descriptor[index].toInt() and 0xFF
-            val size = when (prefix and 0x03) {
-                0 -> 0
-                1 -> 1
-                2 -> 2
-                else -> 4
-            }
+            val size =
+                when (prefix and 0x03) {
+                    0 -> 0
+                    1 -> 1
+                    2 -> 2
+                    else -> 4
+                }
             val type = (prefix shr 2) and 0x03
             val tag = (prefix shr 4) and 0x0F
             if (index + 1 + size > descriptor.size) return false
@@ -164,12 +165,13 @@ object HidNavigation {
         var index = 0
         while (index < descriptor.size) {
             val prefix = descriptor[index].toInt() and 0xFF
-            val size = when (prefix and 0x03) {
-                0 -> 0
-                1 -> 1
-                2 -> 2
-                else -> 4
-            }
+            val size =
+                when (prefix and 0x03) {
+                    0 -> 0
+                    1 -> 1
+                    2 -> 2
+                    else -> 4
+                }
             val type = (prefix shr 2) and 0x03
             val tag = (prefix shr 4) and 0x0F
             if (index + 1 + size > descriptor.size) return false

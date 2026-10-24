@@ -2,6 +2,7 @@ package io.github.shaonialife.cardeck.launcher
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -57,5 +58,64 @@ class DefaultMapPrefsTest {
     @Test
     fun resolveTerminatesWithoutRecursion() {
         repeat(100) { assertNull(pick(manual = null, installed = emptySet())) }
+    }
+}
+
+/**
+ * 车机版地图启动入口（高德/百度）的候选顺序与回退。
+ *
+ * 背景：车机版地图的 LAUNCHER intent 常落在启动页而不是地图主界面，所以需要显式
+ * 指定主 Activity；但**显式入口不保证在所有固件/版本存在**（百度车机版在不同定制
+ * 固件上就有 NaviAutoActivity / SlashActivity 两种）。因此必须给候选列表：
+ * 显式主界面优先，失败回退 launcher 解析结果。
+ */
+class MapLaunchCandidatesTest {
+    @Test
+    fun gaodeCarEditionPrefersMainMapActivity() {
+        assertEquals(
+            listOf("com.autonavi.amapauto/.MainMapActivity", "com.autonavi.amapauto/.Launcher"),
+            mapLaunchCandidates("com.autonavi.amapauto", "com.autonavi.amapauto/.Launcher"),
+        )
+    }
+
+    @Test
+    fun baiduCarEditionUsesLauncherEntryOnly() {
+        // 百度车机版（com.baidu.naviauto）不设显式主界面入口：实测 22.0.1 的包内
+        // 没有地图主界面 Activity，地图由 mapautosdk 在 launcher 的 DefaultActivity
+        // 内渲染。曾误写成 .NaviAutoActivity（不存在），am start 直接报
+        // "Activity class does not exist"——不再保留该候选。
+        assertEquals(
+            listOf("com.baidu.naviauto/.SlashActivity.DefaultActivity"),
+            mapLaunchCandidates("com.baidu.naviauto", "com.baidu.naviauto/.SlashActivity.DefaultActivity"),
+        )
+    }
+
+    @Test
+    fun phoneMapsFallBackToLauncherComponentOnly() {
+        // 手机版没有已知的专用主界面：只保留 launcher 解析结果
+        listOf("com.autonavi.minimap", "com.baidu.BaiduMap", "com.tencent.map").forEach { pkg ->
+            assertEquals(listOf("$pkg/.Launcher"), mapLaunchCandidates(pkg, "$pkg/.Launcher"))
+        }
+    }
+
+    @Test
+    fun explicitEntryIsNotDuplicatedWhenItIsTheLauncher() {
+        // launcher 本身就指向主界面时不要重复尝试同一个 component
+        assertEquals(
+            listOf("com.baidu.naviauto/.NaviAutoActivity"),
+            mapLaunchCandidates("com.baidu.naviauto", "com.baidu.naviauto/.NaviAutoActivity"),
+        )
+    }
+
+    @Test
+    fun baiduCarEditionIsWhitelistedAheadOfPhoneMaps() {
+        val priority = VirtualLauncher.MAP_PACKAGES_PRIORITY
+        val auto = priority.indexOf("com.baidu.naviauto")
+        assertTrue("百度车机版必须在白名单里", auto >= 0)
+        assertTrue(
+            "车机版应排在手机版之前（车机上优先用横屏适配好的车机版）",
+            auto < priority.indexOf("com.baidu.BaiduMap"),
+        )
+        assertTrue(auto < priority.indexOf("com.autonavi.minimap"))
     }
 }

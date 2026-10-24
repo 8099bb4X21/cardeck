@@ -17,6 +17,7 @@ object DesktopApps {
     private val MAP_PACKAGES =
         setOf(
             "com.autonavi.amapauto", // 高德地图车机版
+            "com.baidu.naviauto", // 百度地图车机版
             "com.autonavi.minimap", // 高德地图
             "com.baidu.BaiduMap", // 百度地图
             "com.tencent.map", // 腾讯地图

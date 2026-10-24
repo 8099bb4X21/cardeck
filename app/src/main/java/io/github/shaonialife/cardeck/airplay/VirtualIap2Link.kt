@@ -5,6 +5,7 @@ import io.github.shaonialife.cardeck.iap2.Iap2Csm
 import io.github.shaonialife.cardeck.iap2.Iap2LinkEngine
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.MfiLengthMemory
+import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import io.github.shaonialife.cardeck.input.ConsumerKeys
 import io.github.shaonialife.cardeck.input.HidNavigation
 import java.security.SecureRandom
@@ -62,6 +63,23 @@ class VirtualIap2Link(
 
     // ---- MIB3 路径状态 ----
     private var mib3Armed = false
+
+    /**
+     * 车机链路代际（枚举与判定收口在 [ReceiverProfile]，判定依据随 PROFILE/IAPLINK
+     * 日志输出）。
+     *
+     * **2026-10-23 二次定谳：marker 协商不再按代际分派**——所有车机都必须完成链路
+     * 协商（车机 marker = 它在等我们的会话表，1Hz 无限重发；不回应则链路永远到不了
+     * NORMAL，RECORD 后 ~10s 被车机拆链：0.1.9 实测 10.17s、0.1.17 实测 10.18s）。
+     * 此前 0.1.16/0.1.17 曾对 CLASSIC_MIB3 忽略 marker，依据是「0.1.9 忽略 marker
+     * 时奥迪照常进入」——该论断被 0.1.9 自己的日志（10.17s 拆链）与 0.1.17 车主日志
+     * 推翻。当年「协商挂起车机 UI 卡原界面」的真因是协商完成后缺 modesChanged 重申
+     * （见 [onControlSessionComplete]）。
+     *
+     * 代际现在仅用于日志与未来分派，marker 策略统一：按阈值升级协商（Honda HFT 的
+     * 媒体键载体在建链后的 0x6802 里，奥迪的切屏前提是链路 NORMAL + 资源重声明）。
+     */
+    private var generation: ReceiverProfile.LinkGeneration = ReceiverProfile.LinkGeneration.EVENT_LINK
     private var mib3SynAckQueued = false
     private var mib3CsmStarted = false
     private var mib3Identified = false
@@ -69,6 +87,7 @@ class VirtualIap2Link(
     private var mib3MarkerIgnores = 0
     private var mib3DeferredLogs = 0
     private var mib3WirelessSessionId: String? = null
+    private var mib3ControlSessionNotified = false
 
     /**
      * 事件通道链路模式（2026-10-20 Honda HFT 实测新增）。
@@ -179,9 +198,44 @@ class VirtualIap2Link(
             if (mib3Armed) return
             mib3Armed = true
             sendControlIap(Iap2LinkEngine.MARKER)
-            log("IAPLINK: MIB3 detect 已发（控制通道 iAPSendMessage）——等待车机 SYN")
+            log("IAPLINK: MIB3 detect 已发（控制通道 iAPSendMessage，代际=$generation）——等待车机")
         }
     }
+
+    /**
+     * 显式声明车机链路代际（布防前后均可，幂等）。代际现仅用于日志与未来分派，
+     * marker 协商策略全代际统一（2026-10-23 二次定谳，见 [generation] 文档）。
+     */
+    fun setGeneration(generation: ReceiverProfile.LinkGeneration) {
+        synchronized(lock) {
+            if (this.generation == generation) return
+            this.generation = generation
+            log("IAPLINK: 链路代际 → $generation")
+        }
+    }
+
+    /**
+     * 调试/特殊形态用：强制开启一轮控制通道协商（正常路径由车机 marker 触发）。
+     * 一经调用，后续 marker 按协商态处理。
+     */
+    fun forceControlNegotiation(reason: String) {
+        synchronized(lock) {
+            if (tunnelWriter() != null) return
+            eventLinkArmed = true
+            startControlRoundLocked(reason)
+        }
+    }
+
+    /**
+     * MIB3 控制会话完成回调（auth+burst 发出时触发一次）：宿主应在此之后按
+     * AADisplay r17 验证过的时序重申 modesChanged 资源声明（+1.5s 首发、
+     * +4/+12/+30s 重申）。**082446 定谳**：协商/MFi/订阅全部成功但只在会话
+     * 建立早期声明过一次资源 → 车机全程健康却永不切到 CarPlay 画面——第二控制
+     * 会话把车机的资源仲裁重置了一遍，旧声明已失效，它在等一份新的。
+     * 注意不得在 0xAA00/0xAA05 进行中声明（与 iAP POST 抢控制通道会把奥迪搞死，
+     * AADisplay 注释原话），必须等 burst 完成。
+     */
+    var onControlSessionComplete: (() -> Unit)? = null
 
     /**
      * 开一轮控制通道协商：marker + 本表同步包（会话 10/11/12），刷新引擎重发节拍。
@@ -211,44 +265,54 @@ class VirtualIap2Link(
                 if (mib3Armed) {
                     mib3MarkerIgnores++
                     val now = nowMillis()
-                    // 车机反复发 SYN marker = 它还没拿到我们的会话表。链路字节**必须**走
-                    // 控制通道（事件通道它不读），所以这里不是换通道，而是按轮次重开协商。
-                    if (!eventLinkArmed && mib3MarkerIgnores >= EVENT_LINK_MARKER_THRESHOLD) {
-                        eventLinkArmed = true
-                        log(
-                            "IAPLINK: 车机连续发 SYN marker ×$mib3MarkerIgnores" +
-                                "（它在等我们的会话表）→ 控制通道补发协商轮次",
-                        )
-                        startControlRoundLocked("车机 marker 重发")
-                    } else if (eventLinkArmed) {
-                        eventLinkMarkers++
-                        if (engine.state != Iap2LinkEngine.State.NORMAL && !controlSynGaveUp) {
-                            val stale = now - controlSynRoundStartedAtMs >= CONTROL_SYN_ROUND_MILLIS
-                            when {
-                                !stale -> Unit
-                                controlSynRounds >= MAX_CONTROL_SYN_ROUNDS -> {
-                                    controlSynGaveUp = true
-                                    engine.stopNegotiationRetries()
+                    when (generation) {
+                        // 2026-10-23 定谳：**所有代际都必须完成链路协商**。曾按「奥迪忽略
+                        // marker」分派（0.1.16/0.1.17），被车主 0.1.17 日志证伪——车机 marker
+                        // 以 1Hz **无限重发**（远超旧注释的「2~5 个后静默」），链路永远到不了
+                        // NORMAL，RECORD 后 10.18s 车机拆掉整条会话（0.1.9 同款 10.17s）。
+                        // 协商完成本身无副作用（082446 全程健康），缺的是协商完成后的
+                        // modesChanged 重申（见 onControlSessionComplete）。
+                        ReceiverProfile.LinkGeneration.CLASSIC_MIB3,
+                        ReceiverProfile.LinkGeneration.EVENT_LINK,
+                        -> {
+                            if (!eventLinkArmed && mib3MarkerIgnores >= EVENT_LINK_MARKER_THRESHOLD) {
+                                eventLinkArmed = true
+                                log(
+                                    "IAPLINK: 车机连续发 SYN marker ×$mib3MarkerIgnores" +
+                                        "（它在等我们的会话表）→ 控制通道补发协商轮次",
+                                )
+                                startControlRoundLocked("车机 marker 重发")
+                            } else if (eventLinkArmed) {
+                                eventLinkMarkers++
+                                if (engine.state != Iap2LinkEngine.State.NORMAL && !controlSynGaveUp) {
+                                    val stale = now - controlSynRoundStartedAtMs >= CONTROL_SYN_ROUND_MILLIS
+                                    when {
+                                        !stale -> Unit
+                                        controlSynRounds >= MAX_CONTROL_SYN_ROUNDS -> {
+                                            controlSynGaveUp = true
+                                            engine.stopNegotiationRetries()
+                                            log(
+                                                "IAPLINK: 控制通道 $MAX_CONTROL_SYN_ROUNDS 轮协商无应答——停止自动重发，" +
+                                                    "链路停在 ${engine.state}（车机若发 0x1D01 会自动继续）",
+                                            )
+                                        }
+
+                                        else -> startControlRoundLocked("上一轮 ${CONTROL_SYN_ROUND_MILLIS}ms 无应答")
+                                    }
+                                }
+                                // 引擎节拍线程也会重发，这里把待发字节立刻冲出去
+                                drainLocked()
+                                if (eventLinkMarkers <= 3 || eventLinkMarkers % 20 == 0) {
                                     log(
-                                        "IAPLINK: 控制通道 $MAX_CONTROL_SYN_ROUNDS 轮协商无应答——停止自动重发，" +
-                                            "链路停在 ${engine.state}（车机若发 0x1D01 会自动继续）",
+                                        "IAPLINK: 车机 marker（#$eventLinkMarkers）链路状态=${engine.state}" +
+                                            "（控制通道第 $controlSynRounds 轮）",
                                     )
                                 }
-
-                                else -> startControlRoundLocked("上一轮 ${CONTROL_SYN_ROUND_MILLIS}ms 无应答")
+                                return
+                            } else if (mib3MarkerIgnores <= 3) {
+                                log("IAPLINK: 车机 marker（#$mib3MarkerIgnores）——凑够 $EVENT_LINK_MARKER_THRESHOLD 个后补发协商")
                             }
                         }
-                        // 引擎节拍线程也会重发，这里把待发字节立刻冲出去
-                        drainLocked()
-                        if (eventLinkMarkers <= 3 || eventLinkMarkers % 20 == 0) {
-                            log(
-                                "IAPLINK: 车机 marker（#$eventLinkMarkers）链路状态=${engine.state}" +
-                                    "（控制通道第 $controlSynRounds 轮）",
-                            )
-                        }
-                        return
-                    } else if (mib3MarkerIgnores <= 3) {
-                        log("IAPLINK: 车机 marker（#$mib3MarkerIgnores）——凑够 $EVENT_LINK_MARKER_THRESHOLD 个后补发协商")
                     }
                 } else {
                     // 布防前（屏幕 SETUP 未完成）：不回应——真机在 SETUP 前不 detect，
@@ -449,7 +513,10 @@ class VirtualIap2Link(
     /** 直接投递完整 CSM 帧（Frida 抓的逐字节常量，勿重新编码）。 */
     private fun sendRawCsmLocked(frame: ByteArray) {
         val ok = engine.sendControl(frame, System.nanoTime() / 1_000_000L)
-        val messageId = ((frame[2].toInt() and 0xFF) shl 8) or (frame[3].toInt() and 0xFF)
+        // CSM 帧布局：FF 5A [len:2] [msgId:2] …——消息号在 [4..5]，[2..3] 是载荷长度。
+        // 曾误取 [2..3]，日志把 0xFFFA 打成 0x32、0xFFF0 打成 0x0E、0x4158 打成 0x64
+        // （长度值），排查时极易被带偏（2026-10-23 实际误导过一轮）。
+        val messageId = ((frame[4].toInt() and 0xFF) shl 8) or (frame[5].toInt() and 0xFF)
         log(
             "IAPLINK: 隧道 tx 0x${messageId.toString(16)} " +
                 "(${Iap2MessageIds.nameOf(messageId)}) ${frame.size}B raw ok=$ok",
@@ -726,6 +793,10 @@ class VirtualIap2Link(
         sendRawCsmLocked(MIB3_START_LOCATION_INFORMATION)
         sendRawCsmLocked(MIB3_GPRMC_DATA_STATUS)
         log("IAPLINK: MIB3 突发已发（会话标识 $sessionId）——等待车机订阅")
+        if (!mib3ControlSessionNotified) {
+            mib3ControlSessionNotified = true
+            onControlSessionComplete?.invoke()
+        }
     }
 
     /** 0x4E0B：u64 秒 + s16 时区偏移(分) + u8 夏令时。 */

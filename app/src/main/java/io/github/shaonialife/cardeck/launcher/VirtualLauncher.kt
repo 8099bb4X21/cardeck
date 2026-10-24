@@ -323,10 +323,11 @@ object VirtualLauncher {
         mapLayoutListeners.forEach { runCatching { it(mapFullscreen) } }
     }
 
-    /** 地图应用白名单（优先序：车机版高德 → 手机高德 → 百度 → 腾讯）。 */
+    /** 地图应用白名单（优先序：车机版高德 → 车机版百度 → 手机高德 → 手机百度 → 腾讯）。 */
     val MAP_PACKAGES_PRIORITY =
         listOf(
             "com.autonavi.amapauto",
+            "com.baidu.naviauto",
             "com.autonavi.minimap",
             "com.baidu.BaiduMap",
             "com.tencent.map",
@@ -411,6 +412,18 @@ object VirtualLauncher {
         detach()
         // 新会话：「本次会话不再提示」等用户级决定作废
         LetterboxHintController.resetSession()
+        // 「强制应用横屏」覆盖**必须先于任何应用启动**写入（2026-10-23 奥迪 3315 真机
+        // 定谳）：`am compat enable` 会立即杀掉目标应用（覆盖只能在新进程生效）——
+        // 若写在应用拉起之后，桌面上刚 spawn 的地图/桌面进程会被当场杀死，虚拟屏
+        // 只剩静态壁纸，车机收到的画面永远不变、不切换 CarPlay UI（表现为「推流中
+        // 但车机还在原界面」）。写入在配对起步（SessionController 端点处理）就入队，
+        // attach 这里只 drain——通常已完成（~0ms）。注意别在这里同步跑 applyAll：
+        // 屏幕口 keepAlive 帧只从 drainEncoder 循环发出，而 drain 线程在本方法返回
+        // 后才启动——这里每阻塞 1s 都直接吃掉「RECORD→首条 keepAlive」的 ~10s
+        // 拆链预算（奥迪实测阈值）。
+        if (!AppOrientationCompat.awaitPending()) {
+            log("ORIENTATION: ⚠ 覆盖写入未在 6s 内排空——应用可能带着旧方向配置启动（后台写完后首个启动的应用会被杀一次）")
+        }
         val density = densityDpi / 160f
         // dock 栏宽度缩放（「显示」面板 50%–100%，下次连接起效）：厚度像素与 dock 屏
         // 密度**同乘**比例——内容 dp 布局不变、渲染进更少像素，整条 dock（图标/时钟/
@@ -641,11 +654,8 @@ object VirtualLauncher {
                         "app=$appDisplayId(${appWidth}x$appHeightPx @${appNativeDensity}dpi) " +
                         "appHi=$appHiDisplayId(${appHiWidth}x$appHiHeight @${appHiDensity}dpi scale=x$appScaleFactor)",
                 )
-                // 会话建立：为「强制应用横屏」名单内的应用逐个写入兼容覆盖
-                // （会话结束/断开时由 SessionController 统一复原，见 retireSession/onEnded）。
-                // 异步：6 个应用 × 2 次 am compat ≈1.6s，此前同步跑在虚拟屏 attach 里，
-                // 直接推迟首帧（2026-10-18 实测）。
-                AppOrientationCompat.applyAllAsync(context, log)
+                // 会话建立：为「强制应用横屏」名单写入兼容覆盖——**已提前到 attach 开头**
+                // （先写覆盖再拉应用，见 attach 开头注释；此处不再重复入队）。
                 // 音乐卡数据源前置：会话建立是「Shizuku 一定可用」的可靠时机，
                 // 补一次通知使用权（幂等；已授权直接返回）。
                 // 覆盖「App 启动时 Shizuku 未就绪、之后才就绪」的整条路径。
@@ -832,10 +842,12 @@ object VirtualLauncher {
         }
         appContextRef = null
         watchdogActive = false
-        // 还原 letterbox 宽高比为系统默认（不把会话调参留在系统里）
-        runCatching {
-            Shell
-                .exec("cmd window reset-letterbox-style aspectRatio")
+        // 还原 letterbox 宽高比为系统默认（不把会话调参留在系统里）。
+        // **必须后台执行**：这是一条 shell 命令（超时上限 6s），而 detach 可能被主线程
+        // 或 Shizuku 回调线程触发；2026-10-22 K60E 日志里就有「SHELL: ⚠ 主线程调用
+        // shell（第 1 次）cmd=cmd window reset-letterbox-style aspectRatio」。
+        Bg.run("letterbox-reset") {
+            runCatching { Shell.exec("cmd window reset-letterbox-style aspectRatio") }
         }
         runCatching { composer?.stop() }
         composer = null
@@ -1158,12 +1170,6 @@ object VirtualLauncher {
         dashboardMode = false
         notifyDashboard()
         setMapFullscreen(true)
-        val target =
-            if (component.packageName == "com.autonavi.amapauto") {
-                "com.autonavi.amapauto/.MainMapActivity"
-            } else {
-                component.flattenToShortString()
-            }
         // 同屏已有其他地图任务时清掉（白名单互斥；默认地图任务保留复用）
         val ctx = appContextRef
         val defaultPkg = ctx?.let { defaultMapComponent(it)?.packageName }
@@ -1172,11 +1178,7 @@ object VirtualLauncher {
                 Shell.exec("am stack remove $taskId", timeoutMs = 4000)
             }
         }
-        val result =
-            Shell.exec(
-                "am start -n $target --display $mapDisplayId -f 0x18000000",
-                timeoutMs = 8000,
-            )
+        val result = startMapApp(component, mapDisplayId, forceNewTask = true)
         val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
         logSink?.invoke(
             "LAUNCH(${component.packageName}): → 地图屏全屏 ok=$ok out=${result.output.take(80)}",
@@ -1196,6 +1198,35 @@ object VirtualLauncher {
         pkg: String,
         displayId: Int,
     ): List<String> = tasksOf(taskIdsByDisplayPkg(), pkg, displayId)
+
+    /**
+     * 在指定屏启动地图应用：按 [mapLaunchCandidates] 逐个候选尝试 `am start -n`。
+     *
+     * 车机版地图的显式主界面（高德 `MainMapActivity`、百度 `NaviAutoActivity`）在
+     * 部分定制固件/版本上可能不存在，写死单点会让地图屏黑着且日志只有一句 `Starting:` 缺失。
+     * 因此首个候选失败即回退到 launcher 解析出的 component，并把每次尝试记进日志。
+     */
+    private fun startMapApp(
+        component: ComponentName,
+        displayId: Int,
+        forceNewTask: Boolean,
+        extraArgs: String = "",
+    ): Shell.Result {
+        val suffix =
+            (if (forceNewTask) " -f 0x18000000" else "") +
+                (if (extraArgs.isEmpty()) "" else " $extraArgs")
+        var last: Shell.Result? = null
+        for (target in mapLaunchCandidates(component)) {
+            val result = Shell.exec("am start -n $target --display $displayId$suffix", timeoutMs = 8000)
+            val ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
+            if (ok) return result
+            logSink?.invoke(
+                "LAUNCH(${component.packageName}): 入口 $target 启动失败（${result.output.take(80)}）——尝试下一个候选",
+            )
+            last = result
+        }
+        return last ?: Shell.exec("am start -n ${component.flattenToShortString()} --display $displayId$suffix", timeoutMs = 8000)
+    }
 
     /**
      * 一次 `dumpsys activity activities` 解析出「displayId → 包 → 任务 ID 列表」。
@@ -1244,14 +1275,8 @@ object VirtualLauncher {
                 logSink?.invoke("LAUNCHER: 未找到任何地图应用（白名单内）——地图 tile 空")
                 return
             }
-        val target =
-            if (component.packageName == "com.autonavi.amapauto") {
-                "com.autonavi.amapauto/.MainMapActivity"
-            } else {
-                component.flattenToShortString()
-            }
         // 不带 MULTIPLE_TASK：任务已在地图屏时等价于带回前台
-        val result = Shell.exec("am start -n $target --display $mapDisplayId", timeoutMs = 8000)
+        val result = startMapApp(component, mapDisplayId, forceNewTask = false)
         logSink?.invoke(
             "LAUNCHER: 默认地图 ${component.packageName} → 地图屏（display=$mapDisplayId）ok=" +
                 (result.ok && result.output.contains("Starting:", ignoreCase = true)) +
@@ -1306,24 +1331,33 @@ object VirtualLauncher {
                 }
             }
         }
-        val target =
-            if (component.packageName == "com.autonavi.amapauto") {
-                "com.autonavi.amapauto/.MainMapActivity --windowingMode 1"
-            } else {
-                component.flattenToShortString()
+        var ok: Boolean
+        val result: Shell.Result
+        if (isMapPackage(component.packageName)) {
+            // 地图屏不可用（mapDisplayId < 0）时的回退：仍按车机版主界面启动，
+            // 但落到应用屏并强制全屏窗口模式。
+            result = startMapApp(component, targetDisplay, forceNewTask = !onTarget, extraArgs = "--windowingMode 1")
+            ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
+            if (!ok && onTarget) {
+                val retry =
+                    startMapApp(component, targetDisplay, forceNewTask = true, extraArgs = "--windowingMode 1")
+                ok = retry.ok && retry.output.contains("Starting:", ignoreCase = true)
             }
-        val result =
-            if (onTarget) {
-                Shell.exec("am start -n $target --display $targetDisplay", timeoutMs = 8000)
-            } else {
-                // MULTIPLE_TASK：即使该应用在其他屏有任务，也强制在目标屏新建实例
-                Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
+        } else {
+            val target = component.flattenToShortString()
+            result =
+                if (onTarget) {
+                    Shell.exec("am start -n $target --display $targetDisplay", timeoutMs = 8000)
+                } else {
+                    // MULTIPLE_TASK：即使该应用在其他屏有任务，也强制在目标屏新建实例
+                    Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
+                }
+            ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
+            if (!ok && onTarget) {
+                // 复用路径失败（任务可能已被系统移走）：退回 MULTIPLE_TASK 新建
+                val retry = Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
+                ok = retry.ok && retry.output.contains("Starting:", ignoreCase = true)
             }
-        var ok = result.ok && result.output.contains("Starting:", ignoreCase = true)
-        if (!ok && onTarget) {
-            // 复用路径失败（任务可能已被系统移走）：退回 MULTIPLE_TASK 新建
-            val retry = Shell.exec("am start -n $target --display $targetDisplay -f 0x18000000", timeoutMs = 8000)
-            ok = retry.ok && retry.output.contains("Starting:", ignoreCase = true)
         }
         logSink?.invoke(
             "LAUNCH(${component.packageName}): hi=$wantHi disp=$targetDisplay onTarget=$onTarget ok=$ok " +
@@ -1398,29 +1432,70 @@ object VirtualLauncher {
 
     fun launchableApps(context: Context): List<AppEntry> = scanLaunchableApps(context)
 
+    /**
+     * 扫描所有可启动应用（桌面网格与设置页共用）。
+     *
+     * 三处必须容错（2026-10-23 用户反馈「部分 app 没被扫描出来」后复查）：
+     *  1. **不再 `take(200)`**：旧实现把上限写在 `sortedBy` **之前**，取的是
+     *     `queryIntentActivities` 返回顺序的前 200 个——应用装得多时后面的直接丢失，
+     *     且丢哪些取决于系统返回顺序（看起来像「随机漏几个」）。现在全部保留。
+     *  2. **逐应用 try/catch**：`loadLabel`/`loadIcon` 对资源异常的 APK 会抛
+     *     `Resources.NotFoundException` 等；旧实现是 Sequence 链，一个坏应用就让
+     *     `toList()` 整体抛出 → 桌面**一个应用都不显示**。现在单个失败就跳过并计数。
+     *  3. **同包去重**：一个包可以有多个 launcher activity（实测 K40 上 83 个
+     *     activity 只对应 82 个包，com.android.contacts 有 4 个），旧实现会重复显示。
+     *
+     * 仍然查不到的应用属于 Android 包可见性/多用户层面，不在本函数的控制范围：
+     *  - 工作资料（work profile）、应用分身/双开运行在别的 userId 下，
+     *    `queryIntentActivities` 只返回当前用户的；
+     *  - ROM 的「应用隐藏」功能会让应用对本进程不可见；
+     *  - 只有 LEANBACK/自定义 category 入口的应用不属于 LAUNCHER 语义。
+     */
     private fun scanLaunchableApps(context: Context): List<AppEntry> {
         val pm = context.packageManager
         val intent =
             android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
                 addCategory(android.content.Intent.CATEGORY_LAUNCHER)
             }
+        val resolved =
+            try {
+                pm.queryIntentActivities(intent, 0)
+            } catch (error: Throwable) {
+                logSink?.invoke("LAUNCHER: 应用扫描失败 - ${error.message}（桌面将为空）")
+                return emptyList()
+            }
+        var skipped = 0
+        val infos = resolved.mapNotNull { it.activityInfo }
+        // 同包多入口去重（策略见 dedupeLauncherPackages，有单测）：保留每个包的首个入口
+        val keepOrder = dedupeLauncherPackages(infos.map { it.packageName }, context.packageName)
+        val firstInfoByPackage = LinkedHashMap<String, android.content.pm.ActivityInfo>(keepOrder.size)
+        infos.forEach { info -> firstInfoByPackage.putIfAbsent(info.packageName, info) }
         // 拼音键每应用只算一次（此前在比较器里逐对重复转写，150 应用 ≈ 上千次 ICU 调用）
-        return pm
-            .queryIntentActivities(intent, 0)
-            .asSequence()
-            .map { it.activityInfo }
-            .filter { it.packageName != context.packageName }
-            .map { info ->
-                val label = info.loadLabel(pm).toString()
-                AppEntry(
-                    component = ComponentName(info.packageName, info.name),
-                    label = label,
-                    icon = info.loadIcon(pm),
-                ) to pinyinKey(label)
-            }.take(200)
-            .toList()
-            .sortedBy { it.second }
-            .map { it.first }
+        val apps =
+            keepOrder
+                .mapNotNull { firstInfoByPackage[it] }
+                .mapNotNull { info ->
+                    // 单个应用 loadLabel/loadIcon 抛异常不能拖垮整张列表
+                    runCatching {
+                        val label = info.loadLabel(pm).toString().ifBlank { info.packageName }
+                        AppEntry(
+                            component = ComponentName(info.packageName, info.name),
+                            label = label,
+                            icon = info.loadIcon(pm),
+                        ) to pinyinKey(label)
+                    }.onFailure {
+                        skipped++
+                    }.getOrNull()
+                }
+        if (skipped > 0 || resolved.size != apps.size) {
+            // 诊断留痕：用户反馈「少应用」时，凭这一行就能区分
+            // 「系统只给了这么多 / 同包多入口被合并」与「标签/图标加载失败被跳过」
+            logSink?.invoke(
+                "LAUNCHER: 应用扫描 系统返回 ${resolved.size} 个 activity → ${apps.size} 个应用" +
+                    if (skipped > 0) "（跳过 $skipped 个：标签/图标加载失败）" else "（同包多入口已合并）",
+            )
+        }
+        return apps.sortedBy { it.second }.map { it.first }
     }
 
     /** 字母导航条分组键：数字→"#"，ASCII 字母→大写字母，汉字→拼音首字母。 */
@@ -1541,4 +1616,21 @@ object VirtualLauncher {
         val label: String,
         val icon: Drawable,
     )
+}
+
+/**
+ * 应用扫描结果的**去重与过滤**（[VirtualLauncher.scanLaunchableApps] 的纯函数部分）。
+ *
+ * 抽出来是为了可单测：旧实现用 `take(200)` 且**写在排序之前**，应用多的机型上
+ * 会按系统返回顺序砍掉尾部、表现为「偶尔漏几个 app」（2026-10-23 用户反馈）。
+ *
+ * @param candidates 系统 `queryIntentActivities` 的 packageName 序列（保持原顺序）
+ * @param selfPackage 本应用包名（不出现在桌面）
+ */
+internal fun dedupeLauncherPackages(
+    candidates: List<String>,
+    selfPackage: String,
+): List<String> {
+    val seen = HashSet<String>(candidates.size)
+    return candidates.filter { pkg -> pkg != selfPackage && seen.add(pkg) }
 }

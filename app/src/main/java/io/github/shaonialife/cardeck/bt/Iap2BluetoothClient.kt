@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
+import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import io.github.shaonialife.cardeck.transport.Iap2LinkChannel
 import io.github.shaonialife.cardeck.transport.StreamDuplexStream
 import java.io.IOException
@@ -34,6 +35,12 @@ class Iap2BluetoothClient(
     private val onWifiCredentials: (Iap2SenderSession.WifiConfiguration) -> Unit = {},
     /** Phase 1 之后车机补发 0x4301（CarPlay 窗口晚开）时交给主控热更新端点。 */
     private val onEndpointUpdate: (Iap2SenderSession.CarPlayEndpoint) -> Unit = {},
+    /** 发送端链路断开（保活泵退出）时通知主控（释放僵尸轮次，见 SessionController.onSenderLinkClosed）。 */
+    private val onLinkClosed: () -> Unit = {},
+    /** 本进程已知的车机热点 SSID（本轮无新凭据时沿用，避免每轮 8 秒拆链）。 */
+    private val knownCarSsid: () -> String? = { null },
+    /** 0x1D01 画像判定的链路代际（Phase 1 完成后回调，AirPlay 阶段分派用）。 */
+    private val onGeneration: (ReceiverProfile.LinkGeneration) -> Unit = {},
     /** 目标车机（动态读取：选择后无需重启链路，下一轮尝试即生效）。 */
     private val targetProvider: () -> TargetDevicePrefs.Target? = { null },
 ) {
@@ -343,7 +350,17 @@ class Iap2BluetoothClient(
         val channel = Iap2LinkChannel(stream, name = "iap2-bt-car") { line -> log(line) }
         activeChannel = channel
         try {
-            channel.runSenderSession(context, SESSION_TIMEOUT_MILLIS, log, onEndpoint, onWifiCredentials, onEndpointUpdate)
+            channel.runSenderSession(
+                context,
+                SESSION_TIMEOUT_MILLIS,
+                log,
+                onEndpoint,
+                onWifiCredentials,
+                onEndpointUpdate,
+                onLinkClosed,
+                knownCarSsid,
+                onGeneration,
+            )
         } catch (error: IOException) {
             log("BT-C: SESSION 失败 - ${error.message}")
         } finally {

@@ -753,7 +753,8 @@ class GridActivity : AppCompatActivity() {
                 view.isFocusable = true
                 view.isFocusableInTouchMode = false
                 view.foreground =
-                    androidx.core.content.ContextCompat.getDrawable(this@GridActivity, R.drawable.focus_ring)
+                    androidx.core.content.ContextCompat
+                        .getDrawable(this@GridActivity, R.drawable.focus_ring)
                 grid.addView(
                     view,
                     GridLayout.LayoutParams().apply {

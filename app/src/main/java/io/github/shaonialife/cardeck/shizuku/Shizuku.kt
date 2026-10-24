@@ -187,6 +187,34 @@ object CarInputClient {
     var service: ICarInput? = null
         private set
 
+    /**
+     * 等待 UserService 就绪（阻塞，**只能在后台线程调用**）。
+     *
+     * 会话刚激活时服务可能仍在 spawn——此时若立刻判定「受信屏不可用」而回退应用侧
+     * PUBLIC 屏，会白白丢掉受信屏的 IME/触摸优势，且回退路径对 UserService 依赖更重
+     * （2026-10-22 K60E：首次触摸就注入失败，日志里「三屏创建(回退)」）。
+     *
+     * @return 就绪的 service；超时返回 null（调用方按原有回退逻辑处理）。
+     */
+    fun awaitReady(
+        context: Context,
+        timeoutMs: Long = 3_000L,
+    ): ICarInput? {
+        service?.let { return it }
+        ensure(context)
+        val deadline = android.os.SystemClock.uptimeMillis() + timeoutMs
+        while (android.os.SystemClock.uptimeMillis() < deadline) {
+            service?.let { return it }
+            try {
+                Thread.sleep(50)
+            } catch (_: InterruptedException) {
+                return service
+            }
+            ensure(context)
+        }
+        return service
+    }
+
     @Volatile
     private var binding = false
 
@@ -292,29 +320,42 @@ object CarInputClient {
                 name: ComponentName?,
                 binder: IBinder?,
             ) {
-                service = ICarInput.Stub.asInterface(binder)
+                // ⚠️ 本回调由 Shizuku 库 post 到**主线程**（ShizukuServiceConnection 用
+                // new Handler(Looper.getMainLooper())）。因此这里**绝不能**做阻塞调用：
+                // ping() 是跨进程 binder 调用，服务进程忙（建虚拟屏/注入）时可能阻塞
+                // 数百毫秒甚至更久，一旦主线程被堵，后续所有回调排队、binding 永久为真
+                // ——2026-10-22 K60E 真机定谳的「注入必然死锁」正是这条链。
+                val bound = ICarInput.Stub.asInterface(binder)
+                service = bound
                 binding = false
-                val ok =
-                    try {
-                        service?.ping() == true
-                    } catch (_: Throwable) {
-                        false
+                bindingSince = 0L
+                Bg.run("shizuku-ping") {
+                    val ok =
+                        try {
+                            bound?.ping() == true
+                        } catch (_: Throwable) {
+                            false
+                        }
+                    diag("connected ping=$ok", force = true)
+                    if (!ok) {
+                        // 只有仍是本次绑定的结果才清空（期间可能已重绑成功）
+                        if (service === bound) {
+                            service = null
+                            binding = false
+                        }
+                    } else {
+                        // 绑定成功后顺手回收旧版本残留进程（其持有的虚拟屏跨进程无法释放，
+                        // 只有进程回收才能让屏消失）。后台线程执行：内部含 shell ps/kill。
+                        reapStaleUserServices()
                     }
-                diag("connected ping=$ok")
-                if (!ok) {
-                    service = null
-                    binding = false
-                } else {
-                    // 绑定成功后顺手回收旧版本残留进程（其持有的虚拟屏跨进程无法释放，
-                    // 只有进程回收才能让屏消失）。后台线程执行：内部含 shell ps/kill。
-                    Bg.run("stale-user-service-reap") { reapStaleUserServices() }
                 }
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
-                diag("service disconnected")
+                diag("service disconnected", force = true)
                 service = null
                 binding = false
+                bindingSince = 0L
             }
         }
 
@@ -322,39 +363,75 @@ object CarInputClient {
     @Volatile
     private var lastBindAttemptAt = 0L
 
+    /** 本次绑定发起时刻（判「回调迟迟不来」用；0 = 当前无进行中的绑定）。 */
+    @Volatile
+    private var bindingSince = 0L
+
     /**
-     * 确保 UserService 已绑定。可高频调用：service 为空且距上次尝试 >3s 时自动重绑
+     * 确保 UserService 已绑定。可高频调用：service 为空且距上次尝试 >1.5s 时自动重绑
      * （手机重启/Shizuku 重启后 binder 可能丢失而进程残留，需主动重建连接）。
+     *
+     * **本方法可能在主线程被调用**（MainActivity 的启动探测），而 bindUserService 是
+     * 同步 binder 调用——统一改投后台，主线程只做一次转手。
      */
     fun ensure(context: Context) {
         val app = context.applicationContext
         appContext = app
-        if (!binderListenerAdded) {
-            binderListenerAdded = true
-            try {
-                rikka.shizuku.Shizuku.addBinderReceivedListener {
-                    android.util.Log.i(TAG, "binder received -> rebind")
-                    binding = false
-                    appContext?.let { ensure(it) }
-                }
-                rikka.shizuku.Shizuku.addBinderDeadListener {
-                    android.util.Log.w(TAG, "binder dead")
-                    service = null
-                    binding = false
-                }
-            } catch (_: Throwable) {
-            }
+        addBinderListeners()
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            // 不在主线程做 binder 调用：回调本身也走主 Looper，这里堵住等于自锁
+            Bg.run("shizuku-bind") { ensureInternal(app) }
+            return
         }
+        ensureInternal(app)
+    }
+
+    private fun addBinderListeners() {
+        if (binderListenerAdded) return
+        binderListenerAdded = true
+        try {
+            rikka.shizuku.Shizuku.addBinderReceivedListener {
+                // Shizuku 服务端（重新）起来了：旧连接必然失效，允许重新绑定一次
+                diag("Shizuku binder 已就绪——重新绑定 UserService", force = true)
+                binding = false
+                bindingSince = 0L
+                lastBindAttemptAt = 0L
+                appContext?.let { Bg.run("shizuku-bind") { ensureInternal(it) } }
+            }
+            rikka.shizuku.Shizuku.addBinderDeadListener {
+                diag("Shizuku binder 断开（服务端退出/重启）——触摸注入暂不可用", force = true)
+                service = null
+                binding = false
+                bindingSince = 0L
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun ensureInternal(app: Context) {
         if (service != null) return
         val now = android.os.SystemClock.uptimeMillis()
         // 1.5s 节流：Shizuku 被系统冻结期间绑定会静默失败，解冻后需要尽快恢复
-        if (now - lastBindAttemptAt < 1_500L) return
-        // 关键修复（2026-10-09）：binding=true 但 service 长期为空 = 上次绑定静默失败
-        // （Shizuku 被冻结时常见），必须解除卡死状态，否则重试被永久挡住
-        // （表现为"必须强行停止 App 重开才恢复"）。
+        if (now - lastBindAttemptAt < BIND_THROTTLE_MS) return
+        // **只在「等得太久」时才重新发起**。旧实现固定 1.5s 就判卡死，且重绑前会
+        // unbindUserService(remove=true)——那会把刚起来的服务进程**直接杀掉**：
+        //   Shizuku 的 connected 回调 post 到主线程 → 主线程一忙回调就晚到 →
+        //   1.5s 后被判「卡死」→ 杀进程 → 重新 spawn → 回调又晚到 → 再杀……
+        // 这是自持抖动，永不收敛（2026-10-22 K60E 真机：注入失败 1700+ 次、
+        // 每 2~3 秒刷一次「绑定卡死状态已解除」）。
+        // 现在：等待窗口放宽到 8s，且**绝不在这里杀服务进程**（重绑是幂等的，
+        // Shizuku 会把已在运行的服务 binder 再次回调过来）。
         if (binding) {
+            val waited = if (bindingSince == 0L) 0L else now - bindingSince
+            if (!shouldRebind(binding = true, waitedMs = waited, stuckTimeoutMs = BIND_STUCK_TIMEOUT_MS)) {
+                // 仍在正常等待：不打日志、不打断
+                return
+            }
             binding = false
-            diag("绑定卡死状态已解除（binding 超时未回调），立即重试")
+            diag(
+                "绑定等待 ${waited}ms 仍未回调——重新发起（不杀服务进程）",
+                force = true,
+            )
         }
         lastBindAttemptAt = now
         val gate = ShizukuGate.state(app)
@@ -363,6 +440,7 @@ object CarInputClient {
             return
         }
         binding = true
+        bindingSince = now
         try {
             val args =
                 userServiceArgs ?: rikka.shizuku.Shizuku
@@ -374,21 +452,19 @@ object CarInputClient {
                     // 版本号取 APK lastUpdateTime（见 serviceVersion 注释）
                     .version(serviceVersion())
                     .also { userServiceArgs = it }
-            // 重绑前先解绑旧连接（清掉可能残留的 binder 状态）
-            if (hasBoundOnce) {
-                runCatching { rikka.shizuku.Shizuku.unbindUserService(args, conn, true) }
-            }
+            // **绝不 unbindUserService(remove=true)**：那个参数会 kill 远端服务进程。
+            // 旧实现在每次重试前都调用它 → 把刚 spawn 起来的进程杀掉 → 回调永远等不到
+            // → 再重试再杀，形成自持抖动（2026-10-22 K60E 注入必然死锁的根因之一）。
+            // bindUserService 本身幂等：服务已在运行时 Shizuku 会把现有 binder 再次
+            // 回调到同一个 ServiceConnection（Set 去重），无需先解绑。
             rikka.shizuku.Shizuku.bindUserService(args, conn)
-            hasBoundOnce = true
-            diag("bindUserService requested")
+            diag("bindUserService requested（等待回调，超时 ${BIND_STUCK_TIMEOUT_MS}ms）")
         } catch (e: Throwable) {
             binding = false
+            bindingSince = 0L
             diag("bindUserService failed: ${e.message}")
         }
     }
-
-    @Volatile
-    private var hasBoundOnce = false
 
     /**
      * UserService 版本 = APK lastUpdateTime（秒）。Shizuku 按「组件+进程名+版本」复用
@@ -409,4 +485,36 @@ object CarInputClient {
         }
 
     private const val TAG = "CarInputClient"
+
+    /** 两次绑定发起之间的最小间隔（Shizuku 被冻结时绑定会静默失败，解冻后需尽快恢复）。 */
+    private const val BIND_THROTTLE_MS = 1_500L
+
+    /**
+     * 判定「本次绑定卡死」的等待上限。
+     *
+     * 必须远大于正常回调延迟：Shizuku 的 connected 回调 post 到主线程，而服务进程本身
+     * 要 spawn + 加载 dex（调试包更慢）。旧值 1.5s 与节流窗等长，导致「发起 → 1.5s 后
+     * 判死 → 杀进程重来」的自持抖动（2026-10-22 K60E 实测每 2~3 秒刷一次）。
+     */
+    private const val BIND_STUCK_TIMEOUT_MS = 8_000L
 }
+
+/**
+ * 「这次绑定是否该判卡死并重发」的纯函数（[CarInputClient] 的绑定状态机核心）。
+ *
+ * 拆成纯函数是为了钉死一个真机定谳的回归（2026-10-22 Redmi K60E）：旧实现在
+ * 「距上次发起 ≥1.5s」时就无条件判卡死，**而这个窗口与正常回调延迟同量级**——
+ * Shizuku 的 connected 回调 post 到主线程，服务进程还要 spawn + 加载 dex，
+ * 1.5s 常常不够。判死后旧代码还会 `unbindUserService(remove=true)` 把刚起来的
+ * 服务进程杀掉，于是「发起 → 判死 → 杀 → 再发起」永不收敛，触摸注入从第一次
+ * 触碰起就全灭（日志每 2~3 秒刷「绑定卡死状态已解除」）。
+ *
+ * @param binding 当前是否有进行中的绑定
+ * @param waitedMs 该次绑定已等待多久（[binding] 为 false 时忽略）
+ * @return true = 应重发；false = 继续等（或本就空闲可以发起）
+ */
+internal fun shouldRebind(
+    binding: Boolean,
+    waitedMs: Long,
+    stuckTimeoutMs: Long,
+): Boolean = !binding || waitedMs >= stuckTimeoutMs

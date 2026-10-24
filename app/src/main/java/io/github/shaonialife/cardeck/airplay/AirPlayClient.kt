@@ -9,7 +9,9 @@ import io.github.shaonialife.cardeck.audio.AudioTuning
 import io.github.shaonialife.cardeck.iap2.Iap2Csm
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
+import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import io.github.shaonialife.cardeck.net.EndpointHosts
+import io.github.shaonialife.cardeck.net.TcpLiveness
 import io.github.shaonialife.cardeck.util.DeviceIdentity
 import java.io.IOException
 import java.net.Inet6Address
@@ -32,6 +34,12 @@ class AirPlayClient(
     initialEndpoint: Iap2SenderSession.CarPlayEndpoint,
     private val log: (String) -> Unit,
     private val context: Context? = null,
+    /**
+     * 车机链路代际（蓝牙侧 0x1D01 画像判定，见 [ReceiverProfile.linkGenerationOf]）。
+     * 2026-10-23 二次定谳后仅用于日志——marker 协商策略全代际统一（不完成链路协商
+     * 车机 ~10s 拆链；切屏靠协商完成后的 modesChanged 重申）。
+     */
+    private val linkGeneration: ReceiverProfile.LinkGeneration? = null,
     /**
      * 配对窗口内的端点刷新器（每轮重试前调用，必须非阻塞）：返回并入 mDNS 新结果后的
      * 端点，null = 无新信息。Audi MIB3 的 `_airplay._tcp` 常在首次解析之后才上线，
@@ -1310,6 +1318,21 @@ class AirPlayClient(
     /** 导航键（iDrive 旋钮/四向拨杆）：需要虚拟屏焦点，由会话层注入 DPAD。 */
     var onNavKey: ((Int) -> Unit)? = null
 
+    /**
+     * MIB3 隧道控制会话完成（auth+burst 已发）回调：宿主据此调度 modesChanged
+     * 资源重申 burst（AADisplay r17 时序 +1.5/4/12/30s）。082446 定谳：不重申的
+     * 话车机全程健康却永不切到 CarPlay 画面。
+     */
+    var onTunnelControlSessionComplete: (() -> Unit)? = null
+
+    /** MIB3 虚拟链路是否已布防（armMib3 成功）——拆链归因用：布防了但控制会话没完成就被拆 = 链路看门狗，与音频档位无关。 */
+    var mib3LinkArmed: Boolean = false
+        private set
+
+    /** MIB3 控制会话是否完成过（auth+burst 已发）。 */
+    var mib3ControlSessionDone: Boolean = false
+        private set
+
     /** 虚拟链路唯一实例（出站路由/三形态语义见 [VirtualIap2Link]）。 */
     private fun obtainIapLink(): VirtualIap2Link =
         iapLink ?: synchronized(this) {
@@ -1323,6 +1346,10 @@ class AirPlayClient(
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
                     it.onNavKey = { keyCode -> onNavKey?.invoke(keyCode) }
+                    it.onControlSessionComplete = {
+                        mib3ControlSessionDone = true
+                        onTunnelControlSessionComplete?.invoke()
+                    }
                     it.begin()
                     iapLink = it
                 }
@@ -1341,7 +1368,10 @@ class AirPlayClient(
     private fun armMib3VirtualLink() {
         if (cipher == null) return
         if (iapTunnel != null) return // DiPlay 隧道形态：不需要（也不该）布防
+        val generation = linkGeneration ?: ReceiverProfile.LinkGeneration.EVENT_LINK
+        obtainIapLink().setGeneration(generation)
         obtainIapLink().armMib3()
+        mib3LinkArmed = true
     }
 
     /**
@@ -2074,6 +2104,8 @@ class AirPlayClient(
             socket.connect(InetSocketAddress(resolveAddress(host), setup.eventPort), 5_000)
             socket.tcpNoDelay = true
             socket.soTimeout = 30_000
+            // 事件通道同样是长连接：对端消失时要能自己发现（见 TcpLiveness 注释）。
+            TcpLiveness.configure(socket, "事件通道", log)
             log("EVENT: ✓ 已连接事件通道 $host:${setup.eventPort}（${if (sessionKey != null) "加密" else "明文"}）")
             val cipher =
                 sessionKey?.let { secret ->
@@ -2285,6 +2317,9 @@ class AirPlayClient(
                 // 读由独立读线程负责（阻塞等数据），请求超时由待响应表的 poll 控制；
                 // 这里若留 soTimeout，读线程会周期性收到 SocketTimeoutException 而退出
                 newSocket.soTimeout = 0
+                // 对端健康检查：内核默认 keepalive 要等 2 小时才开始探测，而车机熄火/
+                // 走出热点时链路常不发 RST，读线程会一直挂着（画面冻结、看门狗不触发）。
+                TcpLiveness.configure(newSocket, "控制通道", log)
                 socket = newSocket
                 activeAddress = address
                 activeHost = addressLiteral(address)
