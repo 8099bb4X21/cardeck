@@ -8,6 +8,8 @@ import io.github.shaonialife.cardeck.util.Bg
 import io.github.shaonialife.cardeck.util.DebugFileLog
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.security.MessageDigest
 import java.util.ArrayDeque
 
 /**
@@ -34,6 +36,10 @@ object BridgeClient {
     /** 最近一次断连/失败原因（状态行倒计时附带展示）。 */
     @Volatile
     private var lastDisconnectReason: String? = null
+
+    /** 本进程已安装 APK 的 sha256（差分基线，hello 上报；版本键控缓存避免每次重算） */
+    @Volatile
+    private var cachedBaseSha: String? = null
 
     /**
      * 设置页状态行：处于退避重连时附加「Ns 后自动重试」倒计时——断连对用户必须是
@@ -264,17 +270,45 @@ object BridgeClient {
                 mainHandler.post { BridgeOverlay.show(appContext, message, dismissMillis = 8_000) }
             }
 
-            "apk.offer" ->
+            "apk.offer" -> {
+                val delta = msg.optJSONObject("delta")
                 ReinstallFlow.offer(
                     appContext,
                     msg.optString("url"),
                     msg.optString("sha256"),
                     msg.optString("version"),
+                    deltaUrl = delta?.optString("url").takeIf { !it.isNullOrBlank() },
+                    deltaSha256 = delta?.optString("sha256").takeIf { !it.isNullOrBlank() },
+                    baseSha256 = delta?.optString("baseSha256").takeIf { !it.isNullOrBlank() },
+                    deltaSizeKB = delta?.optInt("sizeKB", -1)?.takeIf { it > 0 },
                 )
+            }
 
             "ping" -> send(JSONObject().put("t", "pong").put("id", msg.optString("id")))
         }
     }
+
+    /**
+     * 已安装 APK 的 sha256（差分基线）。15MB 哈希 ~50ms，只在进程首个 hello 时算一次
+     * （结果按版本号落 prefs，重连直接读缓存）；失败返回 null（服务器只走全量）。
+     */
+    private fun baseSha256(ctx: Context): String? =
+        runCatching {
+            BridgePrefs.baseApkSha(ctx, BuildConfig.VERSION_NAME)?.let { return it }
+            val source = File(ctx.applicationInfo.sourceDir)
+            val digest = MessageDigest.getInstance("SHA-256")
+            source.inputStream().use { input ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    digest.update(buf, 0, n)
+                }
+            }
+            val sha = digest.digest().joinToString("") { "%02x".format(it) }
+            BridgePrefs.setBaseApkSha(ctx, BuildConfig.VERSION_NAME, sha)
+            sha
+        }.getOrNull()
 
     private fun sendHello() {
         val ctx = appContext ?: return
@@ -287,6 +321,7 @@ object BridgeClient {
                 .put("appVersion", BuildConfig.VERSION_NAME)
                 .put("code", BridgePrefs.pairCode(ctx))
                 .put("lastSeq", DebugFileLog.lastSeq)
+                .put("baseSha256", cachedBaseSha ?: baseSha256(ctx)?.also { cachedBaseSha = it } ?: "")
         send(hello)
     }
 

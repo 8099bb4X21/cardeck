@@ -64,6 +64,33 @@ MCP 工具：`bridge_status` / `logs_tail(device,lines)` / `logs_fetch(device,si
 - 日志含热点名/蓝牙地址，README 与 App 内均已向用户明示。
 - 命令白名单扩充走 `BridgeCommands` 单点评审，禁止加任意 shell/反射类命令。
 
+## 差分更新（2026-10-24 落地，实测省 72%~97% 流量）
+
+车友测试一轮推多次包，全量 15MB 走蜂窝太贵。字节级块差分（rsync 式）：
+
+- **服务端**（`src/deltadiff.ts`）：`public/` 历史 APK 按 sha256 自动建基线索引；
+  设备 hello 上报自己已安装 APK（`sourceDir`）的 sha256；offer 时基线命中即生成
+  COPY/LITERAL 补丁（FNV-1a 4KB 块 + 贪心延伸），收益不足全量 60% 不生成。
+  实测 15128KB → 440~4223KB。
+- **设备端**（`bridge/DeltaPatch.kt`）：下补丁 → 用本进程 `sourceDir` 作基线拼装
+  → 产物 sha256 强校验 → 进安装流程。任一失败无条件回退全量下载（差分只是优化）。
+- **协议契约（两端硬约定，勿单独改动）**：头 88B = magic(8) + targetLen(8) +
+  targetSha(32) + baseLen(8) + baseSha(32)；**u64 一律大端**（设备端 Kotlin
+  `readLong` 只读大端——首版 LE + 头缓冲 72<88 截断 baseSha，差分首跳静默回退
+  全量，真机抓到后修正）。
+
+## 安装确认三重保险与悬浮窗豁免（2026-10-24 实测定谳）
+
+- PENDING_USER_ACTION 的系统确认 Intent，从后台 Receiver 直接 `startActivity`
+  在荣耀上会被**静默拦截**（无异常、无界面、无失败回执）——豁免条件是应用持有
+  **悬浮窗权限（SYSTEM_ALERT_WINDOW）**。`.rd` 包首次使用必须开「显示在其他应用
+  上层」：安装确认、断连悬浮提示、稳定复现引导三者都依赖它。
+- 三重保险（`InstallReceiver` + `BridgeSetupActivity`）：① 直启确认 Intent
+  （前台宽限期内有效）；② 拉起调试设置页由**前台 Activity 转发**（必然生效）；
+  ③ 悬浮窗豁免兜底。即便如此推送安装仍需用户当时在看手机。
+- 差分信息全程透出：接收日志「差分包 XKB」、确认弹窗「差分包 XKB · 完整包 YMB」
+  （该文案只在差分真正成功时出现，静默回退时仅显示完整包大小）。
+
 ## 构建命令（flavor 化后）
 
 ```bash

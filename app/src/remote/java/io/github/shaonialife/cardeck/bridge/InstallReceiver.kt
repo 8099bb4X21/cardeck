@@ -24,8 +24,11 @@ class InstallReceiver : BroadcastReceiver() {
                     intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT) ?: return
                 DebugFileLog.append(context, "BRIDGE: 需用户确认 → ${confirm.component}")
                 confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                ReinstallFlow.pendingConfirmIntent = confirm
+                // 双保险：直启（前台宽限期内有效）+ 前台设置页转发（兜底，必然可见）
                 runCatching { context.startActivity(confirm) }
                     .onFailure { DebugFileLog.append(context, "BRIDGE: 确认界面启动失败 - ${it.message}") }
+                BridgeSetupActivity.startForConfirm(context)
             }
 
             PackageInstaller.STATUS_SUCCESS -> {

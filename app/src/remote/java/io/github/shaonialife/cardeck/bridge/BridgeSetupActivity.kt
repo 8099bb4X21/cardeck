@@ -204,9 +204,27 @@ class BridgeSetupActivity : AppCompatActivity() {
             "install" -> {
                 val path = intent.getStringExtra("apkPath") ?: return
                 val version = intent.getStringExtra("version") ?: "?"
-                promptInstall(File(path), version)
+                promptInstall(File(path), version, intent.getStringExtra("deltaNote"))
             }
             "resume" -> promptResume()
+            "confirm" -> {
+                // 安装确认的前台转发：系统确认框从后台 Receiver 直接拉起会被
+                // 荣耀静默拦截（无异常无界面），由前台 Activity 启动必然生效
+                val confirm = ReinstallFlow.pendingConfirmIntent
+                if (confirm == null) {
+                    android.widget.Toast
+                        .makeText(this, "安装确认已失效——请重新推送", android.widget.Toast.LENGTH_LONG)
+                        .show()
+                } else {
+                    ReinstallFlow.pendingConfirmIntent = null
+                    runCatching { startActivity(confirm) }
+                        .onFailure {
+                            android.widget.Toast
+                                .makeText(this, "安装确认启动失败：${it.message}", android.widget.Toast.LENGTH_LONG)
+                                .show()
+                        }
+                }
+            }
         }
     }
 
@@ -214,13 +232,15 @@ class BridgeSetupActivity : AppCompatActivity() {
     fun promptInstall(
         file: File,
         version: String,
+        deltaNote: String? = null,
     ) {
         if (!file.exists()) return
+        val sizeText = deltaNote ?: "完整包 ${file.length() / 1024 / 1024}MB"
         DarkMessageDialog.show(
             this,
             title = "安装调试新版本",
             message =
-                "v$version（${file.length() / 1024 / 1024}MB）已下载并校验通过。\n" +
+                "v$version（$sizeText）已下载并校验通过。\n" +
                     "安装将断开当前车机连接，完成后会询问是否继续调试。",
             actions =
                 listOf(
@@ -265,6 +285,18 @@ class BridgeSetupActivity : AppCompatActivity() {
         private var resumedRef: WeakReference<BridgeSetupActivity>? = null
 
         fun resumed(): BridgeSetupActivity? = resumedRef?.get()
+
+        /** 安装确认前台转发：把设置页带到前台，由它启动系统确认界面。 */
+        fun startForConfirm(context: android.content.Context) {
+            runCatching {
+                context.startActivity(
+                    Intent()
+                        .setClassName(context.packageName, ReinstallFlow.SETUP_ACTIVITY)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        .putExtra(EXTRA_PROMPT, "confirm"),
+                )
+            }
+        }
 
         /** 供 App 后台场景带参拉起本页并弹续接询问。 */
         fun startForResume(context: android.content.Context) {

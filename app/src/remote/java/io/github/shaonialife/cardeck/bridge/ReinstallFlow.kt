@@ -24,6 +24,15 @@ import java.security.MessageDigest
 object ReinstallFlow {
     private val main = Handler(Looper.getMainLooper())
 
+    /**
+     * 系统安装确认 Intent（PENDING_USER_ACTION 广播携带）。荣耀实测：从
+     * BroadcastReceiver 直接 startActivity 该 Intent 会被静默拦截（无异常、
+     * 无界面、无失败回执）——.rd 无悬浮窗权限不受后台启动豁免。改由
+     * [BridgeSetupActivity] 前台转发（2026-10-24）。
+     */
+    @Volatile
+    var pendingConfirmIntent: Intent? = null
+
     /** 设置页组件（绝对类名，am/intent 用；applicationId 后缀不影响）。 */
     const val SETUP_ACTIVITY = "io.github.shaonialife.cardeck.bridge.BridgeSetupActivity"
 
@@ -48,26 +57,96 @@ object ReinstallFlow {
         url: String,
         sha256: String,
         version: String,
+        deltaUrl: String? = null,
+        deltaSha256: String? = null,
+        baseSha256: String? = null,
+        deltaSizeKB: Int? = null,
     ) {
         val ctx = context?.applicationContext ?: return
         if (url.isBlank()) return
-        DebugFileLog.append(ctx, "BRIDGE: 收到新版本推送 v$version，开始下载 $url")
+        DebugFileLog.append(
+            ctx,
+            "BRIDGE: 收到新版本推送 v$version（" +
+                if (deltaUrl.isNullOrBlank()) {
+                    "全量"
+                } else {
+                    "差分包 ${deltaSizeKB ?: "?"}KB" +
+                        "）"
+                },
+        )
         Bg.run("bridge-apk-download") {
-            // 大包跨公网传输可能中途断流（蜂窝弱信号实测），重试一次
-            val file = download(ctx, url) ?: download(ctx, url)
+            // 差分优先：典型 15MB → 0.1~2MB（蜂窝流量友好）。任何一步失败都
+            // 无条件回退全量下载——差分只是优化，绝不阻塞更新。
+            var file: File? = null
+            var deltaNote: String? = null
+            if (!deltaUrl.isNullOrBlank() && !deltaSha256.isNullOrBlank()) {
+                file = tryDelta(ctx, deltaUrl, deltaSha256, baseSha256, version)
+                if (file == null) {
+                    DebugFileLog.append(ctx, "BRIDGE: 差分更新未成——回退全量下载")
+                } else if (deltaSizeKB != null) {
+                    deltaNote = "差分包 ${deltaSizeKB}KB · 完整包 ${file.length() / 1024 / 1024}MB"
+                }
+            }
             if (file == null) {
-                DebugFileLog.append(ctx, "BRIDGE: APK 下载失败：$url")
-                return@run
+                DebugFileLog.append(ctx, "BRIDGE: 开始下载 $url")
+                // 大包跨公网传输可能中途断流（蜂窝弱信号实测），重试一次
+                file = download(ctx, url) ?: download(ctx, url)
+                if (file == null) {
+                    DebugFileLog.append(ctx, "BRIDGE: APK 下载失败：$url")
+                    return@run
+                }
+                val digest = sha256Of(file)
+                if (sha256.isNotBlank() && !digest.equals(sha256, ignoreCase = true)) {
+                    DebugFileLog.append(ctx, "BRIDGE: APK 校验失败（本地=$digest 期望=$sha256）——拒绝安装")
+                    file.delete()
+                    return@run
+                }
             }
-            val digest = sha256Of(file)
-            if (sha256.isNotBlank() && !digest.equals(sha256, ignoreCase = true)) {
-                DebugFileLog.append(ctx, "BRIDGE: APK 校验失败（本地=$digest 期望=$sha256）——拒绝安装")
-                file.delete()
-                return@run
-            }
-            DebugFileLog.append(ctx, "BRIDGE: 新版本 v$version 就绪（${file.length() / 1024 / 1024}MB，sha256 ✓）")
-            promptInstallReady(ctx, file, version)
+            DebugFileLog.append(
+                ctx,
+                "BRIDGE: 新版本 v$version 就绪（${file.length() / 1024 / 1024}MB，sha256 ✓" +
+                    (deltaNote?.let { "，$it" } ?: "") + "）",
+            )
+            promptInstallReady(ctx, file, version, deltaNote)
         }
+    }
+
+    /**
+     * 差分路径：下补丁 → 用本进程 sourceDir 作基线拼装 → 产物 sha256 强校验。
+     * 返回 null = 任何失败（调用方回退全量）。
+     */
+    private fun tryDelta(
+        ctx: Context,
+        deltaUrl: String,
+        deltaSha256: String,
+        baseSha256: String?,
+        version: String,
+    ): File? {
+        if (baseSha256.isNullOrBlank()) return null
+        val patch =
+            download(ctx, deltaUrl) ?: run {
+                DebugFileLog.append(ctx, "BRIDGE: 差分包下载失败")
+                return null
+            }
+        val patchDigest = sha256Of(patch)
+        if (!patchDigest.equals(deltaSha256, ignoreCase = true)) {
+            DebugFileLog.append(ctx, "BRIDGE: 差分包校验失败（本地=$patchDigest 期望=$deltaSha256）")
+            patch.delete()
+            return null
+        }
+        val base = File(ctx.applicationInfo.sourceDir)
+        val out = File(ctx.cacheDir, "bridge-update-delta.apk")
+        val error = DeltaPatch.apply(patch, base, out)
+        if (error != null) {
+            DebugFileLog.append(ctx, "BRIDGE: 差分应用失败（$error）——v$version")
+            out.delete()
+            patch.delete()
+            return null
+        }
+        val patchKB = patch.length() / 1024
+        patch.delete()
+        DebugFileLog.append(ctx, "BRIDGE: 差分应用成功（补丁 ${patchKB}KB + 基线 → ${out.length() / 1024 / 1024}MB）——v$version")
+        return out
     }
 
     /**
@@ -79,11 +158,12 @@ object ReinstallFlow {
         ctx: Context,
         file: File,
         version: String,
+        deltaNote: String? = null,
     ) {
         main.post {
             val activity = BridgeSetupActivity.resumed()
             if (activity != null) {
-                activity.promptInstall(file, version)
+                activity.promptInstall(file, version, deltaNote)
             } else {
                 runCatching {
                     ctx.startActivity(
@@ -92,7 +172,8 @@ object ReinstallFlow {
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             .putExtra("prompt", "install")
                             .putExtra("apkPath", file.absolutePath)
-                            .putExtra("version", version),
+                            .putExtra("version", version)
+                            .putExtra("deltaNote", deltaNote),
                     )
                 }
             }

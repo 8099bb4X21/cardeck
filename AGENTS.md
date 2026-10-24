@@ -643,6 +643,15 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   ① remote 变体的 Shizuku/通知使用权需单独授权（新包名）；② 重装前必须先
   `SessionController.disconnect` 释放虚拟屏（否则安装确认弹窗落车机侧没人点得到）；
   ③ 命令白名单扩充走 `BridgeCommands` 单点评审，禁止任意 shell。
+  ④ **差分更新**（2026-10-24 实测省 72%~97% 流量）：块差分协议与三重校验详见
+     `docs/REMOTE-DEBUG-DESIGN.md`；**头部 u64 一律大端**（设备端 readLong 只读
+     大端，LE + 头缓冲写短曾是「差分首跳静默回退全量」的真凶）；设备端任一校验
+     失败无条件回退全量。
+  ⑤ **`.rd` 包必须开悬浮窗权限**：安装确认 Intent 从后台 Receiver 拉起会被荣耀
+     静默拦截（豁免条件=SYSTEM_ALERT_WINDOW），断连提示/复现引导也依赖它；
+     安装确认另有前台 Activity 转发兜底（InstallReceiver → BridgeSetupActivity）。
+  ⑥ remote 变体禁自动暗幕（`ScreenDimmer.autoDimAllowed=false`，排障要看屏幕），
+     常亮与手动假息屏保留。
 - **远程调试桥真机联调五雷**（2026-10-21 全链路打通时逐一定谳，含组件命名/网络/安装三族）：
   ① **`.rd` 包下自启组件必须写「applicationId/绝对类名」**：`am -n` 只认带斜杠的规范，
   相对类名按 applicationId 展开成不存在的 `…rd.launcher.DockActivity`、纯类名直接

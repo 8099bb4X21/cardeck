@@ -52,6 +52,29 @@ object BridgePrefs {
     /** 重装前置位：新版本首次启动时弹「继续进入调试模式？」。 */
     fun resumePending(context: Context): Boolean = prefs(context).getBoolean(KEY_RESUME, false)
 
+    // ---- 差分基线 sha 缓存（版本键控：装新包后自然失效重算）----
+
+    fun baseApkSha(
+        context: Context,
+        version: String,
+    ): String? {
+        val p = prefs(context)
+        if (p.getString("baseApkShaVer", "") != version) return null
+        return p.getString("baseApkSha", null)
+    }
+
+    fun setBaseApkSha(
+        context: Context,
+        version: String,
+        sha: String,
+    ) {
+        prefs(context)
+            .edit()
+            .putString("baseApkShaVer", version)
+            .putString("baseApkSha", sha)
+            .apply()
+    }
+
     fun setResumePending(
         context: Context,
         value: Boolean,
