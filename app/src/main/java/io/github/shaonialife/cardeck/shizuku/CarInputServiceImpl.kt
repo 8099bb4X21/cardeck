@@ -594,69 +594,79 @@ class CarInputServiceImpl(
      * 系统仍认为屏幕亮着 → 不锁屏、不进 Doze，虚拟屏继续出帧。
      */
     override fun setPhysicalScreenPower(on: Boolean): Boolean {
-        val token = internalDisplayToken()
-        if (token == null) {
-            fileLog("setPhysicalScreenPower($on) 失败：拿不到物理屏 token")
-            return false
-        }
-        val ok = setDisplayPowerMode(token, if (on) POWER_MODE_NORMAL else POWER_MODE_OFF)
+        val ok = setPanelPower(on)
         if (ok) physicalScreenOff = !on
         fileLog("setPhysicalScreenPower($on) ok=$ok")
         return ok
     }
 
-    private fun setDisplayPowerMode(
-        token: IBinder,
-        mode: Int,
-    ): Boolean =
-        try {
+    /**
+     * 面板电源统一核心（两套实现的合并点，2026-10-24）：
+     * token 三路枚举按「实测通过率」排序（任何 ROM 只要有一路可用就能工作）；
+     * 断电/点亮统一走 SurfaceControl.setDisplayPowerMode 反射。
+     */
+    private fun setPanelPower(on: Boolean): Boolean {
+        val token =
+            physicalDisplayToken() ?: run {
+                fileLog("setPanelPower($on) 失败：各入口都拿不到内置屏 token")
+                return false
+            }
+        val mode = if (on) POWER_MODE_NORMAL else POWER_MODE_OFF
+        return try {
             Class
                 .forName("android.view.SurfaceControl")
                 .getMethod("setDisplayPowerMode", IBinder::class.java, Integer.TYPE)
                 .invoke(null, token, mode)
             true
         } catch (t: Throwable) {
-            fileLog("SurfaceControl.setDisplayPowerMode($mode) 失败：$t")
+            fileLog("setPanelPower($on) 失败：$t")
             false
         }
+    }
 
     /**
-     * 物理主屏 token。Android 14（SDK 34）删除了 `SurfaceControl.getPhysicalDisplayIds /
-     * getPhysicalDisplayToken`，改由 `com.android.server.display.DisplayControl` 提供——
-     * 它在 services.jar 里，必须用 `ClassLoaderFactory` + `SYSTEMSERVERCLASSPATH` 造一个
-     * 类加载器才能看到（scrcpy 同款做法），并把 `android_servers` 加载进该 ClassLoader，
-     * 否则 JNI 方法是未注册状态（UnsatisfiedLinkError）。
+     * 物理主屏 token，三路按序回退（不同 ROM 删改面不同，全试最稳）：
+     * ① SurfaceControl.getInternalDisplayToken——荣耀 A17（SDK 37）实测唯一可用，
+     *    放首位（MagicOS 保留了这条「更老」API）；
+     * ② DisplayControl 类加载器——SDK 34+ 的正统入口（scrcpy 同款：services.jar 里的
+     *    类要 ClassLoaderFactory + android_servers JNI 才可见）；
+     * ③ SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken——Android 11~14 旧入口。
+     * 首个物理屏 id 即内置屏（AOSP 约定数组首元素为默认屏）。
      */
-    private fun internalDisplayToken(): IBinder? {
-        if (Build.VERSION.SDK_INT >= 34) {
-            displayControlClass?.let { cls ->
-                try {
-                    val ids = cls.getMethod("getPhysicalDisplayIds").invoke(null) as LongArray
-                    if (ids.isNotEmpty()) {
-                        return cls
-                            .getMethod("getPhysicalDisplayToken", Long::class.javaPrimitiveType!!)
-                            .invoke(null, ids[0]) as? IBinder
-                    }
-                } catch (t: Throwable) {
-                    fileLog("DisplayControl 取 token 失败：$t")
-                }
+    // BlockedPrivateApi/DEPRECATION：本方法刻意走隐藏/废弃 API（UserService 跑在 shell
+    // 域不受应用层 hidden API 强制约束；三路回退的运行时行为已真机实证）。
+    @android.annotation.SuppressLint("BlockedPrivateApi")
+    @Suppress("DEPRECATION")
+    private fun physicalDisplayToken(): IBinder? {
+        // ① getInternalDisplayToken（部分 ROM 的 SurfaceControl 仍保留）
+        runCatching {
+            val sc = SurfaceControl::class.java
+            (sc.getDeclaredMethod("getInternalDisplayToken").invoke(null) as? IBinder)?.let {
+                fileLog("token via getInternalDisplayToken")
+                return it
             }
+        }.onFailure { fileLog("getInternalDisplayToken 入口失败：${it.message}") }
+        // ② DisplayControl（新系统：方法已从 SurfaceControl 迁出）
+        displayControlClass?.let { cls ->
+            runCatching {
+                val ids = cls.getMethod("getPhysicalDisplayIds").invoke(null) as LongArray
+                val id = ids.firstOrNull() ?: return@runCatching
+                (cls.getMethod("getPhysicalDisplayToken", Long::class.javaPrimitiveType!!).invoke(null, id) as? IBinder)?.let {
+                    fileLog("token via DisplayControl id=$id")
+                    return it
+                }
+            }.onFailure { fileLog("DisplayControl token 入口失败：${it.message}") }
         }
-        // SDK < 34（或上面的路径失败）：SurfaceControl 的旧 API
-        try {
-            val sc = Class.forName("android.view.SurfaceControl")
-            val token =
-                runCatching { sc.getMethod("getInternalDisplayToken").invoke(null) }
-                    .getOrElse {
-                        val ids = sc.getMethod("getPhysicalDisplayIds").invoke(null) as LongArray
-                        sc
-                            .getMethod("getPhysicalDisplayToken", Long::class.javaPrimitiveType!!)
-                            .invoke(null, ids[0])
-                    }
-            return token as? IBinder
-        } catch (t: Throwable) {
-            fileLog("SurfaceControl 取 token 失败：$t")
-        }
+        // ③ getPhysicalDisplayIds/getPhysicalDisplayToken（Android 11~14）
+        runCatching {
+            val sc = SurfaceControl::class.java
+            val ids = sc.getDeclaredMethod("getPhysicalDisplayIds").invoke(null) as LongArray
+            val id = ids.firstOrNull() ?: return@runCatching
+            (sc.getDeclaredMethod("getPhysicalDisplayToken", Long::class.javaPrimitiveType).invoke(null, id) as? IBinder)?.let {
+                fileLog("token via SurfaceControl.getPhysicalDisplayToken id=$id")
+                return it
+            }
+        }.onFailure { fileLog("getPhysicalDisplayToken 入口失败：${it.message}") }
         return null
     }
 
@@ -718,83 +728,10 @@ class CarInputServiceImpl(
 
     override fun ping(): Boolean = injector != null
 
-    override fun setScreenPower(on: Boolean): Boolean =
-        try {
-            val token = builtInDisplayToken()
-            if (token == null) {
-                fileLog("setScreenPower($on) 失败：各入口都拿不到内置屏 token")
-                false
-            } else {
-                val mode = if (on) powerModeNormal else powerModeOff
-                screenPowerMethod().invoke(null, token, mode)
-                fileLog("setScreenPower($on) ok mode=$mode")
-                true
-            }
-        } catch (t: Throwable) {
-            fileLog("setScreenPower($on) failed: $t")
-            false
-        }
-
-    /**
-     * 内置屏 token：静态方法随系统版本迁移，逐级回退并留痕——
-     * ① SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken（Android 11~14）
-     * ② DisplayControl.getPhysicalDisplayIds/getPhysicalDisplayToken（新系统入口，@hide 类）
-     * ③ SurfaceControl.getInternalDisplayToken（更老 API，部分 ROM 仍保留）
-     * 首个物理屏 id 即内置屏（AOSP 约定数组首元素为默认屏）。
-     */
-    // BlockedPrivateApi：本方法就是刻意走隐藏 API（UserService 跑在 shell 域，不受应用层
-    // hidden API 强制约束；三分支运行时行为已真机实证）。
-    @android.annotation.SuppressLint("BlockedPrivateApi")
-    private fun builtInDisplayToken(): Any? {
-        val sc = SurfaceControl::class.java
-        // ① SurfaceControl
-        runCatching {
-            val ids = sc.getDeclaredMethod("getPhysicalDisplayIds").invoke(null) as LongArray
-            val id = ids.firstOrNull() ?: return@runCatching
-            val token = sc.getDeclaredMethod("getPhysicalDisplayToken", Long::class.javaPrimitiveType).invoke(null, id)
-            if (token != null) {
-                fileLog("token via SurfaceControl id=$id")
-                return token
-            }
-        }.onFailure { fileLog("SurfaceControl token 入口失败：$it") }
-        // ② DisplayControl（新系统：SurfaceControl 上的两个方法已迁出）
-        runCatching {
-            val dc = Class.forName("android.hardware.display.DisplayControl")
-            val ids = dc.getDeclaredMethod("getPhysicalDisplayIds").invoke(null) as LongArray
-            val id = ids.firstOrNull() ?: return@runCatching
-            val token = dc.getDeclaredMethod("getPhysicalDisplayToken", Long::class.javaPrimitiveType).invoke(null, id)
-            if (token != null) {
-                fileLog("token via DisplayControl id=$id")
-                return token
-            }
-        }.onFailure { fileLog("DisplayControl token 入口失败：$it") }
-        // ③ 内部屏旧入口
-        return runCatching {
-            val token = sc.getDeclaredMethod("getInternalDisplayToken").invoke(null)
-            if (token != null) fileLog("token via getInternalDisplayToken")
-            token
-        }.onFailure {
-            fileLog("getInternalDisplayToken 入口失败：$it")
-        }.getOrNull()
-    }
-
-    @Volatile
-    private var screenPowerMethodCache: Method? = null
-
-    // SoonBlockedPrivateApi：setDisplayPowerMode 对普通应用会被逐步封锁，但 UserService
-    // 跑在 shell 域不受约束（真机实证：断电/恢复均已生效）。
-    @android.annotation.SuppressLint("SoonBlockedPrivateApi")
-    private fun screenPowerMethod(): Method {
-        screenPowerMethodCache?.let { return it }
-        // 常量 reflective 读 + 字面量兜底：POWER_MODE_OFF=0 / POWER_MODE_NORMAL=2（AOSP 稳定值）
-        try {
-            powerModeNormal = SurfaceControl::class.java.getField("POWER_MODE_NORMAL").getInt(null)
-            powerModeOff = SurfaceControl::class.java.getField("POWER_MODE_OFF").getInt(null)
-        } catch (_: Throwable) {
-        }
-        return SurfaceControl::class.java
-            .getDeclaredMethod("setDisplayPowerMode", IBinder::class.java, Integer.TYPE)
-            .also { screenPowerMethodCache = it }
+    override fun setScreenPower(on: Boolean): Boolean {
+        val ok = setPanelPower(on)
+        fileLog("setScreenPower($on) ok=$ok")
+        return ok
     }
 
     override fun diag(): String =
@@ -834,7 +771,5 @@ class CarInputServiceImpl(
         private const val POWER_MODE_NORMAL = 2
 
         /** SurfaceControl 显示电源模式（@hide；AOSP 定义 OFF=0 / NORMAL=2，反射失败时兜底用）。 */
-        private var powerModeOff = 0
-        private var powerModeNormal = 2
     }
 }
