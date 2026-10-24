@@ -297,6 +297,11 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   窗口表面会被剥离，唤醒后表面重挂在本 ROM 上不稳定（活动 RESUMED 但 mHasSurface=
   false，靠后续亮屏稳态/活动重启恢复）——所以「按电源键」场景仍需产品侧配合：
   引导用「假息屏」而非电源键。
+  **「连接时真息屏」（PR17，2026-10-24 合入）默认关**（设置→显示，用户要求）：
+  断电由暗幕承载（`enterDimNow`，同手动假息屏路径）——面板断电后触摸 IC 实测
+  仍工作（荣耀：黑屏下触摸直达 UI），点暗幕即唤醒；暗幕同时是口袋误触盾。
+  **按电源键 = 真休眠 = 车机冻结风险**（Keyguard/表面剥离，本 ROM 不稳），
+  正确姿势是点暗幕、别按电源键；降级路径（暗幕不可用）裸断电只能按电源键救。
   **真·假息屏已实现（2026-10-23 真机验证）**：`ICarInput.setScreenPower(on)` 在
   UserService 里反射 `SurfaceControl.setDisplayPowerMode(token, POWER_MODE_OFF/NORMAL)`
   （需要 ACCESS_SURFACE_FLINGER，shell 已持有）。系统保持交互态 → 虚拟屏零影响

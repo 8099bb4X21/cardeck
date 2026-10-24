@@ -334,6 +334,22 @@ object ScreenDimmer {
     }
 
     /**
+     * 「连接时真息屏」的收口出口（SessionController 恢复路径调用）：
+     * 撤暗幕 + 恢复面板供电 + 清断电标记（幂等——没断过电时只是无害空跑）。
+     * 与 [onUserInteraction] 的区别：这里是**程序化收口**（关开关/会话退役/启动恢复），
+     * 不重排自动计时；断电期间暗幕承载触摸检测（点击暗幕即唤醒，用户实测触摸
+     * IC 在面板断电后仍工作），所以撤暗幕必须与恢复供电同步做。
+     */
+    fun exitPanelOff() {
+        val h = handler ?: return
+        panelOffByUs = false
+        h.post {
+            if (dimShown) hideDim()
+            setPanelPower(true)
+        }
+    }
+
+    /**
      * 真休眠（按电源键）与解锁的生命周期收口：
      * - SCREEN_OFF：面板交还系统电源管理（清标记）、撤暗幕、停计时——锁屏界面自己就是
      *   「遮蔽 + 防误触」，暗幕留着只会在解锁后变成要多点一下的残留（2026-10-23 用户实测）。

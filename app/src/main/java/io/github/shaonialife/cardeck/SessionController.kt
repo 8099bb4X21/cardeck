@@ -669,15 +669,25 @@ object SessionController {
                     // 无密码 / SmartLock 场景顺手划开锁屏；安全锁会失败，忽略即可
                     Shell.exec("wm dismiss-keyguard", 3_000L)
                 }
-                val ok = CarInputClient.setPhysicalScreenPower(false)
-                phoneScreenOff = ok
-                appendLog(
-                    if (ok) {
-                        "SCREEN: 物理屏已断电（真息屏；系统保持唤醒，虚拟屏照常渲染，按电源键两次可恢复）"
-                    } else {
-                        "SCREEN: 物理屏断电失败（ROM 未给 shell 权限 / 取不到 display token）——继续用暗幕"
-                    },
-                )
+                // 断电由暗幕承载（2026-10-24 用户实测定谳：面板断电后触摸 IC 仍工作，
+                // 点击暗幕即唤醒；暗幕同时是口袋误触盾——没有它，兜里触摸会点到前台应用）。
+                // enterDimNow = 上暗幕 + 断面板电 + 记账（panelOffByUs），与手动假息屏同路。
+                if (ScreenDimmer.isAttached()) {
+                    ScreenDimmer.enterDimNow()
+                    phoneScreenOff = true
+                    appendLog("SCREEN: 真息屏已进入（暗幕承载触摸检测——点暗幕唤醒，无需按电源键）")
+                } else {
+                    // 暗幕不可用（缺悬浮窗权限）降级裸断电：无触摸唤醒手段，只能按电源键
+                    val ok = CarInputClient.setPhysicalScreenPower(false)
+                    phoneScreenOff = ok
+                    appendLog(
+                        if (ok) {
+                            "SCREEN: 物理屏已断电（暗幕不可用——无触摸唤醒手段，按电源键两次可恢复）"
+                        } else {
+                            "SCREEN: 物理屏断电失败（ROM 未给 shell 权限 / 取不到 display token）"
+                        },
+                    )
+                }
             }
         }
     }
@@ -711,6 +721,8 @@ object SessionController {
                     Shell.exec("input keyevent KEYCODE_SLEEP", 4_000L)
                     appendLog("SCREEN: 车机侧断开——已让手机休眠（面板保持黑）")
                 } else {
+                    // 暗幕承载的断电态在这里收口：撤暗幕 + 恢复面板电（幂等）
+                    ScreenDimmer.exitPanelOff()
                     val ok = CarInputClient.setPhysicalScreenPower(true)
                     appendLog("SCREEN: 物理屏已恢复点亮 ok=$ok")
                 }

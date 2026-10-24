@@ -26,7 +26,9 @@ object DisplayPrefs {
     const val MOVE_THROTTLE_MAX = 48
 
     /** 连接时真息屏（物理面板断电）默认值。 */
-    const val SCREEN_OFF_DEFAULT = true
+    // 默认**关**（2026-10-24 用户要求）：连接成功就断面板对多数人太激进，
+    // 想要的人在 设置→显示 手动开启（开关保留，只改默认值）
+    const val SCREEN_OFF_DEFAULT = false
 
     /** HID 原始报文日志默认值：默认关（校准键位时临时打开，避免刷屏）。 */
     const val HID_RAW_LOG_DEFAULT = false
