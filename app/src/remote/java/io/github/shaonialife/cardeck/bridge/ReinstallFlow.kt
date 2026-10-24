@@ -33,6 +33,14 @@ object ReinstallFlow {
     @Volatile
     var pendingConfirmIntent: Intent? = null
 
+    /**
+     * 本次提交的安装会话 id。PENDING/SUCCESS 广播按它过滤——今天多次失败尝试
+     * 的遗留会话其广播可能迟到，异会话的确认 Intent 曾把新版安装引到旧版
+     * 「安装成功页」（2026-10-24 用户实拍：点了安装却看到旧版成功页+完成）。
+     */
+    @Volatile
+    var currentInstallSessionId: Int = -1
+
     /** 设置页组件（绝对类名，am/intent 用；applicationId 后缀不影响）。 */
     const val SETUP_ACTIVITY = "io.github.shaonialife.cardeck.bridge.BridgeSetupActivity"
 
@@ -191,11 +199,15 @@ object ReinstallFlow {
         Bg.run("bridge-install") {
             try {
                 val installer = ctx.packageManager.packageInstaller
+                // 遗留会话（先前失败尝试停在 PENDING 的）会堵后续安装、其迟到的
+                // 状态广播还会串台——每次提交前先清一遍自己的旧会话
+                abandonStaleSessions(ctx)
                 // 必须先 createSession 拿到会话 id 再 openSession——直接 openSession(0)
                 // 会抛 SecurityException「Caller has no access to session 0」
                 // （2026-10-21 真机实测：悬浮窗点了没反应，安装从未发起）
                 val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
                 val sessionId = installer.createSession(params)
+                currentInstallSessionId = sessionId
                 val session = installer.openSession(sessionId)
                 session.openWrite("apk", 0, file.length()).use { out ->
                     file.inputStream().use { it.copyTo(out) }

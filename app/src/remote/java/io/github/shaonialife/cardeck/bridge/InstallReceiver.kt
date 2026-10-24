@@ -17,6 +17,12 @@ class InstallReceiver : BroadcastReceiver() {
     ) {
         val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, Integer.MIN_VALUE)
         val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
+        val sessionId = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1)
+        // 只认本次提交的会话：遗留会话的迟到广播会把确认 Intent 串成旧包
+        if (ReinstallFlow.currentInstallSessionId != -1 && sessionId != ReinstallFlow.currentInstallSessionId) {
+            DebugFileLog.append(context, "BRIDGE: 忽略异会话广播（session=$sessionId 当前=${ReinstallFlow.currentInstallSessionId}）")
+            return
+        }
         DebugFileLog.append(context, "BRIDGE: 安装状态 status=$status msg=$message")
         when (status) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
@@ -25,9 +31,9 @@ class InstallReceiver : BroadcastReceiver() {
                 DebugFileLog.append(context, "BRIDGE: 需用户确认 → ${confirm.component}")
                 confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 ReinstallFlow.pendingConfirmIntent = confirm
-                // 双保险：直启（前台宽限期内有效）+ 前台设置页转发（兜底，必然可见）
-                runCatching { context.startActivity(confirm) }
-                    .onFailure { DebugFileLog.append(context, "BRIDGE: 确认界面启动失败 - ${it.message}") }
+                // 只走前台转发单一路径：Receiver 直启 + 前台转发会双启动同一确认
+                // Intent，荣耀安装器被打进怪状态（2026-10-24 实拍「旧版成功页」）。
+                // 悬浮窗权限（后台启动豁免）已由用户开启，前台转发必然可达。
                 BridgeSetupActivity.startForConfirm(context)
             }
 
