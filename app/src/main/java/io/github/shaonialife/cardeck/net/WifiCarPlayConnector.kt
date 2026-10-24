@@ -16,18 +16,18 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * 用车机热点承载 CarPlay 流量。
  *
- * **两种入网方式，默认应用专属网络**：
- *  - [joinCarPlayNetwork]：`WifiNetworkSpecifier` 请求「只对本进程可见」的 WiFi。
- *    系统不会把它保存成普通网络、也不会设为默认网络——其它应用（微信/地图/导航）
- *    继续走 4G/5G。这是无互联网车机热点的正确形态：否则系统会把它当成「已连接但
- *    无网络」的默认 WiFi，部分 ROM 会连带关掉移动数据，用户一上车就断网。
- *  - [bindCurrentWifi]：旧路径，绑定「任意已连接的 WiFi」。仅在用户手动到 WLAN
- *    设置连了热点（系统级网络）时兜底用。
+ * **两种入网方式（2026-10-22 起默认静默命令行）**：
+ *  - 静默路径（默认，见 `SessionController.joinCarWifiSilently`）：Shizuku 执行
+ *    `cmd wifi connect-network`，系统直接把热点连上（**0 弹窗**），随后
+ *    [bindCurrentWifi] 用**不带 specifier** 的 `requestNetwork` 捕获 `Network` 句柄并绑定。
+ *  - [joinCarPlayNetwork]：`WifiNetworkSpecifier` 应用专属网络——静默路径不可用时的兜底。
+ *    网络只对本进程可见（不保存、不成为默认网络），但首次加入会弹系统确认框。
  *
  * 关键点：
  *  - 请求不带 `NET_CAPABILITY_INTERNET`，系统不会因「无互联网」拆连接；
- *  - 应用专属网络必须 `bindProcessToNetwork` 后再建 socket / 注册 mDNS；
- *  - 首次连接会弹系统确认框；SSID 必须精确匹配（热点名可能带空格/中文）。
+ *  - 两条路径都必须 `bindProcessToNetwork` 后再建 socket / 注册 mDNS——mDNS 广播
+ *    (`NsdManager.registerService`) 没有 Network 参数，只能跟随进程默认网络；
+ *  - SSID 必须精确匹配（热点名可能带空格/中文）：静默路径用 `cmd wifi status` 核对。
  */
 class WifiCarPlayConnector(
     private val context: Context,
@@ -121,7 +121,8 @@ class WifiCarPlayConnector(
     }
 
     /**
-     * 用应用专属网络（WifiNetworkSpecifier）加入车机热点。
+     * 用应用专属网络（`WifiNetworkSpecifier`）加入车机热点——**静默路径不可用时的兜底**。
+     * 首次加入会弹一次系统确认框；网络不保存、不成为默认网络。
      *
      * 阻塞直到连接成功/系统拒绝/超时（内部 200ms 分片，[isCancelled] 可即时退出）。
      * 成功后进程网络已绑定，调用方可直接注册 mDNS / 建 socket。
@@ -302,9 +303,11 @@ class WifiCarPlayConnector(
     }
 
     /**
-     * 绑定「当前已连接的 WiFi」（用户手动在系统设置里加入热点后的兜底路径）。
-     * 热点无互联网时系统可能不把它设为默认网络，必须显式 bindProcessToNetwork，
-     * 我们的 socket 才会走 WiFi 而不是蜂窝。
+     * 绑定「当前已连接的 WiFi」——静默命令行连网成功后用它捕获 `Network` 句柄。
+     *
+     * 请求**不带 specifier**（只声明 TRANSPORT_WIFI、移除 INTERNET），所以系统不会弹
+     * 任何确认框，也会把刚连上的车机 WiFi 立刻回调过来。热点无互联网时系统可能不把它
+     * 设为默认网络，必须显式 bindProcessToNetwork，我们的 socket / mDNS 才会走 WiFi。
      * 带看门狗：WiFi 未连接时 requestNetwork 会无限静默挂起——5 秒无果给出明确指引
      * （请求保持挂起，用户加入热点后仍会自动完成绑定并回调）。
      */
@@ -340,12 +343,13 @@ class WifiCarPlayConnector(
 
                 override fun onLost(network: Network) {
                     if (boundNetwork.compareAndSet(network, null)) {
+                        // 熄火/离开范围：解绑进程网络，否则所有 socket 继续指向死网络；
+                        // 并通知会话层（英雄卡不能停在「已连接」）。
+                        // 与 specifier 路径同语义：兜底入网（bindCurrentWifi）是奥迪 3315
+                        // 的主路径，不转发 onLost 会停在假「已连接」拖到心跳超时才死
+                        // （2026-10-23 审阅定谳）。
                         connectivityManager.bindProcessToNetwork(null)
                         log("WiFi: 绑定的 WiFi 网络已断开（$network）")
-                        // 与 specifier 路径同语义：热点断开（熄火/离开范围）必须让会话层
-                        // 立即知道。兜底入网（bindCurrentWifi）现在是奥迪 3315 的主路径，
-                        // 不转发 onLost 的话英雄卡会停在「已连接」、会话拖到心跳超时才死
-                        // （2026-10-23 审阅定谳）。
                         ssidHint?.let { onNetworkLost?.invoke(it) }
                     }
                 }

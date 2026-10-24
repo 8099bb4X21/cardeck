@@ -20,8 +20,10 @@ import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
 import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import io.github.shaonialife.cardeck.input.ConsumerKeys
+import io.github.shaonialife.cardeck.input.HidNavigation
 import io.github.shaonialife.cardeck.input.TouchReports
 import io.github.shaonialife.cardeck.input.TouchRouter
+import io.github.shaonialife.cardeck.launcher.VirtualLauncher
 import io.github.shaonialife.cardeck.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
 import io.github.shaonialife.cardeck.net.AirPlayFeatures
@@ -29,8 +31,10 @@ import io.github.shaonialife.cardeck.net.CarPlayCtrlAdvertiser
 import io.github.shaonialife.cardeck.net.CarPlayServiceBrowser
 import io.github.shaonialife.cardeck.net.EndpointHosts
 import io.github.shaonialife.cardeck.net.WifiCarPlayConnector
+import io.github.shaonialife.cardeck.net.WifiConnectCommand
 import io.github.shaonialife.cardeck.net.WifiSavedNetworks
 import io.github.shaonialife.cardeck.service.CarPlayService
+import io.github.shaonialife.cardeck.shizuku.CarInputClient
 import io.github.shaonialife.cardeck.shizuku.Shell
 import io.github.shaonialife.cardeck.shizuku.ShizukuGate
 import io.github.shaonialife.cardeck.ui.ScreenDimmer
@@ -124,6 +128,16 @@ object SessionController {
     private const val WIFI_BIND_WAIT_S = 15L
 
     /**
+     * `cmd wifi connect-network` 之后等系统真正关联上热点的时间窗。
+     * 命令本身只把「连接」投给 WifiService 就返回（exit=0 不代表已连上），
+     * 断开旧网 → 扫描 → 关联 → DHCP 实测 2~10s，5GHz 热点偏慢时更久。
+     */
+    private const val CAR_WIFI_JOIN_WAIT_MS = 25_000L
+
+    /** `cmd wifi set-wifi-enabled enabled` 之后等 WLAN 真正开启的时间窗。 */
+    private const val WIFI_ENABLE_WAIT_MS = 10_000L
+
+    /**
      * 等用户确认「连接车机热点」系统弹窗的上限（应用专属网络）。
      * 系统确认框可能停留很久；用户取消连接时 [connectCancelled] 会即时退出。
      */
@@ -141,6 +155,8 @@ object SessionController {
         AppOrientationCompat.diagSink = ::appendLog
         // 主线程调用 shell 的告警（历史上两次真机 ANR 都源于此；HKS 下 logcat 不可读）
         Shell.violationSink = ::appendLog
+        // HID 原始日志开关（键位校准）：静态标志从偏好初始化，进程冷启动也要生效
+        HidNavigation.rawLogEnabled = DisplayPrefs.hidRawLog(appContext!!)
     }
 
     /** 追加一行日志：logcat + 文件 + 进程级缓冲 + 挂屏渲染（增量行直送）。任意线程可调。 */
@@ -179,6 +195,26 @@ object SessionController {
         val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+    }
+
+    /**
+     * 旋钮/四向拨杆 → 方向键：注入**应用屏**虚拟显示（DPAD 需要焦点，不能全局分发）。
+     *
+     * 走 UserService 的 `injectInputEvent`（毫秒级）；失败回退 `input -d <id> keyevent`
+     * （多 ~30ms 但不会丢键）。dок 屏不参与——跨屏焦点需要 Launcher 侧改造，见
+     * docs/HID-KNOB.md。
+     */
+    private fun injectNavigationKey(keyCode: Int) {
+        // 优先注入「当前可见的应用屏」（桌面网格 / 打开中的应用屏），否则退回主应用屏
+        val displayId =
+            VirtualLauncher.activeAppDisplayId().takeIf { it > 0 }
+                ?: VirtualLauncher.appDisplayId
+        if (displayId <= 0) {
+            appendLog("HID: 应用屏未就绪（displayId=$displayId）——导航键忽略")
+            return
+        }
+        if (CarInputClient.keyEvent(displayId, keyCode)) return
+        Shell.exec("input -d $displayId keyevent $keyCode", 3_000L)
     }
 
     /**
@@ -470,6 +506,22 @@ object SessionController {
                     },
                 )
         }
+
+        // 上次进程若在物理息屏期间崩溃/被杀，面板会停在 OFF（UserService 是常驻 shell 进程，
+        // 它持有的电源状态不随应用进程消失）。新进程启动时恢复一次：此刻还没有会话，
+        // 恢复是安全的——否则用户拿到的是一块按不亮的黑屏（可按电源键两次救回）。
+        Bg.run("screen-power-startup-restore") {
+            if (ShizukuGate.state(context) != ShizukuGate.State.READY) return@run
+            val deadline = android.os.SystemClock.uptimeMillis() + 3_000L
+            while (android.os.SystemClock.uptimeMillis() < deadline && CarInputClient.service == null) {
+                CarInputClient.ensure(context)
+                Thread.sleep(150)
+            }
+            // 只恢复「已绑定服务」的情况：Shizuku 没起来时不必打扰用户（面板也不会是我们关的）
+            if (CarInputClient.service != null && !CarInputClient.setPhysicalScreenPower(true)) {
+                appendLog("SCREEN: 启动恢复物理屏失败（ROM 未授权 shell 电源控制）")
+            }
+        }
     }
 
     /** 状态行文本（Activity 渲染 statusText 用）。 */
@@ -571,12 +623,109 @@ object SessionController {
         }
     }
 
+    // ---- 物理屏真息屏（同 scrcpy -S/--turn-screen-off）----
+
+    /** 物理主屏是否被我们置为断电（只用于「要不要恢复」的判断，避免无谓的 AIDL 调用）。 */
+    @Volatile
+    private var phoneScreenOff = false
+
+    /**
+     * 电源切换串行化。enter/restore 都是 Bg 任务（cached 池不保证顺序），
+     * 不加锁会出现「restore 先跑完、enter 后跑」→ 会话都结束了面板还被关掉。
+     */
+    private val screenPowerLock = Any()
+
+    /**
+     * 会话进入「真息屏」：把**物理主屏**硬件断电，系统仍保持唤醒，虚拟屏照常出帧。
+     *
+     * 与暗幕的区别：暗幕只是一层黑 View，触摸层仍通电（口袋误触、耗电）；
+     * 这里是 SurfaceFlinger 级断电（触摸 IC 同步熄），观感等同锁屏，但**不锁屏**——
+     * 车机侧的高德/QQ 音乐不会被 Keyguard 挂起。
+     *
+     * 失败只记日志：ROM 没给 shell 权限或取不到 display token 时，最坏退回暗幕。
+     */
+    private fun enterPhoneScreenOff() {
+        val ctx = appContext ?: return
+        // 没有在推流就不必关屏（设置面板无会话时切换也会走到这里）
+        if (videoSender?.isRunning != true) return
+        Bg.run("screen-power-off") {
+            synchronized(screenPowerLock) {
+                if (phoneScreenOff) return@synchronized
+                // Bg 任务可能晚于会话结束才被执行：会话没了就绝不能再关屏
+                if (videoSender?.isRunning != true) {
+                    appendLog("SCREEN: 会话已结束——跳过物理息屏")
+                    return@synchronized
+                }
+                // 手机若正在休眠：先唤醒让框架把物理屏置 ON；否则我们设 OFF 之后，框架的
+                // 唤醒流程又会把面板点亮（两者抢同一个 SurfaceFlinger 电源状态）。
+                val interactive =
+                    runCatching {
+                        (ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
+                    }.getOrDefault(true)
+                if (!interactive) {
+                    appendLog("SCREEN: 手机处于休眠——先唤醒再物理息屏（避免框架把面板重新点亮）")
+                    Shell.exec("input keyevent KEYCODE_WAKEUP", 4_000L)
+                    Thread.sleep(400)
+                    // 无密码 / SmartLock 场景顺手划开锁屏；安全锁会失败，忽略即可
+                    Shell.exec("wm dismiss-keyguard", 3_000L)
+                }
+                val ok = CarInputClient.setPhysicalScreenPower(false)
+                phoneScreenOff = ok
+                appendLog(
+                    if (ok) {
+                        "SCREEN: 物理屏已断电（真息屏；系统保持唤醒，虚拟屏照常渲染，按电源键两次可恢复）"
+                    } else {
+                        "SCREEN: 物理屏断电失败（ROM 未给 shell 权限 / 取不到 display token）——继续用暗幕"
+                    },
+                )
+            }
+        }
+    }
+
+    /**
+     * 设置面板切「连接时真息屏」：会话中立即收放（没有会话时什么都不做）。
+     *
+     * 车机屏上就能操作，所以手机面板黑着也不影响切换；关掉会立刻把面板点亮。
+     */
+    fun applyScreenOffPreference(enabled: Boolean) {
+        if (enabled) {
+            enterPhoneScreenOff()
+        } else {
+            restorePhoneScreen(sleepIfCarSide = false)
+        }
+    }
+
+    /**
+     * 恢复物理屏点亮。幂等：没关过就什么都不做。
+     *
+     * @param sleepIfCarSide 车机侧断开（人在车外、手机在口袋）为 true：直接让手机休眠，
+     *   不先点亮面板（否则口袋里的手机会先亮一下再熄）；用户手动断开走 false。
+     */
+    private fun restorePhoneScreen(sleepIfCarSide: Boolean) {
+        Bg.run("screen-power-restore") {
+            synchronized(screenPowerLock) {
+                if (!phoneScreenOff) return@synchronized
+                phoneScreenOff = false
+                if (sleepIfCarSide) {
+                    // 保持 SurfaceFlinger 的 OFF 状态，让框架正常休眠；下次唤醒时框架会把面板置 ON
+                    Shell.exec("input keyevent KEYCODE_SLEEP", 4_000L)
+                    appendLog("SCREEN: 车机侧断开——已让手机休眠（面板保持黑）")
+                } else {
+                    val ok = CarInputClient.setPhysicalScreenPower(true)
+                    appendLog("SCREEN: 物理屏已恢复点亮 ok=$ok")
+                }
+            }
+        }
+    }
+
     /** 会话结束/新周期开始前彻底退役上一代会话（旧管线泄漏会累积编码器/虚拟显示器，最终 dequeueBuffer -19）。 */
     fun retireSession() {
         videoSender?.stop()
         videoSender = null
         // 暗幕/常亮随会话收掉（本方法在每轮配对起步也会执行，新一轮推流起来后会重新置位）
         ScreenDimmer.setSessionActive(false)
+        // 物理屏兜底恢复：崩溃/异常路径若把面板留在 OFF，这里不会让它烂在黑屏里
+        restorePhoneScreen(sleepIfCarSide = false)
         audioSender?.stop()
         audioSender = null
         currentSharedSecret = null
@@ -659,23 +808,40 @@ object SessionController {
     }
 
     /**
-     * 校对真实 WiFi 并加入车机热点（Shizuku shell，Android 12+ `cmd wifi`）：
-     *  1. `cmd wifi status` 查当前 SSID——已是车机热点直接绑定（快路径）；
-     *  2. 否则 `cmd wifi connect-network` 保存并切换（免系统弹窗、免输密码；
-     *     网络被系统保存，下次进入热点范围自动重连，契合上车即连）；
-     *  3. 轮询 SSID 确认切换完成后再绑定，各环节检查 [connectCancelled]——
-     *     用户取消后不得继续跑（否则 phaseHint 被覆盖、ctrl 广播被重新拉起，表现为「取消不了」）。
-     * Shizuku 未就绪/连接失败时回退「系统 WLAN 手动加入」指引（密码可经「去连接」复制）。
+     * 校对真实 WiFi 并加入车机热点。**静默路径优先**（2026-10-22 起）：
+     *  1. `cmd wifi set-wifi-enabled` + `cmd wifi connect-network`（Shizuku）：系统直接
+     *     连上热点，**0 弹窗、0 用户操作**；热点被存进系统配置，下次进入范围自动重连；
+     *  2. `requestNetwork(TRANSPORT_WIFI)`（**不带 specifier**）拿到 WiFi 的 `Network`
+     *     句柄并绑定进程网络——没有 specifier 就不会弹系统确认框；
+     *  3. 各环节检查 [connectCancelled]——用户取消后不得继续跑（否则 phaseHint 被覆盖、
+     *     ctrl 广播被重新拉起，表现为「取消不了」）。
+     * 静默路径失败（Shizuku 不可用/命令行连网失败）才退回应用专属网络
+     * （`WifiNetworkSpecifier`，首次加入会弹一次系统确认框）。
+     * 全失败时回退「系统 WLAN 手动加入」指引（密码可经「去连接」复制）。
      */
     private fun autoJoinCarWifi(wifi: Iap2SenderSession.WifiConfiguration) {
         Bg.run("wifi-auto-join") {
             val shellReady =
                 appContext?.let { ShizukuGate.state(it) == ShizukuGate.State.READY } == true
-            // 1) WLAN 开关。shell 不可用时跳过检查——requestNetwork 会以 Unavailable 反馈。
+            // 1) 首选静默路径：Shizuku 命令行连网（0 弹窗）
+            if (shellReady) {
+                if (joinCarWifiSilently(wifi) is WifiCarPlayConnector.JoinResult.Joined) return@run
+                if (connectCancelled) return@run
+                // 热点已连上、只是 Network 通道没绑成：绝不能退回 specifier——那会重新
+                // 关联热点并弹系统确认框（用户看到「连上了又弹窗」）。直接中止并提示重连。
+                if (shellWifiStatus().second == wifi.ssid) {
+                    phaseHint = "已连上车机热点但未能绑定网络——请重新连接"
+                    appendLog(
+                        "WIFI: 已连在 \"${wifi.ssid}\" 但 requestNetwork 未回调——本轮中止" +
+                            "（不退回会弹窗的 specifier 路径）",
+                    )
+                    return@run
+                }
+            }
+            // 2) 回退：应用专属网络（不影响 4G/5G、不会保存为系统网络）
             if (shellReady && shellWifiDisabled() && !waitForWifiEnabled()) return@run
             if (connectCancelled) return@run
-            // 2) 首选应用专属网络（不影响 4G/5G、不会被系统切回、不需要 Shizuku）
-            when (val result = joinCarWifiSpecifier(wifi, shellReady)) {
+            when (val result = joinCarWifiSpecifier(wifi)) {
                 is WifiCarPlayConnector.JoinResult.Joined -> Unit
 
                 WifiCarPlayConnector.JoinResult.Unsupported -> {
@@ -689,23 +855,151 @@ object SessionController {
     }
 
     /**
-     * 用应用专属网络（`WifiNetworkSpecifier`）加入车机热点，成功后进程网络已绑定。
-     *
-     * 先清掉系统里保存的同名热点：旧版本用 `cmd wifi connect-network` 存过它，
-     * 只要还在系统配置里，系统就会自动全局连接——无互联网热点于是被当成默认网络，
-     * 部分 ROM 连带断掉移动数据，正是本次要解决的场景。
+     * 端点先于 0x5703 到达（或上一轮换网失败）时的入网入口：静默路径优先，
+     * 静默失败再退回应用专属网络。
      */
-    private fun joinCarWifiSpecifier(
+    private fun joinCarWifi(
         wifi: Iap2SenderSession.WifiConfiguration,
         shellReady: Boolean,
     ): WifiCarPlayConnector.JoinResult {
+        if (!shellReady) return joinCarWifiSpecifier(wifi)
+        val silent = joinCarWifiSilently(wifi)
+        if (silent is WifiCarPlayConnector.JoinResult.Joined) return silent
+        // 热点已连上但通道没绑成：不再走会弹窗的 specifier（见 autoJoinCarWifi 同款判断）
+        if (!connectCancelled && shellWifiStatus().second == wifi.ssid) return silent
+        return joinCarWifiSpecifier(wifi)
+    }
+
+    /**
+     * 静默加入车机热点（**两步式，全程 0 弹窗**）。
+     *
+     * 第一步：Shizuku（uid 2000）执行 `cmd wifi connect-network "<SSID>" wpa2 "<密码>"`，
+     * 系统直接关联热点并把它存成普通网络——不经过 `WifiNetworkSpecifier`，
+     * 因此**不触发系统确认框**（specifier 的弹窗是框架层强制行为，应用关不掉）。
+     *
+     * 第二步：用**不带 specifier** 的 `requestNetwork(TRANSPORT_WIFI)` 捕获刚连上的
+     * WiFi 的 `Network` 句柄并绑定进程网络（[bindCarWifiAndRegister]）。没有 specifier，
+     * 系统不会弹窗，也能立刻把车机 WiFi 的 `Network` 回调给我们。
+     *
+     * 为什么第二步仍要 `bindProcessToNetwork`（而不是只把 network 传给 NsdManager）：
+     *  - mDNS 广播 `_carplay-ctrl._tcp` 的 `NsdManager.registerService` **没有 Network
+     *    参数**（API 36 的 `AdvertisingRequest` 才有，本项目 compileSdk 34），注册跟随
+     *    **进程默认网络**。不绑 → 广播从蜂窝出去 → 车机发现不了手机 → 0x4301 永不到达；
+     *  - AirPlay 控制/事件/视频/音频的多处裸 `Socket()`/`DatagramSocket()` 都依赖进程绑定；
+     *  - 绑定只作用于**本进程的 socket**：虚拟屏里的导航/音乐是独立进程，不受影响
+     *    （`bindProcessToNetwork` 不是全局/系统级操作）。
+     */
+    private fun joinCarWifiSilently(wifi: Iap2SenderSession.WifiConfiguration): WifiCarPlayConnector.JoinResult {
+        // 与 specifier 兜底路径共用同一把锁：两条路径都会 release + 重绑进程网络。
+        // 持锁实现见 [joinCarWifiSilentlyLocked]。
+        return synchronized(wifiBindLock) { joinCarWifiSilentlyLocked(wifi) }
+    }
+
+    /** [joinCarWifiSilently] 的持锁实现（调用方必须持有 [wifiBindLock]）。 */
+    private fun joinCarWifiSilentlyLocked(wifi: Iap2SenderSession.WifiConfiguration): WifiCarPlayConnector.JoinResult {
         val connector = wifiConnector ?: return WifiCarPlayConnector.JoinResult.Unavailable
-        // 已保存到系统配置里才询问是否清除：不擅自删用户网络（有的场景就是要用
-        // 车机流量/互联网，或用户希望系统自动连）。选择保留不影响本轮连接。
-        if (shellReady) {
-            promptForgetSavedNetworkIfAny(wifi.ssid)
-            if (connectCancelled) return WifiCarPlayConnector.JoinResult.Unavailable
+        if (connectCancelled) return WifiCarPlayConnector.JoinResult.Unavailable
+        val existing = connector.currentNetwork
+        if (boundCarSsid == wifi.ssid && existing != null) {
+            appendLog("WIFI: 车机热点已就绪且网络通道已绑定——跳过重复加入")
+            return WifiCarPlayConnector.JoinResult.Joined(existing)
         }
+        if (!ensureWifiEnabledSilently()) return WifiCarPlayConnector.JoinResult.Unavailable
+        if (connectCancelled) return WifiCarPlayConnector.JoinResult.Unavailable
+        val current = shellWifiStatus().second
+        if (current == wifi.ssid) {
+            appendLog("WIFI: 手机已连在车机热点 \"${wifi.ssid}\"——直接建立网络通道并绑定")
+        } else {
+            phaseHint = "正在静默连接车机热点 ${wifi.ssid}…"
+            appendLog(
+                ">>> 静默加入车机热点 \"${wifi.ssid}\"（cmd wifi connect-network，0 弹窗；" +
+                    "当前 ${current ?: "未连接"}）",
+            )
+            // 命令把连接投给 WifiService 就返回，exit=0 不代表已连上 —— 必须轮询 SSID
+            val result =
+                Shell.exec(
+                    WifiConnectCommand.build(wifi.ssid, wifi.passphrase, wifi.securityType),
+                    20_000L,
+                )
+            if (!result.ok) {
+                appendLog(
+                    "WIFI: connect-network 失败（exit=${result.exitCode} " +
+                        "${result.output.take(80)}）",
+                )
+                return WifiCarPlayConnector.JoinResult.Unavailable
+            }
+            if (!waitForCarSsid(wifi.ssid, CAR_WIFI_JOIN_WAIT_MS)) {
+                return WifiCarPlayConnector.JoinResult.Unavailable
+            }
+        }
+        if (connectCancelled) return WifiCarPlayConnector.JoinResult.Unavailable
+        val bound = bindCarWifiAndRegister(wifi.ssid)
+        val network = connector.currentNetwork
+        return if (bound && network != null) {
+            WifiCarPlayConnector.JoinResult.Joined(network)
+        } else {
+            WifiCarPlayConnector.JoinResult.Unavailable
+        }
+    }
+
+    /** WLAN 关着时经 Shizuku 直接打开（`cmd wifi set-wifi-enabled`），返回是否已开启。 */
+    private fun ensureWifiEnabledSilently(): Boolean {
+        if (!shellWifiDisabled()) return true
+        appendLog("WIFI: WLAN 未开启——经 Shizuku 打开（cmd wifi set-wifi-enabled enabled，免手动）")
+        val result = Shell.exec("cmd wifi set-wifi-enabled enabled", 8_000L)
+        if (!result.ok) {
+            appendLog("WIFI: 打开 WLAN 失败（exit=${result.exitCode} ${result.output.take(60)}）")
+            return false
+        }
+        val deadline = android.os.SystemClock.uptimeMillis() + WIFI_ENABLE_WAIT_MS
+        while (android.os.SystemClock.uptimeMillis() < deadline && !connectCancelled) {
+            if (!shellWifiDisabled()) return true
+            Thread.sleep(500)
+        }
+        if (shellWifiDisabled()) {
+            appendLog("WIFI: 等待 WLAN 开启超时（${WIFI_ENABLE_WAIT_MS / 1000}s）")
+            return false
+        }
+        return true
+    }
+
+    /** 轮询 `cmd wifi status` 直到关联到 [ssid]（可取消）。 */
+    private fun waitForCarSsid(
+        ssid: String,
+        timeoutMs: Long,
+    ): Boolean {
+        val deadline = android.os.SystemClock.uptimeMillis() + timeoutMs
+        var lastLogAt = 0L
+        var current: String? = null
+        while (android.os.SystemClock.uptimeMillis() < deadline) {
+            if (connectCancelled) return false
+            current = shellWifiStatus().second
+            if (current == ssid) {
+                appendLog("WIFI: 已切到车机热点 \"$ssid\"")
+                return true
+            }
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - lastLogAt >= 3_000L) {
+                lastLogAt = now
+                phaseHint = "正在切换到车机热点 $ssid…"
+                appendLog("WIFI: 等待切换到 \"$ssid\"（当前 ${current ?: "未连接"}）…")
+            }
+            Thread.sleep(500)
+        }
+        appendLog("WIFI: 等待切换到 \"$ssid\" 超时（当前 ${current ?: "未连接"}）")
+        return false
+    }
+
+    /**
+     * 用应用专属网络（`WifiNetworkSpecifier`）加入车机热点，成功后进程网络已绑定。
+     *
+     * **只是静默路径的兜底**（Shizuku 不可用，或 ROM 屏蔽了 `cmd wifi connect-network`）：
+     * 该网络只对本进程可见、不保存、不成为默认网络，但首次加入会弹系统确认框。
+     * 也因此不再询问「清除系统里保存的同名热点」——静默路径本来就会把热点存进
+     * 系统配置（这是设计，不是旧版本残留）。
+     */
+    private fun joinCarWifiSpecifier(wifi: Iap2SenderSession.WifiConfiguration): WifiCarPlayConnector.JoinResult {
+        val connector = wifiConnector ?: return WifiCarPlayConnector.JoinResult.Unavailable
         phaseHint = "正在加入车机热点 ${wifi.ssid}…（不影响移动数据）"
         appendLog(
             ">>> 以应用专属网络加入 \"${wifi.ssid}\"（不保存为系统 WiFi，其它应用继续走 4G/5G）",
@@ -987,7 +1281,7 @@ object SessionController {
         return true
     }
 
-    /** 应用专属网络被系统拒绝/超时：让用户重试或转手动连接。 */
+    /** 静默路径与应用专属网络都失败：让用户重试或转手动连接。 */
     private fun promptSpecifierFailed(
         wifi: Iap2SenderSession.WifiConfiguration,
         shellReady: Boolean,
@@ -998,9 +1292,9 @@ object SessionController {
                 DialogSpec(
                     title = "未能加入车机热点",
                     message =
-                        "系统没有允许加入 \"${wifi.ssid}\"（可能点了拒绝，或热点不在范围内）。\n\n" +
-                            "「重试」会再次弹出系统确认框。也可以到 WLAN 设置手动连接——" +
-                            "手动连接会把热点保存为系统网络，可能影响移动数据。",
+                        "自动加入 \"${wifi.ssid}\" 没有成功（热点可能不在范围内，或系统拒绝了连接）。\n\n" +
+                            "「重试」会再自动加入一次（先走免弹窗的静默路径，仍不行才会弹系统确认框）；" +
+                            "也可以到 WLAN 设置手动连接（密码已复制到剪贴板）。",
                     positive = "重试",
                     negative = "打开 WLAN 设置",
                 ),
@@ -1008,7 +1302,7 @@ object SessionController {
         if (connectCancelled) return
         when (choice) {
             true -> {
-                when (val retry = joinCarWifiSpecifier(wifi, shellReady)) {
+                when (val retry = joinCarWifi(wifi, shellReady)) {
                     is WifiCarPlayConnector.JoinResult.Joined -> Unit
                     WifiCarPlayConnector.JoinResult.Unsupported -> legacyJoinCarWifi(wifi, shellReady)
                     WifiCarPlayConnector.JoinResult.Unavailable -> {
@@ -1100,11 +1394,11 @@ object SessionController {
                 "经 Shizuku 自动切换到 \"${wifi.ssid}\"",
         )
         if (connectCancelled) return
-        val security =
-            if (wifi.passphrase.isEmpty()) "open" else "wpa2 ${shellQuote(wifi.passphrase)}"
         val result =
-            Shell
-                .exec("cmd wifi connect-network ${shellQuote(wifi.ssid)} $security", 10_000L)
+            Shell.exec(
+                WifiConnectCommand.build(wifi.ssid, wifi.passphrase, wifi.securityType),
+                10_000L,
+            )
         if (!result.ok) {
             phaseHint = "自动加入热点失败——请到 WLAN 设置加入 ${wifi.ssid}"
             appendLog(
@@ -1185,10 +1479,10 @@ object SessionController {
             ctrlAdvertiser?.ensureForNetwork(ssid, force = true, network = wifiConnector?.currentNetwork)
             appendLog(">>> WiFi 已绑定车机热点，ctrl 广播已重新注册，等待车机 ctrl 邀请（随后才回 0x4301）")
         } else if (!connectCancelled) {
-            phaseHint = "手机不在车机热点——请到 WLAN 设置加入 $ssid"
+            phaseHint = "未能绑定车机热点 $ssid 的网络通道"
             appendLog(
-                ">>> 等待 ${WIFI_BIND_WAIT_S}s 仍未绑定到 \"$ssid\"——" +
-                    "请在 系统设置>WLAN 手动加入该热点后重新连接",
+                ">>> 等待 ${WIFI_BIND_WAIT_S}s 仍未拿到 \"$ssid\" 的 WiFi 网络句柄——" +
+                    "请确认 WLAN 已连上该热点后重新连接",
             )
         }
         return bound
@@ -1265,7 +1559,7 @@ object SessionController {
     private fun shellWifiDisabled(): Boolean = !shellWifiStatus().first
 
     /** 单引号包裹的 POSIX shell 字面量（SSID/密码可能含空格与特殊字符）。 */
-    private fun shellQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
+    private fun shellQuote(s: String): String = "'" + s.replace("'", "'\''") + "'"
 
     /** 复现「BT 控制已结束」状态：断开当前任一路径的 iAP2 控制会话（DiPlay 只在此状态应答 RTSP）。 */
     private fun detachActiveBtSessions() {
@@ -2038,6 +2332,8 @@ object SessionController {
                                 dispatchMediaKey(keyCode)
                                 appendLog("EVENT: 车机媒体键（iAP2 0x6802）→ keyCode=$keyCode 已注入")
                             }
+                            // 旋钮/四向拨杆（iAP2 0x6802 通路）：注入虚拟屏的 DPAD
+                            created.onNavKey = { keyCode -> injectNavigationKey(keyCode) }
                             // MIB3 控制会话完成 → modesChanged 资源重申 burst（082446 定谳：
                             // 只在会话早期声明过一次的话，第二控制会话把车机资源仲裁重置，
                             // 车机全程健康却永不切 CarPlay 画面）。
@@ -2205,8 +2501,23 @@ object SessionController {
                                                 report != null && report.size == 1 -> rawValue?.takeIf { it != 0 }
                                                 else -> null
                                             }
-                                        val contacts =
+                                        // 旋钮/四向拨杆（Generic Desktop 页的 Wheel/Hat）：
+                                        // 不是 Consumer 设备才走这里；输出 DPAD_* 注入虚拟屏。
+                                        val navKeys =
                                             if (consumerUsage == null && report != null) {
+                                                if (HidNavigation.rawLogEnabled) {
+                                                    appendLog(
+                                                        "HID-RAW: uuid=$uuid bytes=" +
+                                                            report.joinToString(" ") { "%02X".format(it) } +
+                                                            " desc=${descriptor?.size ?: 0}B",
+                                                    )
+                                                }
+                                                HidNavigation.handle(uuid.orEmpty(), descriptor, report)
+                                            } else {
+                                                emptyList()
+                                            }
+                                        val contacts =
+                                            if (consumerUsage == null && navKeys.isEmpty() && report != null) {
                                                 // 触摸格式按设备描述符判定（Digitizer 页 + 单指/多槽），
                                                 // 描述符不可用时按报文长度回退——不依赖车机型号或 uuid
                                                 val touchFormat =
@@ -2215,7 +2526,14 @@ object SessionController {
                                             } else {
                                                 null
                                             }
-                                        if (consumerUsage != null) {
+                                        if (navKeys.isNotEmpty()) {
+                                            navKeys.forEach(::injectNavigationKey)
+                                            appendLog(
+                                                "EVENT: 旋钮/导航键 " +
+                                                    navKeys.joinToString("+") { HidNavigation.nameOf(it) } +
+                                                    "（uuid=$uuid）",
+                                            )
+                                        } else if (consumerUsage != null) {
                                             val keyCode = ConsumerKeys.keyCodeFor(consumerUsage)
                                             if (keyCode != 0) {
                                                 dispatchMediaKey(keyCode)
@@ -2419,6 +2737,9 @@ object SessionController {
                                                 // 漏掉它就会出现「会话早就断了、45s 后手机屏突然变黑」
                                                 // （2026-10-19 用户实测）。
                                                 ScreenDimmer.setSessionActive(false)
+                                                // 车机侧断开：人在车外，让手机直接休眠（面板保持黑），
+                                                // 而不是先点亮再等 60s 超时
+                                                restorePhoneScreen(sleepIfCarSide = true)
                                                 // 同样复原横屏覆盖。这里跑在推流收尾线程，不是连接
                                                 // 关键路径，但统一走异步口以保持「串行、不重入」的语义。
                                                 appContext?.let { ctx ->
@@ -2469,7 +2790,15 @@ object SessionController {
                                         )
                                         // 暗幕/常亮只在真正开始投屏后生效（见 ScreenDimmer.sessionActive）：
                                         // 应用启动时只挂触摸探针，避免「会话早断了、手机过一会儿还是变暗」。
-                                        if (ok) ScreenDimmer.setSessionActive(true)
+                                        if (ok) {
+                                            ScreenDimmer.setSessionActive(true)
+                                            // 虚拟屏已建好 → 按「连接时真息屏」开关决定是否硬件断电
+                                            if (DisplayPrefs.screenOffOnConnect(context)) {
+                                                enterPhoneScreenOff()
+                                            } else {
+                                                appendLog("SCREEN: 「连接时真息屏」已关闭——本次仅用暗幕")
+                                            }
+                                        }
                                     }
                                 }
                                 // 音频通道（可选）：SETUP type=100 → UDP RTP 推流。
@@ -2534,14 +2863,14 @@ object SessionController {
             appendLog(">>> [$source] 已绑定车机热点 ${endpoint.ssid}，跳过重复绑定")
             continueWithNetwork(true)
         } else {
-            // 端点先于 0x5703 到达（或上一轮换网失败）：同样走应用专属网络。
-            // 不能再用「按 TRANSPORT_WIFI 盲绑当前任意 WiFi」——切网途中会绑到旧网络，
-            // AirPlay 必然连不上，且会把无互联网热点留在系统默认网络里。
+            // 端点先于 0x5703 到达（或上一轮换网失败）：同样的入口——静默路径优先，
+            // 失败再退回应用专属网络。不要按 TRANSPORT_WIFI 盲绑当前任意 WiFi：
+            // 切网途中会绑到旧网络，AirPlay 必然连不上。
             Bg.run("wifi-join-on-endpoint") {
                 while (!connectCancelled) {
                     val shellReady =
                         appContext?.let { ShizukuGate.state(it) == ShizukuGate.State.READY } == true
-                    when (val result = joinCarWifiSpecifier(wifiConfig, shellReady)) {
+                    when (val result = joinCarWifi(wifiConfig, shellReady)) {
                         is WifiCarPlayConnector.JoinResult.Joined -> {
                             continueWithNetwork(true)
                             return@run

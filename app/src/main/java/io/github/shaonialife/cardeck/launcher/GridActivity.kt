@@ -748,6 +748,13 @@ class GridActivity : AppCompatActivity() {
                         }
                     }
                 }
+                // 焦点：iDrive 旋钮/方向盘方向键注入的 DPAD 事件靠焦点系统落地，
+                // 网格单元必须可聚焦 + 有可见高亮框（按键会自动退出 touch mode）。
+                view.isFocusable = true
+                view.isFocusableInTouchMode = false
+                view.foreground =
+                    androidx.core.content.ContextCompat
+                        .getDrawable(this@GridActivity, R.drawable.focus_ring)
                 grid.addView(
                     view,
                     GridLayout.LayoutParams().apply {

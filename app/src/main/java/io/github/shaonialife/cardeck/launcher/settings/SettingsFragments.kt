@@ -10,6 +10,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import io.github.shaonialife.cardeck.R
 import io.github.shaonialife.cardeck.SessionController
+import io.github.shaonialife.cardeck.bt.AutoConnectPrefs
 import io.github.shaonialife.cardeck.input.TouchRouter
 import io.github.shaonialife.cardeck.launcher.AppIcons
 import io.github.shaonialife.cardeck.launcher.DefaultMapPrefs
@@ -605,6 +606,92 @@ class DisplayPanelFragment : SettingsPanelFragment() {
         val scaleNote = view.findViewById<TextView>(R.id.displayScaleNote)
         val fps30 = view.findViewById<TextView>(R.id.btnFps30)
         val fps60 = view.findViewById<TextView>(R.id.btnFps60)
+
+        // 连接时真息屏（物理面板断电）：默认开；会话中切换立即生效
+        val screenOffOn = view.findViewById<TextView>(R.id.btnScreenOffOn)
+        val screenOffOff = view.findViewById<TextView>(R.id.btnScreenOffOff)
+        var screenOffEnabled = DisplayPrefs.screenOffOnConnect(ctx)
+
+        fun refreshScreenOff(enabled: Boolean) {
+            screenOffOn.setBackgroundResource(
+                if (enabled) R.drawable.bg_segment_sel else R.drawable.bg_segment,
+            )
+            screenOffOn.setTextColor(if (enabled) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+            screenOffOff.setBackgroundResource(
+                if (enabled) R.drawable.bg_segment else R.drawable.bg_segment_sel,
+            )
+            screenOffOff.setTextColor(if (enabled) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt())
+        }
+
+        refreshScreenOff(screenOffEnabled)
+
+        fun applyScreenOff(enabled: Boolean) {
+            if (enabled == screenOffEnabled) return
+            screenOffEnabled = enabled
+            DisplayPrefs.setScreenOffOnConnect(ctx, enabled)
+            refreshScreenOff(enabled)
+            // 车机屏上就能操作：立即收放，不必等下次连接
+            SessionController.applyScreenOffPreference(enabled)
+            hostToast(if (enabled) "已开启：连接时物理息屏" else "已关闭：连接时只用暗幕")
+        }
+        screenOffOn.setOnClickListener { applyScreenOff(true) }
+        screenOffOff.setOnClickListener { applyScreenOff(false) }
+
+        // 上车自动连接（车机蓝牙 ACL 连上时自动拉起会话）：默认开
+        val autoConnectOn = view.findViewById<TextView>(R.id.btnAutoConnectOn)
+        val autoConnectOff = view.findViewById<TextView>(R.id.btnAutoConnectOff)
+        var autoConnectEnabled = AutoConnectPrefs.enabled(ctx)
+
+        fun refreshAutoConnect(enabled: Boolean) {
+            autoConnectOn.setBackgroundResource(
+                if (enabled) R.drawable.bg_segment_sel else R.drawable.bg_segment,
+            )
+            autoConnectOn.setTextColor(if (enabled) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+            autoConnectOff.setBackgroundResource(
+                if (enabled) R.drawable.bg_segment else R.drawable.bg_segment_sel,
+            )
+            autoConnectOff.setTextColor(if (enabled) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt())
+        }
+
+        refreshAutoConnect(autoConnectEnabled)
+
+        fun applyAutoConnect(enabled: Boolean) {
+            if (enabled == autoConnectEnabled) return
+            autoConnectEnabled = enabled
+            AutoConnectPrefs.setEnabled(ctx, enabled)
+            refreshAutoConnect(enabled)
+            hostToast(if (enabled) "已开启：上车自动连接" else "已关闭：上车不再自动启动")
+        }
+        autoConnectOn.setOnClickListener { applyAutoConnect(true) }
+        autoConnectOff.setOnClickListener { applyAutoConnect(false) }
+
+        // HID 原始日志（键位校准）：默认关；打开后每帧 hidSendReport 写一行 HID-RAW
+        val hidRawOn = view.findViewById<TextView>(R.id.btnHidRawOn)
+        val hidRawOff = view.findViewById<TextView>(R.id.btnHidRawOff)
+        var hidRawEnabled = DisplayPrefs.hidRawLog(ctx)
+
+        fun refreshHidRaw(enabled: Boolean) {
+            hidRawOn.setBackgroundResource(
+                if (enabled) R.drawable.bg_segment_sel else R.drawable.bg_segment,
+            )
+            hidRawOn.setTextColor(if (enabled) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+            hidRawOff.setBackgroundResource(
+                if (enabled) R.drawable.bg_segment else R.drawable.bg_segment_sel,
+            )
+            hidRawOff.setTextColor(if (enabled) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt())
+        }
+
+        refreshHidRaw(hidRawEnabled)
+
+        fun applyHidRaw(enabled: Boolean) {
+            if (enabled == hidRawEnabled) return
+            hidRawEnabled = enabled
+            DisplayPrefs.setHidRawLog(ctx, enabled)
+            refreshHidRaw(enabled)
+            hostToast(if (enabled) "已开启 HID 原始日志（校准完请关掉）" else "已关闭 HID 原始日志")
+        }
+        hidRawOn.setOnClickListener { applyHidRaw(true) }
+        hidRawOff.setOnClickListener { applyHidRaw(false) }
 
         // 滑条 progress（0..26）→ 百分比（30..160，步进 5）
         fun progressOf(percent: Int) = (percent - DisplayPrefs.SCALE_MIN) / DisplayPrefs.SCALE_STEP

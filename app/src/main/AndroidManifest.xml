@@ -86,6 +86,32 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice|mediaProjection" />
 
+        <!-- 静默投屏跳板（自动连接时领 MediaProjection 令牌给音频内录用）：
+             exported=true 让 Shizuku 的 `am start` 能拉起（shell 只有
+             START_ACTIVITIES_FROM_BACKGROUND，没有 START_ANY_ACTIVITY）；
+             noHistory + excludeFromRecents + taskAffinity="" 保证不留痕迹。 -->
+        <activity
+            android:name=".audio.SilentProjectionActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.CarPlaySender.SilentTranslucent" />
+
+        <!-- 上车自动连接：ACL_CONNECTED / ACL_DISCONNECTED 在隐式广播豁免清单里，
+             清单静态注册可在应用进程被杀时把进程拉起来（docs/AUTO-CONNECT.md）。
+             exported=true 是因为系统蓝牙栈以独立 uid 发送；目标车机过滤在接收器里做。 -->
+        <receiver
+            android:name=".bt.CarBluetoothReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
+            </intent-filter>
+        </receiver>
+
         <!-- 虚拟屏桌面（exported：shell am start 需要可从外部拉起） -->
         <activity
             android:name=".launcher.DockActivity"

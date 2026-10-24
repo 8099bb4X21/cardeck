@@ -56,6 +56,15 @@ $ANDROID_HOME/build-tools/<ver>/apksigner verify --print-certs app/build/outputs
 git tag -a v0.1.0 -m "CarDeck 0.1.0"; git push origin v0.1.0
 gh release create v0.1.0 CarDeck-0.1.0.apk --title "..." --notes-file notes.md --latest
 ```
+**CI（`.github/workflows/android-ci.yml`，2026-10-22 起）**：每次 push 自动出**正式签名**包，
+版本号自动累计——传 `-Pcardeck.buildNumber=<github.run_number>`，得到
+`versionName=<appVersionName>.<N>`、`versionCode=base*10000+N`（能覆盖安装上一版；
+base 升 patch 时自动反超）。产物名 `CarDeck-<版本>-release.apk`，**只在 Actions Artifacts，
+不发 GitHub Release**（`permissions: contents: read`）。签名来自仓库 Secrets
+`KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD`（可选
+`EXPECTED_CERT_SHA256` 做指纹比对）；**没配 KEYSTORE_BASE64 流水线直接失败**，
+且 Gradle 侧 `check` 会拦「带构建号却没有 keystore.properties」，不允许 debug 签名的
+「正式版」流出去。本地 `assembleRelease` 不带 `-P` 时仍是纯 base 版本（`1_130_000`）。
 **签名是不可逆决定**：debug 证书签的包一经发出，以后换正式证书时已安装用户必须
 卸载重装（证书不同无法覆盖安装）。所以**首个公开版本就必须用正式 keystore**。
 keystore 与密码只存本地/密码管理器：私钥泄露 = 任何人可签发覆盖安装的更新；
@@ -322,6 +331,62 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   （否则下次启动会沿用 true）。手动「假息屏」`enterDimNow` 走 `force` 路径不受限制。
   **判断标准**：任何「会话期间才该生效」的 UI/系统副作用，都要同时挂在
   「推流启动成功」与「onEnded」两端——只挂一端必然漏掉车机主动断开这条路径。
+- **手机真息屏（物理面板断电）+ 虚拟屏独立常亮**（2026-10-23，详见
+  `docs/PHONE-SCREEN-OFF.md`）：按电源键会「锁屏 + Doze」（车机黑屏/掉帧），正确做法是
+  让系统逻辑上保持「亮屏且未上锁」，只把物理面板在 SurfaceFlinger 层断电（scrcpy `-S` 同源）：
+  受信屏额外声明 `VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP(1<<11)` +
+  `VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED(1<<12)`，再对物理主屏 token 调
+  `SurfaceControl.setDisplayPowerMode(0)`。**dock 屏虽「不受信」也必须带同一对 flag**
+  （同样的三级降级）——否则它落在默认显示组，物理屏一断电整组跟着灭，车机侧表现为
+  「app 屏正常、dock 栏全黑，解锁后恢复」（2026-10-23 实测；AOSP 只在 `AUTO_MIRROR`
+  时清 `OWN_DISPLAY_GROUP`，dock 没声明 PUBLIC 故 flag 保留）。四条硬约束：① `ALWAYS_UNLOCKED` 需
+  `ADD_ALWAYS_UNLOCKED_DISPLAY`，**部分 ROM 未授予 shell**，带上会 SecurityException
+  打挂整块屏 → `createDisplay` 必须三级降级（组+解锁 → 组 → 基础 flags）；
+  ② **SDK 34+ 删除了 `SurfaceControl.getPhysicalDisplayIds/getPhysicalDisplayToken`**，
+  必须经 `ClassLoaderFactory` + `SYSTEMSERVERCLASSPATH` 加载
+  `com.android.server.display.DisplayControl`，并 `Runtime.loadLibrary0(cls,"android_servers")`，
+  否则 JNI 未注册（scrcpy 同款）；③ 时机：推流成功后 `enterPhoneScreenOff()`，
+  `onEnded` 走 `restorePhoneScreen(sleep=true)`（保持黑、直接 KEYCODE_SLEEP），
+  `retireSession`/手动断开设 false（点亮面板）；④ **必须有三层恢复**（会话结束 /
+  UserService 过期自尽前 / 应用下次启动）——否则应用崩溃会把手机留在黑屏
+  （电源键按两次能救回，但不能依赖它）。**用户开关**：设置 → 显示 →「连接时真息屏」
+  （默认开，`DisplayPrefs.screenOffOnConnect`，键 `screen_off_on_connect`）；关闭后
+  只保留暗幕。会话中切换经 `SessionController.applyScreenOffPreference` **立即收放**
+  （车机屏可操作，不必等下次连接）。「显示」面板已套 ScrollView——车机内容区只有
+  ~200dp 高，4 段内容不滚动会把最后一段裁掉。
+- **上车自动连接（ACL 广播唤醒，2026-10-23，详见 `docs/AUTO-CONNECT.md`）**：
+  `bt/CarBluetoothReceiver` 以**清单静态接收器**监听 `ACTION_ACL_CONNECTED/DISCONNECTED`
+  ——这两个在[隐式广播例外清单](https://developer.android.com/develop/background-work/background-tasks/broadcasts/broadcast-exceptions)
+  里，进程被杀也能冷启动。三条硬事实：① **Android 12+ 的后台 FGS 豁免清单里没有
+  「蓝牙广播」**，本项目能 `startForegroundService` 是因为持有 `SYSTEM_ALERT_WINDOW`
+  （暗幕/触摸探针本来就要，targetSdk 34 只看权限存在）；用户没授悬浮窗时会被
+  `ForegroundServiceStartNotAllowedException` 拦下，接收器只记日志、不崩；
+  ② FGS 必须用 `connectedDevice` 类型（2 参 `startForeground` 会带上 mediaProjection，
+  Android 14 校验 AppOps PROJECT_MEDIA 直接崩）；③ 冷启动进程里必须先
+  `SessionController.ensure(applicationContext)` 再 `startConnection(...)`——BT client /
+  WiFi 连接器都在 `ensureSessionObjects` 里建，跳过会 NullPointer。
+  自动连接**有声音**：靠 `audio/SilentProjectionActivity` 静默领 MediaProjection——
+  `appops set <pkg> PROJECT_MEDIA allow` 让 SystemUI 直接返回 RESULT_OK（Tasker 同款，
+  该 app-op **持久**，不需要时 `appops set … default` 清），再由 shell `am start` 拉起
+  1×1 透明、`exported`、`noHistory` 的跳板（shell 只有 START_ACTIVITIES_FROM_BACKGROUND，
+  没有 START_ANY_ACTIVITY，所以必须 exported）。**Android 14 铁律**：拿到授权后先
+  `upgradeToProjection()` 把 FGS 类型加上 mediaProjection，才能 `getMediaProjection`；
+  且 `onStartCommand` 里重复 `startForeground` 时若 `mediaProjection != null` 必须继续
+  带上该类型（否则类型被摘、投影被停）。**开关**：设置 → 显示 →「上车自动连接」
+  （`AutoConnectPrefs`，默认开；与「连接时真息屏」同一面板）。
+  下车走 `ACTION_AUTO_STOP_SESSION` → `disconnect()`；该 intent 用 `startService` 投递
+  （服务在跑时进程已是前台服务态，不受后台启动限制）。
+- **车机 HID：方向盘媒体键 + iDrive 旋钮**（2026-10-23，详见 `docs/HID-KNOB.md`）：
+  `/info` 的 hidDevices **已遍历全部 uuid 发 hidSetInputMode**——不要改成按 uuid/名称猜设备
+  （奥迪发 `"0"/"1"`、DiPlay 发整数），**描述符才是唯一稳定信号**。Consumer 页(0x0C) →
+  `ConsumerKeys`（Array/Variable 两种语义分开解，混用会一个键都点不出）→
+  `AudioManager.dispatchMediaKeyEvent` 全局媒体键；Generic Desktop 页(0x01) 的
+  Wheel(0x38)/Hat(0x39) → `HidNavigation` → `ICarInput.keyEvent(displayId, DPAD_*)`
+  注入虚拟屏（KeyEvent 也走 `setDisplayId`；失败回退 `input -d`）。**DPAD 不能全局分发**
+  （会落到手机主屏），目标屏取 `VirtualLauncher.activeAppDisplayId()`。焦点高亮 = 网格单元
+  `isFocusable=true` + `foreground=focus_ring`（foreground 不覆盖 background）；
+  **dock 是独立 display，DPAD 不跨屏**。键位校准开关：设置 → 显示 →「HID 原始日志」
+  （`DisplayPrefs.hidRawLog` → `HidNavigation.rawLogEnabled`，日志行 `HID-RAW: uuid=… bytes=…`）。
 - **取消连接必须全程可中断**：`sessionStarting` 互斥标志的复位依赖配对流程线程
   走到 finally——该线程可能阻塞在不可中断的等待（无超时 connect、mDNS 等待、
   BT 保活读循环），任何一处卡住都会让取消「无效」（英雄卡永久「正在连接」）。
@@ -436,6 +501,12 @@ DockActivity，不受信）+ CarPlayApp（原生应用屏）+ CarPlayAppHi（超
   则熄火后英雄卡停在「已连接」、会话拖到心跳超时才死）。
   **WEP 无法用 specifier 表达**（无对应 Builder API）→ `JoinResult.Unsupported`，
   走旧的 `connect-network` 兜底路径（`legacyJoinCarWifi`）。
+  **PR17（BMW 带来的三个命令行坑，与 specifier 主线并存的知识）**：① `cmd wifi
+  connect-network` 的 exit=0 **不代表已连上**（只把连接投给 WifiService）→ 必须轮询
+  `cmd wifi status` 等 SSID 变更（我们的深度兜底已按此实现）；② NSD 注册没有 Network
+  参数，mDNS 广播跟随**进程默认网络**——绑定了车机热点后必须 `bindProcessToNetwork`，
+  否则广播从蜂窝出去车机永远发现不了；③ `cmd wifi set-wifi-watchdog-enabled` 这条命令
+  **不存在**（AOSP 是 `set-wifi-watchdog`，仅 root），别照抄。另见 `docs/WIFI-JOIN.md`。
   specifier 在 **Android 12/12L 仍需位置权限 + 位置服务**（13+ 由 NEARBY_WIFI_DEVICES
   接管）：缺权限时 `requestNetwork` 直接失败、现象只是「未能加入车机热点」，很难自查，
   故在连接前置检查拦截（`ensureWifiLocationReady`）；manifest 里 FINE/COARSE 必须成对

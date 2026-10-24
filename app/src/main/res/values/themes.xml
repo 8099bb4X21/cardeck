@@ -37,4 +37,19 @@
         <item name="android:activityCloseEnterAnimation">@anim/stay</item>
         <item name="android:activityCloseExitAnimation">@anim/settings_out</item>
     </style>
+
+    <!-- 静默投屏跳板（audio/SilentProjectionActivity）：全透明、无动画、不抢焦点。
+         该 Activity 继承 android.app.Activity（不是 AppCompat），所以父主题只能用平台主题。 -->
+    <style name="Theme.CarPlaySender.SilentTranslucent" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorBackgroundCacheHint">@null</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+    </style>
 </resources>

@@ -1315,6 +1315,9 @@ class AirPlayClient(
      */
     var onMediaKey: ((Int) -> Unit)? = null
 
+    /** 导航键（iDrive 旋钮/四向拨杆）：需要虚拟屏焦点，由会话层注入 DPAD。 */
+    var onNavKey: ((Int) -> Unit)? = null
+
     /**
      * MIB3 隧道控制会话完成（auth+burst 已发）回调：宿主据此调度 modesChanged
      * 资源重申 burst（AADisplay r17 时序 +1.5/4/12/30s）。082446 定谳：不重申的
@@ -1342,6 +1345,7 @@ class AirPlayClient(
                     alive = { socket?.isClosed == false },
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
+                    it.onNavKey = { keyCode -> onNavKey?.invoke(keyCode) }
                     it.onControlSessionComplete = {
                         mib3ControlSessionDone = true
                         onTunnelControlSessionComplete?.invoke()

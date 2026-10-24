@@ -10,6 +10,9 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import io.github.shaonialife.cardeck.MainActivity
+import io.github.shaonialife.cardeck.SessionController
+import io.github.shaonialife.cardeck.audio.SilentProjectionActivity
+import io.github.shaonialife.cardeck.util.Bg
 import io.github.shaonialife.cardeck.util.DebugFileLog
 
 /**
@@ -59,15 +62,36 @@ class CarPlayService : Service() {
         flags: Int,
         startId: Int,
     ): Int {
+        // 下车：车机蓝牙 ACL 断开（由 startService 投递——服务在跑时进程已是前台服务态，
+        // 不受后台启动限制）。disconnect 内部会 stopService → onDestroy。
+        if (intent?.action == ACTION_AUTO_STOP_SESSION) {
+            fileLog("SVC: 收到「下车自动结束」——收起会话")
+            if (SessionController.isSessionRunning()) {
+                SessionController.disconnect(applicationContext)
+            } else {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+            return START_NOT_STICKY
+        }
         // 必须显式指定类型为 connectedDevice：
         // 2 参 startForeground 会拾取 manifest 声明的全部类型（含 mediaProjection），
         // 而 Android 14 启动 mediaProjection 类型要求 AppOps PROJECT_MEDIA（用户当次授权才有效）——
         // 重启/授权过期后直接 SecurityException 崩溃（2026-10-09 实测踩坑）。
+        // 但**已有投影时**必须继续带上 mediaProjection 类型：否则这次 startForeground
+        // 会把类型摘掉，Android 14 会连带停掉投影（自动连接刚拿到的令牌就废了）。
+        val fgsTypes =
+            if (mediaProjection != null) {
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            } else {
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            }
         androidx.core.app.ServiceCompat.startForeground(
             this,
             NOTIFICATION_ID,
             buildNotification(),
-            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            fgsTypes,
         )
         acquireLocks()
         // 授权结果在（用户刚确认投屏）时：升级前台类型再创建投影（try/catch 兜底不崩）
@@ -77,7 +101,51 @@ class CarPlayService : Service() {
         } else if (mediaProjection != null) {
             upgradeToProjection()
         }
+        // 上车自动连接：进程可能是被 ACL 广播冷启动的，先建会话对象（BT client/server、
+        // WiFi 连接器、mDNS 广播器都在 ensureSessionObjects 里），再走与首页按钮相同的流程。
+        // 放后台线程：冷启动时 ensure 要读偏好/绑定 UserService，别压在服务主线程上。
+        if (intent?.action == ACTION_AUTO_START_SESSION) {
+            fileLog("SVC: 收到「上车自动启动」——拉起会话")
+            val app = applicationContext
+            Bg.run("auto-session-start") {
+                SessionController.ensure(app)
+                // 自动连接默认带声音：先静默领取投屏令牌；失败退回只推视频
+                SessionController.audioEnabledForSession = acquireProjectionSilently()
+                SessionController.startConnection(app)
+            }
+        }
         return START_STICKY
+    }
+
+    /**
+     * 自动连接时静默领取 MediaProjection（AudioPlaybackCapture 的授权来源）。
+     *
+     * Android 14 的顺序硬约束：**先**有授权结果 → **再**把 FGS 类型升级为
+     * mediaProjection → 才能调 `getMediaProjection`。这里直接复用
+     * [pendingProjectionResult] + [upgradeToProjection] + [takeProjection]，
+     * 与手动授权走同一条路径（唯一区别是令牌来自 [SilentProjectionActivity]）。
+     *
+     * @return 是否拿到实例；false 时自动连接只推视频（不弹窗、不重试）
+     */
+    private fun acquireProjectionSilently(): Boolean {
+        val grant =
+            SilentProjectionActivity.request(applicationContext)
+                ?: run {
+                    fileLog("SVC: 静默投屏令牌获取失败——本次自动连接只推视频")
+                    return false
+                }
+        pendingProjectionResult = grant.resultCode to grant.data
+        upgradeToProjection()
+        takeProjection()
+        val ok = mediaProjection != null
+        fileLog(
+            if (ok) {
+                "SVC: 静默投屏令牌已就绪（自动连接带声音）"
+            } else {
+                "SVC: 静默投屏令牌无效（getMediaProjection 失败）"
+            },
+        )
+        return ok
     }
 
     private fun takeProjection() {
@@ -144,6 +212,12 @@ class CarPlayService : Service() {
     companion object {
         private const val CHANNEL_ID = "carplay_connection"
         private const val NOTIFICATION_ID = 1
+
+        /** 上车自动连接：车机蓝牙 ACL 连上时由 CarBluetoothReceiver 投递。 */
+        const val ACTION_AUTO_START_SESSION = "io.github.shaonialife.cardeck.action.AUTO_START"
+
+        /** 下车自动收摊：ACL 断开时投递（只有服务在跑才发，见 CarBluetoothReceiver）。 */
+        const val ACTION_AUTO_STOP_SESSION = "io.github.shaonialife.cardeck.action.AUTO_STOP"
 
         /** 镜像模式：授权后由 MainActivity 写入；服务重声明 FGS 类型后方可创建虚拟屏。 */
         @Volatile
