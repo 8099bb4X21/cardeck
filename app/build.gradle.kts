@@ -16,7 +16,7 @@ plugins {
  * `-Pcardeck.buildNumber=<github.run_number>`，得到 `0.1.13.<N>` / `versionCode = base*10000+N`
  * 的**正式签名**包（见下方 [buildNumber]），不需要往仓库写提交。
  */
-val appVersionName = "0.1.25"
+val appVersionName = "0.1.28"
 val appVersionCode =
     appVersionName
         .split(".")
