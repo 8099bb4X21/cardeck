@@ -72,6 +72,16 @@ class MfiLengthMemoryTest {
     }
 
     @Test
+    fun succeededAndRejectedContradictionDemotesMemory() {
+        // 2026-10-24 DiPlay 实测：迟到应答把 20B 误记成功，随后每轮 20B 被断链。
+        // 矛盾态（成功 ∧ 被拒）下 20B 不得再排第一——降级参与正常排序
+        val entry = MfiLengthMemory.Entry(succeeded = 20, rejected = setOf(20))
+        val order = MfiLengthMemory.orderAttempts(baselineCar, entry)
+        assertEquals("被硬拒绝的档位不得再排第一", 32, order.first())
+        assertTrue("矛盾档位仍在候选内（固件可能变）", 20 in order)
+    }
+
+    @Test
     fun describeShowsWhatWasRemembered() {
         assertEquals("无", MfiLengthMemory.describe(MfiLengthMemory.Entry()))
         val text =

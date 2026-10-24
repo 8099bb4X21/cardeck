@@ -102,6 +102,27 @@ object MfiLengthMemory {
         }
     }
 
+    /**
+     * 硬拒绝：链路在该长度的挑战期间被对端直接断开（区别于 0xAA04 拒绝字/静默）。
+     * 这是强证据——即使长度等于已记「成功」也必须推翻：MFi 应答存在归属歧义
+     * （上一档超窗后才到的迟到应答会被记到当前档头上，2026-10-24 DiPlay 实测：
+     * 32B 迟到应答记成 20B 成功，之后每轮 20B 被断链、永久锁死）。
+     */
+    fun recordHardRejected(
+        context: Context?,
+        identityText: String,
+        length: Int,
+    ) {
+        update(context, identityText) { entry ->
+            val succeeded = if (entry.succeeded == length) null else entry.succeeded
+            Entry(
+                succeeded = succeeded,
+                silent = (entry.silent - length),
+                rejected = entry.rejected + length,
+            )
+        }
+    }
+
     /** 打印用：把记忆压成一行日志（便于对照实测）。 */
     fun describe(entry: Entry): String =
         if (entry.isEmpty) {
@@ -125,7 +146,10 @@ object MfiLengthMemory {
         baseline: List<Int>,
         entry: Entry,
     ): List<Int> {
-        val rest = baseline.filter { it != entry.succeeded }
+        // 「成功但又被硬拒绝」= 记忆矛盾（迟到应答误记），不能继续享受第一名——
+        // 降级为普通档参与排序（排在被拒档之前）
+        val succeeded = entry.succeeded?.takeIf { it !in entry.rejected }
+        val rest = baseline.filter { it != succeeded }
         // 只有「还存在没被判死的档位」时才把 rejected 排到最后；
         // 全部 rejected 说明与记忆矛盾（换固件/换车同一身份），照常全试。
         val allRejected = rest.isNotEmpty() && rest.all { it in entry.rejected }
@@ -134,7 +158,7 @@ object MfiLengthMemory {
         val normal = rest.filter { it !in silent && it !in rejected }
         val silentOrdered = rest.filter { it in silent }
         val rejectedOrdered = rest.filter { it in rejected }
-        return (listOfNotNull(entry.succeeded) + normal + silentOrdered + rejectedOrdered).distinct()
+        return (listOfNotNull(succeeded) + normal + silentOrdered + rejectedOrdered).distinct()
     }
 
     // ---- 内部 ----

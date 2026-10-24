@@ -599,7 +599,8 @@ class Iap2SenderSession(
                 if (frame == null) {
                     if (!channel.isAlive) {
                         log("iap2 MFi 挑战期间链路断开（${size}B，对端不接受该长度）——记入该车机被拒档位")
-                        MfiLengthMemory.recordRejected(context, receiverKey, size)
+                        // 硬拒绝：链路级证据，推翻「该长度=上次成功」的记忆（防误记锁死）
+                        MfiLengthMemory.recordHardRejected(context, receiverKey, size)
                         return
                     }
                     continue
