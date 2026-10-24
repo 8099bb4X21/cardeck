@@ -97,6 +97,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchLog: androidx.appcompat.widget.SwitchCompat
     private lateinit var logText: TextView
     private lateinit var snackbar: TextView
+    private lateinit var appVersionFooter: TextView
 
     // ---- 英雄卡状态机（1s 轮询 SessionController 对账）----
     private var heroState: HeroState? = null
@@ -554,6 +555,8 @@ class MainActivity : AppCompatActivity() {
         // 旋转/重建：沿用原倒计时截止时刻（onResume 据此续弹）
         disclaimerDeadlineAt = savedInstanceState?.getLong(KEY_DISCLAIMER_DEADLINE, 0L) ?: 0L
 
+        appVersionFooter = findViewById(R.id.appVersionFooter)
+        appVersionFooter.text = "CarDeck v${BuildConfig.VERSION_NAME}"
         deviceSubtitle = findViewById(R.id.deviceSubtitle)
         shizukuChip = findViewById(R.id.shizukuChip)
         shizukuDesc = findViewById(R.id.shizukuDesc)

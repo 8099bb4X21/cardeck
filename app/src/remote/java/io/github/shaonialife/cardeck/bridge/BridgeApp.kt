@@ -3,6 +3,7 @@ package io.github.shaonialife.cardeck.bridge
 import android.os.Handler
 import android.os.Looper
 import io.github.shaonialife.cardeck.SenderApp
+import io.github.shaonialife.cardeck.ui.ScreenDimmer
 import io.github.shaonialife.cardeck.util.Bg
 import io.github.shaonialife.cardeck.util.DebugFileLog
 
@@ -16,7 +17,10 @@ class BridgeApp : SenderApp() {
 
     override fun onCreate() {
         super.onCreate()
-        DebugFileLog.append(this, "BRIDGE: 远程调试变体启动（${io.github.shaonialife.cardeck.BuildConfig.VERSION_NAME}）")
+        // 远程排障需要实时看手机屏幕：自动假息屏/暗幕（45s 无操作黑屏）在此变体
+        // 一律禁用，只保留常亮；手动假息屏不受影响（2026-10-24 用户要求）。
+        ScreenDimmer.autoDimAllowed = false
+        DebugFileLog.append(this, "BRIDGE: 远程调试变体启动（${io.github.shaonialife.cardeck.BuildConfig.VERSION_NAME}，自动暗幕已禁用）")
         // 断连对用户可见：悬浮提示 + 设置页状态行的自动重连倒计时（2026-10-22
         // 用户要求）。恢复时短提示收口，反复震荡由悬浮窗单例自然去重（新弹覆盖旧弹）。
         BridgeClient.connectionEvents = { connected ->

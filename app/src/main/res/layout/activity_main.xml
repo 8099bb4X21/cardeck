@@ -3,6 +3,7 @@
      结构：英雄卡（连接状态+主操作）→ 连接准备 → 车机显示 → 高级(折叠) → 日志(折叠)。
      不引入 Material 组件库：卡片/按钮/开关样式全部用 shape/selector 自绘。 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/m3_surface">
@@ -1384,6 +1385,16 @@
                 android:text="连接由前台服务保活 · 退出本界面不影响会话"
                 android:textColor="#576767"
                 android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/appVersionFooter"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:gravity="center"
+                android:textColor="#47565A"
+                android:textSize="10.5sp"
+                tools:text="CarDeck v0.0.0" />
             </LinearLayout>
             </LinearLayout>
         </LinearLayout>

@@ -37,6 +37,15 @@ object ScreenDimmer {
     @Volatile
     var enabled: Boolean = true
 
+    /**
+     * 自动暗幕总开关（45s 无操作假息屏/盖暗幕）。remote 调试变体在 Application
+     * 启动时置 false——排障需要实时看手机屏幕，「过一会儿黑屏」恰好挡住正在排查的
+     * 现场（2026-10-24 用户要求）；常亮不受影响，手动假息屏（[enterDimNow] 的
+     * force 路径）也不受影响。
+     */
+    @Volatile
+    var autoDimAllowed: Boolean = true
+
     private var appContext: Context? = null
     private var windowManager: WindowManager? = null
     private var handler: Handler? = null
@@ -214,6 +223,8 @@ object ScreenDimmer {
     private fun showDim(force: Boolean = false) {
         // 自动路径必须有活跃会话：会话已结束（尤其车机侧断开）时绝不弹暗幕
         if (!force && !shouldAutoDim(enabled, sessionActive, isAttached())) return
+        // remote 调试变体：自动假息屏/暗幕一律不排程（排障要看屏幕），手动路径不受限
+        if (!force && !autoDimAllowed) return
         val ctx = appContext
         if (ctx == null) {
             android.util.Log.w("ScreenDimmer", "showDim: appContext 为空（attach 未执行）")
