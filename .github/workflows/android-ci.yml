@@ -92,10 +92,12 @@ jobs:
           echo "本次版本：$VERSION（versionCode = base*10000 + ${GITHUB_RUN_NUMBER}）"
 
       # 版本号由 build.gradle.kts 按同一规则计算（见文件里的 buildNumber），这里只传 run_number
+      # 任务名已 flavor 化（bridge 维度：standard / remote），这里只出日常用的 standard 包；
+      # 需要远程调试包时改成 assembleStandardRelease assembleRemoteRelease
       - name: 构建 Release APK
         env:
           BUILD_NUMBER: ${{ github.run_number }}
-        run: ./gradlew :app:assembleRelease "-Pcardeck.buildNumber=$BUILD_NUMBER" --stacktrace
+        run: ./gradlew :app:assembleStandardRelease "-Pcardeck.buildNumber=$BUILD_NUMBER" --stacktrace
 
       - name: 校验签名并打包
         id: package
@@ -104,7 +106,8 @@ jobs:
           EXPECTED_CERT: ${{ secrets.EXPECTED_CERT_SHA256 }}
         run: |
           set -eu
-          APK=app/build/outputs/apk/release/app-release.apk
+          # flavor 化后的产物路径带 flavor 段（见 AGENTS.md「发布」一节）
+          APK=app/build/outputs/apk/standard/release/app-standard-release.apk
           test -f "$APK" || { echo "::error::未找到 $APK"; exit 1; }
 
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
@@ -177,8 +180,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # 放在出包之后：单测挂了本次运行标红，但 APK 仍可下载
+      # 任务名同样已 flavor 化（testStandardDebugUnitTest / testRemoteDebugUnitTest）
       - name: 单元测试
-        run: ./gradlew :app:testDebugUnitTest --stacktrace
+        run: ./gradlew :app:testStandardDebugUnitTest --stacktrace
 
       - name: 上传测试报告（失败时便于定位）
         if: failure()
